@@ -7,6 +7,7 @@ class SaleType(str, Enum):
     OPEN_AUCTION = "open_auction"
     CLOSED_AUCTION = "closed_auction"
     FIXED_PRICE = "fixed_price"
+    DISPLAYED_AUCTION_PRICE = "displayed_auction_price"
 
 
 class AuctionStatus(str, Enum):
@@ -32,3 +33,4 @@ class PriceType(str, Enum):
     CLOSING_BID = "closing_bid"
     FIXED_PRICE = "fixed_price"
     CONFIRMED_SALE_PRICE = "confirmed_sale_price"
+    DISPLAYED_AUCTION_PRICE = "displayed_auction_price"

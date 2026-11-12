@@ -1,81 +1,45 @@
 
-"""Parser for individual Exleasingcar vehicle pages."""
+"""Classify auction bidding modes and extract public auction prices."""
 
 from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from decimal import Decimal
 
 from bs4 import BeautifulSoup, Tag
 
-from .models import PriceType
+from .models import PriceType, SaleType
 from .parsers import PriceObservation, clean_text, parse_amount
 
 
 @dataclass(frozen=True, slots=True)
 class ParsedVehicleDetail:
-    """Values extracted from an individual vehicle page."""
+    """Auction mode and publicly displayed auction price."""
 
     source_car_id: str | None
+    sale_type: SaleType | None
+    bidding_mode_classes: tuple[str, ...]
+    displayed_auction_price: PriceObservation | None
+    is_hot_bid: bool
 
-    # Raw source value. Not automatically treated as a leading bid.
-    maximum_bid_value: Decimal | None
-    maximum_bid_currency: str | None
-    maximum_bid_raw: str | None
+    @property
+    def should_monitor(self) -> bool:
+        """Only public open auctions belong to the main monitor."""
 
-    # The user's own bid, explicitly separated from market prices.
-    own_bid: PriceObservation | None
-
-    # Value entered in the bid form, not an actual market observation.
-    bid_input_amount: Decimal | None
-    bid_input_currency: str | None
-    bid_input_raw: str | None
-
-
-def find_field(
-    soup: BeautifulSoup,
-    field_name: str,
-) -> Tag | None:
-    """Find a field by its id, name or CSS class."""
-
-    for tag in soup.find_all(True):
-        if tag.get("id") == field_name:
-            return tag
-
-        if tag.get("name") == field_name:
-            return tag
-
-        classes = tag.get("class", [])
-
-        if field_name in classes:
-            return tag
-
-    return None
-
-
-def read_field_value(tag: Tag | None) -> str | None:
-    """Read a value from an input or a visible HTML element."""
-
-    if tag is None:
-        return None
-
-    if tag.has_attr("value"):
-        value = str(tag.get("value", "")).strip()
-        return value or None
-
-    if tag.has_attr("data-value"):
-        value = str(tag.get("data-value", "")).strip()
-        return value or None
-
-    return clean_text(tag)
+        return self.sale_type is SaleType.OPEN_AUCTION
 
 
 def detect_car_id(
     soup: BeautifulSoup,
-    page_url: str | None,
+    page_url: str | None = None,
 ) -> str | None:
-    """Detect vehicle ID from URL or known field names."""
+    """Find the vehicle ID from the page or URL."""
+
+    for tag in soup.find_all(True):
+        car_id = tag.get("car-id")
+
+        if car_id:
+            return str(car_id).strip()
 
     if page_url:
         match = re.search(r"/auto-details/(\d+)", page_url)
@@ -83,43 +47,96 @@ def detect_car_id(
         if match:
             return match.group(1)
 
-    pattern = re.compile(
-        r"(?:maximum_bid2|my_bid2|bid)_(\d+)"
-    )
-
     for tag in soup.find_all(True):
-        attributes = [
-            tag.get("id"),
-            tag.get("name"),
-            *tag.get("class", []),
-        ]
+        element_id = str(tag.get("id", ""))
 
-        for attribute in attributes:
-            if attribute is None:
-                continue
+        match = re.fullmatch(
+            r"(?:auto_body|auto)_(\d+)",
+            element_id,
+        )
 
-            match = pattern.fullmatch(str(attribute))
-
-            if match:
-                return match.group(1)
+        if match:
+            return match.group(1)
 
     return None
 
 
-def extract_money(
-    raw_value: str | None,
-) -> tuple[Decimal | None, str | None]:
-    """Parse a monetary value while retaining its original source separately."""
+def find_bids_container(
+    soup: BeautifulSoup,
+    car_id: str | None,
+) -> Tag | None:
+    """Find the bidding block belonging to this vehicle."""
 
-    if raw_value is None:
-        return None, None
+    candidates: list[Tag] = []
 
-    parsed = parse_amount(raw_value)
+    for tag in soup.find_all("div", class_=True):
+        classes = list(tag.get("class", []))
 
-    if parsed is None:
-        return None, None
+        if "bids" not in classes:
+            continue
 
-    return parsed
+        if car_id and f"bids_{car_id}" in classes:
+            return tag
+
+        candidates.append(tag)
+
+    if len(candidates) == 1:
+        return candidates[0]
+
+    return None
+
+
+def classify_sale_type(
+    bids_container: Tag | None,
+) -> SaleType | None:
+    """Classify the bidding mechanism using its actual CSS classes."""
+
+    if bids_container is None:
+        return None
+
+    classes = set(bids_container.get("class", []))
+
+    if "open" in classes:
+        return SaleType.OPEN_AUCTION
+
+    if "closed" in classes:
+        return SaleType.CLOSED_AUCTION
+
+    return None
+
+
+def has_hot_bid_marker(soup: BeautifulSoup) -> bool:
+    """Detect the HOT BID marker."""
+
+    if soup.select_one(".hotbid-final") is not None:
+        return True
+
+    for image in soup.find_all("img"):
+        alt = str(image.get("alt", "")).casefold()
+
+        if "hot bid" in alt:
+            return True
+
+    return False
+
+
+def find_field(
+    container: Tag,
+    field_name: str,
+) -> Tag | None:
+    """Find a source field inside the bidding block."""
+
+    for tag in container.find_all(True):
+        if tag.get("id") == field_name:
+            return tag
+
+        if tag.get("name") == field_name:
+            return tag
+
+        if field_name in tag.get("class", []):
+            return tag
+
+    return None
 
 
 def parse_vehicle_detail(
@@ -127,75 +144,66 @@ def parse_vehicle_detail(
     source_car_id: str | None = None,
     page_url: str | None = None,
 ) -> ParsedVehicleDetail:
-    """Parse known price-related fields from a vehicle detail page."""
+    """Parse a vehicle page without interpreting private bids as prices."""
 
     soup = BeautifulSoup(html, "html.parser")
 
     car_id = source_car_id or detect_car_id(soup, page_url)
 
-    if car_id is None:
-        return ParsedVehicleDetail(
-            source_car_id=None,
-            maximum_bid_value=None,
-            maximum_bid_currency=None,
-            maximum_bid_raw=None,
-            own_bid=None,
-            bid_input_amount=None,
-            bid_input_currency=None,
-            bid_input_raw=None,
+    bids_container = find_bids_container(soup, car_id)
+
+    sale_type = classify_sale_type(bids_container)
+
+    bidding_classes = (
+        tuple(bids_container.get("class", []))
+        if bids_container is not None
+        else ()
+    )
+
+    displayed_price = None
+
+    # Read a public auction price only for open auctions.
+    if sale_type is SaleType.OPEN_AUCTION and bids_container is not None:
+        price_tag = (
+            find_field(
+                bids_container,
+                f"maximum_bid_{car_id}",
+            )
+            if car_id
+            else None
         )
 
-    # 1. maximum_bid2: preserve its source meaning.
-    maximum_bid_tag = find_field(
-        soup,
-        f"maximum_bid2_{car_id}",
-    )
-    maximum_bid_raw = read_field_value(maximum_bid_tag)
-
-    maximum_bid_value, maximum_bid_currency = extract_money(
-        maximum_bid_raw
-    )
-
-    # 2. my_bid2: the user's own bid.
-    own_bid_tag = find_field(
-        soup,
-        f"my_bid2_{car_id}",
-    )
-    own_bid_raw = read_field_value(own_bid_tag)
-
-    own_bid = None
-
-    parsed_own_bid = extract_money(own_bid_raw)
-
-    if own_bid_raw is not None and parsed_own_bid[0] is not None:
-        own_amount, own_currency = parsed_own_bid
-
-        own_bid = PriceObservation(
-            price_type=PriceType.OWN_BID,
-            amount=own_amount,
-            currency=own_currency,
-            raw_text=own_bid_raw,
-            source_field=f"my_bid2_{car_id}",
+        current_price_tag = bids_container.select_one(
+            ".current-price"
         )
 
-    # 3. bid: form input, not an actual placed bid.
-    bid_input_tag = find_field(
-        soup,
-        f"bid_{car_id}",
-    )
-    bid_input_raw = read_field_value(bid_input_tag)
+        raw_price = (
+            clean_text(current_price_tag)
+            or clean_text(price_tag)
+        )
 
-    bid_input_amount, bid_input_currency = extract_money(
-        bid_input_raw
-    )
+        if raw_price:
+            parsed = parse_amount(raw_price)
+
+            if parsed is not None:
+                amount, currency = parsed
+
+                displayed_price = PriceObservation(
+                    price_type=PriceType.DISPLAYED_AUCTION_PRICE,
+                    amount=amount,
+                    currency=currency,
+                    raw_text=raw_price,
+                    source_field=(
+                        f"maximum_bid_{car_id}"
+                        if price_tag is not None and car_id
+                        else "current-price"
+                    ),
+                )
 
     return ParsedVehicleDetail(
         source_car_id=car_id,
-        maximum_bid_value=maximum_bid_value,
-        maximum_bid_currency=maximum_bid_currency,
-        maximum_bid_raw=maximum_bid_raw,
-        own_bid=own_bid,
-        bid_input_amount=bid_input_amount,
-        bid_input_currency=bid_input_currency,
-        bid_input_raw=bid_input_raw,
+        sale_type=sale_type,
+        bidding_mode_classes=bidding_classes,
+        displayed_auction_price=displayed_price,
+        is_hot_bid=has_hot_bid_marker(soup),
     )
