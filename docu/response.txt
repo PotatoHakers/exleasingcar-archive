@@ -1,0 +1,4 @@
+
+ 
+
+{"19655238":{"operator_fee":"209","HUB_SO_dedamoji":0,"trader_fee":0,"supplier_fee":180,"auction_fee":139,"user_offer":0,"actual_user_offer":0,"text_minimali_kaina":7500,"text_orientacine_kaina":7500,"code":3916088063,"car_id":"19655238","css":[],"highest_offer":0,"aukciono_tipas":"0","aukciono_tipas2":"","car_auction":"\u0421\u0435\u0433\u043e\u0434\u043d\u044f 09:00","car_auction_time":{"image":"","text_aukciono_pabaigos_laikas":"<div class=\"text_aukciono_pabaigos_laikas\">\u041a\u043e\u043d\u0435\u0446: <\/div>","aukciono_pabaigos_laikas":"<div class=\"car_auction_end_date car_auction_end_date_19655238\" id=\"car_auction_end_date_19655238\">\u0421\u0435\u0433\u043e\u0434\u043d\u044f 09:00<\/div>","laikas":"2026-11-13 09:00","hotbid_laikas":1794553200,"type":""},"liko_s":775,"transportation_fee":1350,"formin_fee":"49","actual_car_price":"0"}}
