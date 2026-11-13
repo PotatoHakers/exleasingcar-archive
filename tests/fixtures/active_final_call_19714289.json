@@ -1,0 +1,18 @@
+
+{
+  "19714289": {
+    "user_offer": 18400,
+    "highest_offer": "18300",
+    "actual_user_offer": 0,
+    "car_id": "19714289",
+    "aukciono_tipas": "1",
+    "car_auction_time": {
+      "image": "final-call-active",
+      "type": "final-call",
+      "liveBidding": "0",
+      "endDate": "2026-11-12 13:19:57",
+      "remainingSeconds": 20
+    },
+    "actual_car_price": "0"
+  }
+}

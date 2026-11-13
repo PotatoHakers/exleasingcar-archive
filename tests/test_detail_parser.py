@@ -44,7 +44,7 @@ def test_open_auction_price_is_extracted():
     assert result.should_monitor is True
 
     assert result.displayed_auction_price is not None
-    assert result.displayed_auction_price.amount == Decimal("63900")
+    assert result.displayed_auction_price.amount == Decimal(63900)
     assert result.displayed_auction_price.currency == "EUR"
 
     assert (

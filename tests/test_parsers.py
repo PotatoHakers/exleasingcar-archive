@@ -82,7 +82,7 @@ def test_parse_auction_page_and_keep_price_types_separate():
     assert bmw.status is VehicleStatus.COMPLETED
 
     assert bmw.current_price is not None
-    assert bmw.current_price.amount == Decimal("6100")
+    assert bmw.current_price.amount == Decimal(6100)
     assert bmw.current_price.currency == "EUR"
     assert bmw.current_price.price_type is PriceType.CURRENT_PRICE
 
