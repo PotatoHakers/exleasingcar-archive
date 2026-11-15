@@ -16,6 +16,7 @@ htmlcov/
 # Local data and downloaded pages
 data/raw/
 data/exports/
+data/browser_profile/
 *.sqlite3
 
 # IDE

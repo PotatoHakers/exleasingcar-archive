@@ -42,6 +42,7 @@ def test_parse_auction_catalog_lot_identifiers():
     assert len(result.lots) == 1
     lot = result.lots[0]
     assert lot.source_car_id == "19702473"
+    assert lot.displayed_title == "Mercedes-Benz E-KLASSE 220 d 4Matic T 9G-TRONIC"
     assert lot.displayed_lot_reference == "2258673/41"
     assert lot.listing_code_attribute == "2352500179"
 
