@@ -119,3 +119,25 @@ def test_extract_vehicle_detail_urls_rejects_onclick_with_mismatched_car_id():
     """
 
     assert extract_vehicle_detail_urls(html, "https://www.exleasingcar.com") == {}
+
+
+def test_api_response_recorder_reports_invalid_json():
+    from exleasingcar_archive.collector import ApiResponseRecorder
+
+    class FakeResponse:
+        url = "https://www.exleasingcar.com/ajax_update_car_form.v3.1.php"
+        ok = True
+        status = 200
+
+        def finished(self):
+            return None
+
+        def json(self):
+            raise ValueError("response body is not JSON")
+
+    recorder = ApiResponseRecorder()
+    recorder._on_response(FakeResponse())
+
+    assert recorder.responses == []
+    assert len(recorder.errors) == 1
+    assert "response body is not JSON" in recorder.errors[0]

@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 from collections.abc import Iterable
 from dataclasses import dataclass
+from html import unescape
 from urllib.parse import urljoin
 
 from bs4 import BeautifulSoup, Tag
@@ -32,8 +33,11 @@ class ParsedAuctionLotMetadata:
     """Identifiers visible on one vehicle card inside an auction catalogue."""
 
     source_car_id: str
+    displayed_title: str | None
     displayed_lot_reference: str | None
     listing_code_attribute: str | None
+    make_label: str | None = None
+    mileage_km: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -42,6 +46,16 @@ class ParsedAuctionCatalogMetadata:
 
     exleasingcar_auction_id: str | None
     lots: tuple[ParsedAuctionLotMetadata, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class ParsedCatalogPagination:
+    """Pagination links advertised by one saved auction-catalogue page."""
+
+    current_page_url: str | None
+    current_page_number: int | None
+    page_urls: tuple[str, ...]
+    next_page_url: str | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -56,6 +70,9 @@ class ParsedVehicleMetadata:
     location_country_name: str | None
     last_registration_country_code: str | None
     last_registration_country_name: str | None
+    chassis_number: str | None = None
+    chassis_number_fragment: str | None = None
+    chassis_number_masked: bool | None = None
 
 
 def _text(tag: Tag | None) -> str | None:
@@ -79,8 +96,18 @@ def _detect_car_id(soup: BeautifulSoup, page_url: str | None) -> str | None:
         car_id = tag.get("car-id")
         if car_id is not None and str(car_id).strip():
             return str(car_id).strip()
-    if page_url:
-        match = re.search(r"/auto-details/(\d+)", page_url)
+    candidate_urls = [page_url]
+    canonical = soup.select_one('link[rel="canonical"][href]')
+    if canonical is not None:
+        candidate_urls.append(str(canonical.get("href")))
+    og_url = soup.select_one('meta[property="og:url"][content]')
+    if og_url is not None:
+        candidate_urls.append(str(og_url.get("content")))
+
+    for candidate_url in candidate_urls:
+        if not candidate_url:
+            continue
+        match = re.search(r"/auto-details/(\d+)", candidate_url)
         if match:
             return match.group(1)
     for tag in soup.find_all(True):
@@ -253,6 +280,49 @@ def _catalog_card_candidates(soup: BeautifulSoup) -> Iterable[Tag]:
         yield candidate
 
 
+def _parse_mileage_km(card: Tag) -> int | None:
+    """Read an unmasked kilometre reading from a catalogue card."""
+    for element in card.select(".mb-2.px-2"):
+        value = _text(element) or ""
+        match = re.search(r"(\d[\d\s.,]*)\s*km\b", value, re.IGNORECASE)
+        if match is None:
+            continue
+        digits = re.sub(r"\D", "", match.group(1))
+        if digits:
+            return int(digits)
+    return None
+
+
+def _make_label(card: Tag) -> str | None:
+    image = card.select_one("img.card-img-top[alt]")
+    if image is None:
+        return None
+    value = str(image.get("alt", "")).strip()
+    return value or None
+
+
+def _parse_chassis_number(
+    value_cell: Tag | None,
+) -> tuple[str | None, str | None, bool | None]:
+    """Return a complete chassis number or a visible fragment when masked."""
+    value = _text(value_cell)
+    if not value:
+        return None, None, None
+
+    is_masked = bool(
+        re.search(r"[*•…]|\.{2,}|\bhidden\b", value, re.IGNORECASE)
+    )
+    visible_parts = re.findall(r"[A-Z0-9]+", value.upper())
+    fragment = "".join(visible_parts) or None
+    if is_masked:
+        return None, fragment, True
+
+    normalized = re.sub(r"[^A-Z0-9]", "", value.upper())
+    if not normalized:
+        return None, None, False
+    return normalized, None, False
+
+
 def parse_auction_catalog_metadata(
     html: str,
     page_url: str | None = None,
@@ -264,7 +334,8 @@ def parse_auction_catalog_metadata(
     stored separately as an opaque listing identifier.
     """
     soup = BeautifulSoup(html, "html.parser")
-    auction_id = _auction_id_from_catalog(soup, page_url)
+    resolved_page_url = page_url or _saved_page_url(html)
+    auction_id = _auction_id_from_catalog(soup, resolved_page_url)
     lots: list[ParsedAuctionLotMetadata] = []
 
     for card in _catalog_card_candidates(soup):
@@ -282,14 +353,108 @@ def parse_auction_catalog_metadata(
         lots.append(
             ParsedAuctionLotMetadata(
                 source_car_id=car_id,
+                displayed_title=_text(card.select_one("h5, .car-title")),
                 displayed_lot_reference=displayed_reference,
                 listing_code_attribute=listing_code,
+                make_label=_make_label(card),
+                mileage_km=_parse_mileage_km(card),
             )
         )
 
     return ParsedAuctionCatalogMetadata(
         exleasingcar_auction_id=auction_id,
         lots=tuple(lots),
+    )
+
+
+def _saved_page_url(html: str) -> str | None:
+    """Read the source URL embedded by browsers in saved HTML comments."""
+    match = re.search(
+        r"saved from url=\(\d+\)(.*?)-->",
+        html[:8192],
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    if match is None:
+        return None
+    value = unescape(match.group(1).strip())
+    return value or None
+
+
+def parse_catalog_pagination(
+    html: str,
+    page_url: str | None = None,
+) -> ParsedCatalogPagination:
+    """Discover catalogue page links without assuming a fixed page count.
+
+    Exleasingcar currently exposes numeric ``pagination-page`` anchors and a
+    separate ``pagination-next`` arrow. The arrow can repeat the URL of the
+    next numbered page, so links are de-duplicated. The active numeric link is
+    used as the current page URL; this is more reliable than the browser's
+    saved-from comment, which may omit the ``show-20`` route segment.
+    """
+    soup = BeautifulSoup(html, "html.parser")
+    base_url = page_url or _saved_page_url(html) or "https://www.exleasingcar.com/"
+    pagination = soup.select_one("nav ul.pagination")
+    if pagination is None:
+        return ParsedCatalogPagination(
+            current_page_url=page_url or _saved_page_url(html),
+            current_page_number=None,
+            page_urls=(),
+            next_page_url=None,
+        )
+
+    page_urls: list[str] = []
+    numbered_links: list[tuple[int, str]] = []
+    current_page_url: str | None = None
+    current_page_number: int | None = None
+
+    for anchor in pagination.select("a[href]"):
+        href = str(anchor.get("href", "")).strip()
+        if not href:
+            continue
+        absolute_url = urljoin(base_url, href)
+        classes = {str(value) for value in anchor.get("class", [])}
+        label = _text(anchor) or ""
+        number_match = re.fullmatch(r"\d+", label)
+        if "pagination-page" in classes and number_match:
+            page_number = int(label)
+            numbered_links.append((page_number, absolute_url))
+            if absolute_url not in page_urls:
+                page_urls.append(absolute_url)
+            if "current" in classes:
+                current_page_url = absolute_url
+                current_page_number = page_number
+        elif "pagination-next" in classes and absolute_url not in page_urls:
+            page_urls.append(absolute_url)
+
+    if current_page_url is None and page_url:
+        current_page_url = page_url
+    if current_page_number is None and current_page_url:
+        tail_match = re.search(r"/(\d+)/?$", current_page_url)
+        if tail_match:
+            current_page_number = int(tail_match.group(1))
+
+    next_page_url: str | None = None
+    next_anchor = pagination.select_one("a.pagination-next[href]")
+    if isinstance(next_anchor, Tag):
+        candidate = urljoin(base_url, str(next_anchor.get("href")))
+        if candidate != current_page_url:
+            next_page_url = candidate
+
+    if next_page_url is None and current_page_number is not None:
+        future_links = [
+            (number, url)
+            for number, url in numbered_links
+            if number > current_page_number
+        ]
+        if future_links:
+            next_page_url = min(future_links, key=lambda item: item[0])[1]
+
+    return ParsedCatalogPagination(
+        current_page_url=current_page_url,
+        current_page_number=current_page_number,
+        page_urls=tuple(page_urls),
+        next_page_url=next_page_url,
     )
 
 
@@ -369,6 +534,11 @@ def parse_vehicle_metadata(
         else None
     )
 
+    chassis_cell = _find_labeled_value(soup, {"Номер кузова", "Номер шасси"})
+    chassis_number, chassis_fragment, chassis_masked = _parse_chassis_number(
+        chassis_cell
+    )
+
     return ParsedVehicleMetadata(
         source_car_id=car_id,
         exleasingcar_auction_id=auction_id,
@@ -378,4 +548,7 @@ def parse_vehicle_metadata(
         location_country_name=location_country_name,
         last_registration_country_code=registration_country_code,
         last_registration_country_name=registration_country_name,
+        chassis_number=chassis_number,
+        chassis_number_fragment=chassis_fragment,
+        chassis_number_masked=chassis_masked,
     )

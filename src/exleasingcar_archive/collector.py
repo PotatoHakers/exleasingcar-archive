@@ -32,6 +32,12 @@ from .metadata_parser import (
     parse_vehicle_metadata,
 )
 
+try:
+    from playwright.sync_api import Error as PlaywrightError
+except ImportError:  # Keep HTML parser tests usable without the optional browser extra.
+    class PlaywrightError(RuntimeError):
+        """Fallback exception type used only when Playwright is unavailable."""
+
 AUCTION_LIST_URL = "https://www.exleasingcar.com/ru/авто-аукционы"
 API_ENDPOINT_MARKER = "ajax_update_car_form.v3.1.php"
 DEFAULT_DATABASE = Path("data/fresh_api_test.sqlite3")
@@ -78,7 +84,7 @@ class ApiResponseRecorder:
         try:
             response.finished()
             payload = response.json()
-        except Exception as exc:  # Playwright response/body may disappear on navigation.
+        except (PlaywrightError, ValueError) as exc:  # Browser failures or invalid JSON.
             self.errors.append(f"Could not read JSON from {response.url}: {exc}")
             return
         if not isinstance(payload, Mapping):
@@ -280,7 +286,7 @@ class ExleasingcarCollector:
         try:
             page.goto(detail_url, wait_until="domcontentloaded", timeout=45_000)
             _wait_for_dynamic_content(page)
-        except Exception as exc:
+        except PlaywrightError as exc:
             print(f"  Detail page {car_id} failed: {exc}")
             return False
 
@@ -355,7 +361,7 @@ class ExleasingcarCollector:
             try:
                 page.goto(current_url, wait_until="domcontentloaded", timeout=45_000)
                 _wait_for_dynamic_content(page)
-            except Exception as exc:
+            except PlaywrightError as exc:
                 print(f"  Catalogue page failed ({current_url}): {exc}")
                 break
 

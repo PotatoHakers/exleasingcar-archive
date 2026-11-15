@@ -28,6 +28,7 @@ class LotMetadata:
 
     displayed_lot_reference: str | None = None
     listing_code_attribute: str | None = None
+    mileage_km: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -38,6 +39,7 @@ class IngestionSummary:
     lots_upserted: int
     prices_inserted: int
     events_inserted: int
+    price_references_inserted: int = 0
 
 
 def store_car_updates(
@@ -99,6 +101,7 @@ def store_car_updates(
 
     prices_inserted = 0
     events_inserted = 0
+    price_references_inserted = 0
     lots_upserted = 0
 
     for car_id, car, lot in validated_updates:
@@ -107,11 +110,12 @@ def store_car_updates(
             auction.exleasingcar_auction_id,
             displayed_lot_reference=lot.displayed_lot_reference,
             listing_code_attribute=lot.listing_code_attribute,
+            mileage_km=lot.mileage_km,
             observed_at=timestamp,
         )
         lots_upserted += 1
 
-        if car.highest_offer is not None:
+        if car.highest_offer is not None and car.highest_offer > 0:
             inserted = database.record_price_observation(
                 car_id,
                 car.highest_offer,
@@ -121,6 +125,18 @@ def store_car_updates(
                 listing_code_attribute=lot.listing_code_attribute,
             )
             prices_inserted += int(inserted)
+
+        if car.minimum_price is not None or car.indicative_price is not None:
+            inserted = database.record_price_reference_observation(
+                car_id,
+                minimum_price=car.minimum_price,
+                indicative_price=car.indicative_price,
+                observed_at=timestamp,
+                exleasingcar_auction_id=auction.exleasingcar_auction_id,
+                displayed_lot_reference=lot.displayed_lot_reference,
+                listing_code_attribute=lot.listing_code_attribute,
+            )
+            price_references_inserted += int(inserted)
 
         # A False final_call_active value alone is not enough to create an
         # event: the API parser currently uses False when timer data is absent.
@@ -156,4 +172,5 @@ def store_car_updates(
         lots_upserted=lots_upserted,
         prices_inserted=prices_inserted,
         events_inserted=events_inserted,
+        price_references_inserted=price_references_inserted,
     )
