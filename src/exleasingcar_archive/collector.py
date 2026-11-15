@@ -85,7 +85,11 @@ class ApiResponseRecorder:
             response.finished()
             payload = response.json()
         except (PlaywrightError, ValueError) as exc:  # Browser failures or invalid JSON.
-            self.errors.append(f"Could not read JSON from {response.url}: {exc}")
+            content_type = getattr(response, "headers", {}).get("content-type", "unknown")
+            self.errors.append(
+                f"Could not read JSON from {response.url} "
+                f"(HTTP {response.status}, content-type={content_type}): {exc}"
+            )
             return
         if not isinstance(payload, Mapping):
             self.errors.append(f"Unexpected JSON response shape: {response.url}")
@@ -208,6 +212,7 @@ class ExleasingcarCollector:
         self.prices_inserted = 0
         self.price_references_inserted = 0
         self.events_inserted = 0
+        self._manual_reauth_prompted = False
 
     def _save_html(self, path: Path, html: str) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -274,6 +279,39 @@ class ExleasingcarCollector:
             result[lot.source_car_id] = _lot_metadata(lot)
         return result
 
+    def _pause_for_manual_reauthentication(
+        self,
+        page: Any,
+        detail_url: str,
+        car_id: str,
+    ) -> bool:
+        """Pause an active browser for a user-driven sign-in, then retry a detail URL.
+
+        This does not refresh or bypass the site's session timeout. It keeps the
+        same visible browser context open so the user can sign in normally.
+        """
+        if self._manual_reauth_prompted:
+            return False
+
+        self._manual_reauth_prompted = True
+        print(
+            f"  Vehicle {car_id} did not load as a detail page. "
+            f"Current browser URL: {page.url}."
+        )
+        print(
+            "  The auction list may be public while vehicle details require an "
+            "active session. Sign in manually in this Chromium window if needed."
+        )
+        input("After confirming the account is signed in, press Enter to retry this vehicle: ")
+
+        try:
+            page.goto(detail_url, wait_until="domcontentloaded", timeout=45_000)
+            _wait_for_dynamic_content(page)
+        except PlaywrightError as exc:
+            print(f"  Retry after sign-in failed for {car_id}: {exc}")
+            return False
+        return True
+
     def _enrich_vehicle_detail(
         self,
         auction: AuctionContext,
@@ -291,13 +329,26 @@ class ExleasingcarCollector:
             return False
 
         html = page.content()
-        self._save_html(snapshot_dir / f"vehicle_{_safe_component(car_id)}.html", html)
         vehicle = parse_vehicle_metadata(html, page.url)
+        if (
+          vehicle.source_car_id != car_id
+            and self._pause_for_manual_reauthentication(page, detail_url, car_id)  
+        ):
+            html = page.content()
+            vehicle = parse_vehicle_metadata(html, page.url)
+
+        self._save_html(snapshot_dir / f"vehicle_{_safe_component(car_id)}.html", html)
         if vehicle.source_car_id != car_id:
             print(
-                f"  Skipped detail {car_id}: page ID is {vehicle.source_car_id!r}"
+                f"  Skipped detail {car_id}: expected page ID {car_id}, "
+                f"received {vehicle.source_car_id!r}; final URL: {page.url}; "
+                f"title: {page.title()!r}. Snapshot saved for inspection."
             )
             return False
+
+        # A successful detail load confirms that manual sign-in worked. Allow
+        # another re-authentication pause later if the server expires the session again.
+        self._manual_reauth_prompted = False
         if (
             vehicle.exleasingcar_auction_id is not None
             and vehicle.exleasingcar_auction_id != auction.exleasingcar_auction_id
@@ -478,7 +529,6 @@ class ExleasingcarCollector:
         run_stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         snapshot_dir = self.raw_dir / run_stamp
         snapshot_dir.mkdir(parents=True, exist_ok=True)
-        profile_was_initialized = profile_dir.exists() and any(profile_dir.iterdir())
         profile_dir.mkdir(parents=True, exist_ok=True)
 
         pages_processed = 0
@@ -500,26 +550,19 @@ class ExleasingcarCollector:
                 auctions_html = page.content()
                 auctions = parse_auction_listings(auctions_html, page.url)
 
-                if not profile_was_initialized:
-                    print(
-                        "This is a new collector browser profile. Sign in manually "
-                        "in the opened browser window if Exleasingcar asks for it."
-                    )
-                    input("When the auction list is ready, press Enter to continue: ")
-                    page.goto(auction_list_url, wait_until="domcontentloaded", timeout=60_000)
-                    _wait_for_dynamic_content(page)
-                    auctions_html = page.content()
-                    auctions = parse_auction_listings(auctions_html, page.url)
-                elif not auctions:
-                    print(
-                        "No auction cards are visible. Sign in manually in the opened "
-                        "browser window, then return here."
-                    )
-                    input("After login, press Enter to retry the auction list: ")
-                    page.goto(auction_list_url, wait_until="domcontentloaded", timeout=60_000)
-                    _wait_for_dynamic_content(page)
-                    auctions_html = page.content()
-                    auctions = parse_auction_listings(auctions_html, page.url)
+                # The auction list itself may be public, so its successful load
+                # does not prove the protected vehicle pages will work. Give the
+                # user an explicit sign-in/confirmation point on every run.
+                print(
+                    "The auction list may be visible even when the account session "
+                    "has expired. Check the opened Chromium window and sign in "
+                    "manually if needed. If you are already signed in, just continue."
+                )
+                input("When the account is ready, press Enter to start collection: ")
+                page.goto(auction_list_url, wait_until="domcontentloaded", timeout=60_000)
+                _wait_for_dynamic_content(page)
+                auctions_html = page.content()
+                auctions = parse_auction_listings(auctions_html, page.url)
 
                 if not auctions:
                     raise RuntimeError(

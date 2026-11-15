@@ -141,3 +141,49 @@ def test_api_response_recorder_reports_invalid_json():
     assert recorder.responses == []
     assert len(recorder.errors) == 1
     assert "response body is not JSON" in recorder.errors[0]
+
+
+def test_manual_reauthentication_pauses_and_retries_same_detail_url(
+    monkeypatch,
+    tmp_path,
+):
+    from exleasingcar_archive import collector as collector_module
+    from exleasingcar_archive.collector import ExleasingcarCollector
+
+    class FakePage:
+        url = "https://www.exleasingcar.com/ru"
+
+        def __init__(self):
+            self.goto_calls = []
+
+        def goto(self, url, **kwargs):
+            self.goto_calls.append((url, kwargs))
+            self.url = url
+
+    prompts = []
+    monkeypatch.setattr("builtins.input", lambda prompt: prompts.append(prompt))
+    monkeypatch.setattr(
+        collector_module,
+        "_wait_for_dynamic_content",
+        lambda page: None,
+    )
+
+    collector = ExleasingcarCollector(database=None, raw_dir=tmp_path)
+    page = FakePage()
+    target = "https://www.exleasingcar.com/ru/auto-details/19694139"
+
+    assert collector._pause_for_manual_reauthentication(
+        page,
+        target,
+        "19694139",
+    ) is True
+    assert page.goto_calls[0][0] == target
+    assert len(prompts) == 1
+
+    # Avoid repeated terminal prompts for every remaining card during one run.
+    assert collector._pause_for_manual_reauthentication(
+        page,
+        target,
+        "19694139",
+    ) is False
+    assert len(prompts) == 1
