@@ -22,3 +22,6 @@ data/browser_profile/
 # IDE
 .idea/
 .vscode/
+
+# Other
+.html
