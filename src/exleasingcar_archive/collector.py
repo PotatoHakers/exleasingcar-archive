@@ -1,9 +1,10 @@
 """Collect auction snapshots through a manually authenticated Playwright browser.
 
-The collector deliberately does not automate sign-in, solve CAPTCHAs, or reuse
-cookies from the user's everyday browser profile. It opens its own persistent
-Chromium profile, where the user signs in manually once. Subsequent runs reuse
-that local profile until the website session expires.
+The collector uses its own persistent Chromium profile and retrieves the
+account credentials from the operating-system credential store via keyring.
+It performs the ordinary website login form and the site's visible
+"Continue" acknowledgement when the session expires. It does not solve
+CAPTCHAs, bypass additional verification, or extract passwords from Chrome.
 """
 
 from __future__ import annotations
@@ -43,6 +44,9 @@ API_ENDPOINT_MARKER = "ajax_update_car_form.v3.1.php"
 DEFAULT_DATABASE = Path("data/fresh_api_test.sqlite3")
 DEFAULT_PROFILE_DIR = Path("data/browser_profile")
 DEFAULT_RAW_DIR = Path("data/raw/collector")
+KEYRING_SERVICE = "exleasingcar-archive"
+KEYRING_USERNAME_KEY = "login"
+KEYRING_PASSWORD_KEY = "password"
 
 
 @dataclass(frozen=True, slots=True)
@@ -212,6 +216,8 @@ class ExleasingcarCollector:
         self.prices_inserted = 0
         self.price_references_inserted = 0
         self.events_inserted = 0
+        # Kept for compatibility with the previous manual-auth test helper.
+        # The normal collector flow now uses _authenticate instead.
         self._manual_reauth_prompted = False
 
     def _save_html(self, path: Path, html: str) -> None:
@@ -279,36 +285,259 @@ class ExleasingcarCollector:
             result[lot.source_car_id] = _lot_metadata(lot)
         return result
 
+    @staticmethod
+    def _page_body_text(page: Any) -> str:
+        try:
+            return page.locator("body").inner_text(timeout=5_000)
+        except PlaywrightError:
+            return ""
+
+    @classmethod
+    def _is_logged_in(cls, page: Any) -> bool:
+        """Detect the authenticated account header without relying on a user name."""
+        body_text = cls._page_body_text(page)
+        return bool(
+            re.search(
+                (
+                r"ID\s+(?:вашей\s+)?учетной\s+записи|"
+                r"\bLog\s*out\b|\bSign\s*out\b|Выйти"
+            ),
+                body_text,
+                re.IGNORECASE,
+            )
+        )
+
+    @staticmethod
+    def _first_visible(locator: Any) -> Any | None:
+        """Return the first visible element in a Playwright locator, if any."""
+        try:
+            for index in range(locator.count()):
+                candidate = locator.nth(index)
+                if candidate.is_visible():
+                    return candidate
+        except PlaywrightError:
+            return None
+        return None
+
+    @classmethod
+    def _click_visible_text(
+        cls,
+        page: Any,
+        pattern: re.Pattern[str],
+        *,
+        roles: tuple[str, ...] = ("button", "link"),
+    ) -> bool:
+        """Click the first visible button/link/text matching a known UI label."""
+        for role in roles:
+            try:
+                candidate = cls._first_visible(
+                    page.get_by_role(role, name=pattern)
+                )
+            except PlaywrightError:
+                candidate = None
+            if candidate is not None:
+                candidate.click(timeout=8_000)
+                return True
+
+        try:
+            candidate = cls._first_visible(page.get_by_text(pattern))
+        except PlaywrightError:
+            candidate = None
+        if candidate is not None:
+            candidate.click(timeout=8_000)
+            return True
+        return False
+
+    @classmethod
+    def _find_username_input(cls, page: Any, password_input: Any) -> Any | None:
+        """Find the username field in the same form as the password field."""
+        scope = page
+        try:
+            form = password_input.locator("xpath=ancestor::form[1]")
+            if form.count() and form.first.is_visible():
+                scope = form.first
+        except PlaywrightError:
+            scope = page
+
+        preferred_selectors = (
+            'input[autocomplete="username"]:visible',
+            'input[type="email"]:visible',
+            'input[name*="email" i]:visible',
+            'input[id*="email" i]:visible',
+            'input[name*="login" i]:visible',
+            'input[id*="login" i]:visible',
+            'input[name*="user" i]:visible',
+        )
+        for selector in preferred_selectors:
+            try:
+                candidate = cls._first_visible(scope.locator(selector))
+            except PlaywrightError:
+                candidate = None
+            if candidate is not None:
+                return candidate
+
+        # Some older Exleasingcar forms use a plain text input without semantic
+        # attributes. Exclude the vehicle-ID search field and password inputs.
+        try:
+            candidates = scope.locator('input[type="text"]:visible')
+            for index in range(candidates.count()):
+                candidate = candidates.nth(index)
+                attrs = " ".join(
+                    str(candidate.get_attribute(name) or "")
+                    for name in ("name", "id", "placeholder", "autocomplete")
+                ).casefold()
+                if "автомобил" in attrs or "vehicle" in attrs or "search" in attrs:
+                    continue
+                return candidate
+        except PlaywrightError:
+            return None
+        return None
+
+    @classmethod
+    def _click_continue_if_visible(cls, page: Any) -> bool:
+        """Acknowledge the site's post-login information dialog if it appears."""
+        continue_pattern = re.compile(r"^\s*Продолжить\b", re.IGNORECASE)
+        clicked = cls._click_visible_text(page, continue_pattern)
+        if clicked:
+            page.wait_for_timeout(1_500)
+        return clicked
+
+    def _load_login_credentials(self) -> tuple[str, str]:
+        try:
+            import keyring
+        except ImportError as exc:
+            raise RuntimeError(
+                "The keyring package is missing. Activate .venv and run: "
+                "python -m pip install keyring"
+            ) from exc
+
+        username = keyring.get_password(KEYRING_SERVICE, KEYRING_USERNAME_KEY)
+        password = keyring.get_password(KEYRING_SERVICE, KEYRING_PASSWORD_KEY)
+        if not username or not password:
+            raise RuntimeError(
+                "Exleasingcar credentials were not found in Windows Credential Manager. "
+                "Save them first using the instructions in README_AUTO_LOGIN.md."
+            )
+        return username, password
+
+    def _authenticate(self, page: Any, *, reason: str) -> bool:
+        """Perform the ordinary site login and its visible Continue acknowledgement."""
+        if self._is_logged_in(page):
+            return True
+
+        print(f"Authentication required: {reason}")
+        password_inputs = page.locator('input[type="password"]:visible')
+        password_input = self._first_visible(password_inputs)
+
+        if password_input is None:
+            login_pattern = re.compile(r"^\s*Войти\s*$", re.IGNORECASE)
+            if not self._click_visible_text(page, login_pattern):
+                raise RuntimeError(
+                    "The account is signed out, but the visible 'Войти' control "
+                    "was not found. The current page may have changed; inspect "
+                    f"the Chromium window. URL: {page.url}"
+                )
+            try:
+                page.wait_for_selector(
+                    'input[type="password"]:visible',
+                    state="visible",
+                    timeout=12_000,
+                )
+            except PlaywrightError as exc:
+                raise RuntimeError(
+                    "The login button was clicked, but the password form did not appear. "
+                    f"Current URL: {page.url}"
+                ) from exc
+            password_input = self._first_visible(
+                page.locator('input[type="password"]:visible')
+            )
+
+        if password_input is None:
+            raise RuntimeError("The visible password field could not be located.")
+
+        username, password = self._load_login_credentials()
+        username_input = self._find_username_input(page, password_input)
+        if username_input is None:
+            visible_inputs: list[str] = []
+            try:
+                inputs = page.locator("input:visible")
+                for index in range(inputs.count()):
+                    item = inputs.nth(index)
+                    visible_inputs.append(
+                        "type={}; name={}; id={}; placeholder={}; autocomplete={}".format(
+                            item.get_attribute("type"),
+                            item.get_attribute("name"),
+                            item.get_attribute("id"),
+                            item.get_attribute("placeholder"),
+                            item.get_attribute("autocomplete"),
+                        )
+                    )
+            except PlaywrightError:
+                pass
+            raise RuntimeError(
+                "The password field is visible, but the username/email field was "
+                "not identified. Visible input metadata (no values): "
+                + " | ".join(visible_inputs)
+            )
+
+        username_input.fill(username)
+        password_input.fill(password)
+
+        login_submit = re.compile(r"Войти\s+на\s+аукционы", re.IGNORECASE)
+        if not self._click_visible_text(page, login_submit, roles=("button",)):
+            # Some versions render the yellow form action as an input submit.
+            submit = self._first_visible(
+                page.locator('input[type="submit"][value*="Войти" i]:visible')
+            )
+            if submit is None:
+                raise RuntimeError(
+                    "Credentials were filled, but the 'Войти на аукционы' button "
+                    "was not found. No submit action was performed."
+                )
+            submit.click(timeout=8_000)
+
+        page.wait_for_timeout(2_000)
+        self._click_continue_if_visible(page)
+
+        if not self._is_logged_in(page):
+            body_text = self._page_body_text(page)
+            verification_requested = re.search(
+                r"captcha|recaptcha|подтвердите, что вы не робот",
+                body_text,
+                re.IGNORECASE,
+            )
+            if verification_requested:
+                raise RuntimeError(
+                    "The site requested an additional CAPTCHA/verification step. "
+                    "Complete it manually in Chromium; the collector will not bypass it."
+                )
+            raise RuntimeError(
+                "The login form was submitted, but the authenticated account header "
+                "was not detected. Check whether the site requires additional "
+                "account/document verification."
+            )
+
+        print("Exleasingcar account session confirmed.")
+        return True
+
     def _pause_for_manual_reauthentication(
         self,
         page: Any,
         detail_url: str,
         car_id: str,
     ) -> bool:
-        """Pause an active browser for a user-driven sign-in, then retry a detail URL.
-
-        This does not refresh or bypass the site's session timeout. It keeps the
-        same visible browser context open so the user can sign in normally.
-        """
+        """Legacy manual retry hook retained for compatibility with older tests."""
         if self._manual_reauth_prompted:
             return False
-
         self._manual_reauth_prompted = True
-        print(
-            f"  Vehicle {car_id} did not load as a detail page. "
-            f"Current browser URL: {page.url}."
+        input(
+            f"Sign in manually for vehicle {car_id}, then press Enter to retry: "
         )
-        print(
-            "  The auction list may be public while vehicle details require an "
-            "active session. Sign in manually in this Chromium window if needed."
-        )
-        input("After confirming the account is signed in, press Enter to retry this vehicle: ")
-
         try:
             page.goto(detail_url, wait_until="domcontentloaded", timeout=45_000)
             _wait_for_dynamic_content(page)
         except PlaywrightError as exc:
-            print(f"  Retry after sign-in failed for {car_id}: {exc}")
+            print(f"  Retry after manual sign-in failed for {car_id}: {exc}")
             return False
         return True
 
@@ -330,12 +559,37 @@ class ExleasingcarCollector:
 
         html = page.content()
         vehicle = parse_vehicle_metadata(html, page.url)
-        if (
-          vehicle.source_car_id != car_id
-            and self._pause_for_manual_reauthentication(page, detail_url, car_id)  
-        ):
+        if vehicle.source_car_id != car_id and not self._is_logged_in(page):
+            self._authenticate(
+                page,
+                reason=(
+                    f"vehicle {car_id} redirected to {page.url}; the account session "
+                    "appears to have expired"
+                ),
+            )
+            try:
+                page.goto(detail_url, wait_until="domcontentloaded", timeout=45_000)
+                _wait_for_dynamic_content(page)
+            except PlaywrightError as exc:
+                print(f"  Detail retry after automatic login failed for {car_id}: {exc}")
+                return False
             html = page.content()
             vehicle = parse_vehicle_metadata(html, page.url)
+        elif (
+            vehicle.source_car_id != car_id
+            # The account header may be present behind the site's post-login
+            # information dialog. Dismiss only the explicit Continue control,
+            # then retry the same read-only detail URL.
+            and self._click_continue_if_visible(page)
+        ):
+                try:
+                    page.goto(detail_url, wait_until="domcontentloaded", timeout=45_000)
+                    _wait_for_dynamic_content(page)
+                except PlaywrightError as exc:
+                    print(f"  Detail retry after Continue failed for {car_id}: {exc}")
+                    return False
+                html = page.content()
+                vehicle = parse_vehicle_metadata(html, page.url)
 
         self._save_html(snapshot_dir / f"vehicle_{_safe_component(car_id)}.html", html)
         if vehicle.source_car_id != car_id:
@@ -544,25 +798,29 @@ class ExleasingcarCollector:
             try:
                 page = context.pages[0] if context.pages else context.new_page()
                 self.recorder.attach(context)
-                print("Opening Exleasingcar in the collector's own browser profile...")
+                print("Opening Exleasingcar in the collector's own Chromium profile...")
                 page.goto(auction_list_url, wait_until="domcontentloaded", timeout=60_000)
                 _wait_for_dynamic_content(page)
                 auctions_html = page.content()
                 auctions = parse_auction_listings(auctions_html, page.url)
 
-                # The auction list itself may be public, so its successful load
-                # does not prove the protected vehicle pages will work. Give the
-                # user an explicit sign-in/confirmation point on every run.
-                print(
-                    "The auction list may be visible even when the account session "
-                    "has expired. Check the opened Chromium window and sign in "
-                    "manually if needed. If you are already signed in, just continue."
-                )
-                input("When the account is ready, press Enter to start collection: ")
-                page.goto(auction_list_url, wait_until="domcontentloaded", timeout=60_000)
-                _wait_for_dynamic_content(page)
-                auctions_html = page.content()
-                auctions = parse_auction_listings(auctions_html, page.url)
+                # Public auction lists can remain visible after session expiry.
+                # Authenticate before collecting protected vehicle pages.
+                if not self._is_logged_in(page):
+                    self._authenticate(
+                        page,
+                        reason="no authenticated account header was found at startup",
+                    )
+                    page.goto(
+                        auction_list_url,
+                        wait_until="domcontentloaded",
+                        timeout=60_000,
+                    )
+                    _wait_for_dynamic_content(page)
+                    auctions_html = page.content()
+                    auctions = parse_auction_listings(auctions_html, page.url)
+                else:
+                    self._click_continue_if_visible(page)
 
                 if not auctions:
                     raise RuntimeError(
