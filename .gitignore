@@ -24,4 +24,4 @@ data/browser_profile/
 .vscode/
 
 # Other
-.html
+*.html
