@@ -67,6 +67,28 @@ class CollectorSummary:
 
 
 @dataclass(frozen=True, slots=True)
+class CatalogDetailCoverage:
+    unique_lot_ids: int
+    repeated_card_occurrences: int
+    detail_urls_found: int
+    lot_ids_without_detail_url: tuple[str, ...]
+
+
+def _catalog_detail_coverage(
+    lots_seen: int,
+    catalog_lot_ids: set[str],
+    detail_url_ids: set[str],
+) -> CatalogDetailCoverage:
+    """Separate repeated catalogue cards from lots with no recognized detail URL."""
+    return CatalogDetailCoverage(
+        unique_lot_ids=len(catalog_lot_ids),
+        repeated_card_occurrences=max(0, lots_seen - len(catalog_lot_ids)),
+        detail_urls_found=len(detail_url_ids),
+        lot_ids_without_detail_url=tuple(sorted(catalog_lot_ids - detail_url_ids)),
+    )
+
+
+@dataclass(frozen=True, slots=True)
 class CapturedApiResponse:
     url: str
     payload: Mapping[str, Any]
@@ -775,6 +797,9 @@ class ExleasingcarCollector:
         pages_processed = 0
         lots_seen = 0
         details_processed = 0
+        details_attempted = 0
+        failed_detail_ids: list[str] = []
+        attempted_detail_ids: set[str] = set()
         observed_at = datetime.now(timezone.utc)
 
         while current_url and current_url not in visited_urls:
@@ -845,33 +870,64 @@ class ExleasingcarCollector:
                 "Catalog may be incomplete."
             )
 
-        if max_detail_pages != 0:
-            detail_items = list(detail_urls.items())
-            if max_detail_pages > 0:
-                detail_items = detail_items[:max_detail_pages]
-            for car_id, detail_url in detail_items:
-                if self._enrich_vehicle_detail(
-                    auction,
-                    car_id,
-                    detail_url,
-                    page,
-                    observed_at,
-                    auction_dir,
-                ):
-                    details_processed += 1
-                self._persist_api_updates(
-                    auction,
-                    set(all_lot_metadata),
-                    all_lot_metadata,
-                )
-                if self.page_delay_seconds:
-                    time.sleep(self.page_delay_seconds)
+        detail_items = list(detail_urls.items())
+        if max_detail_pages > 0:
+            detail_items = detail_items[:max_detail_pages]
+        for car_id, detail_url in detail_items:
+            details_attempted += 1
+            attempted_detail_ids.add(car_id)
+            if self._enrich_vehicle_detail(
+                auction,
+                car_id,
+                detail_url,
+                page,
+                observed_at,
+                auction_dir,
+            ):
+                details_processed += 1
+            else:
+                failed_detail_ids.append(car_id)
+            self._persist_api_updates(
+                auction,
+                set(all_lot_metadata),
+                all_lot_metadata,
+            )
+            if self.page_delay_seconds:
+                time.sleep(self.page_delay_seconds)
+
+        coverage = _catalog_detail_coverage(
+            lots_seen,
+            set(all_lot_metadata),
+            set(detail_urls),
+        )
+        unattempted_detail_ids = sorted(set(detail_urls) - attempted_detail_ids)
 
         print(
             f"Auction {listing.exleasingcar_auction_id}: "
             f"{pages_processed} page(s), {lots_seen} lot card(s), "
             f"{details_processed} detail page(s)"
         )
+        print(
+            f"  Catalogue IDs: {coverage.unique_lot_ids} unique, "
+            f"{coverage.repeated_card_occurrences} repeated card appearance(s)"
+        )
+        print(
+            f"  Detail links: {coverage.detail_urls_found} found, "
+            f"{details_attempted} attempted, {details_processed} processed, "
+            f"{len(failed_detail_ids)} failed"
+        )
+        if coverage.lot_ids_without_detail_url:
+            print(
+                "  Lots without a recognized detail URL: "
+                + ", ".join(coverage.lot_ids_without_detail_url)
+            )
+        if failed_detail_ids:
+            print("  Detail pages not processed: " + ", ".join(failed_detail_ids))
+        if unattempted_detail_ids:
+            print(
+                "  Detail pages skipped by --max-detail-pages: "
+                + ", ".join(unattempted_detail_ids)
+            )
         return pages_processed, lots_seen, details_processed
 
     def run(
