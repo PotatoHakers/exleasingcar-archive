@@ -52,6 +52,7 @@ def test_open_auction_price_is_extracted():
         is PriceType.DISPLAYED_AUCTION_PRICE
     )
 
+    assert result.displayed_auction_price.source_field == "current-price"
     assert result.is_hot_bid is True
 
 
@@ -199,3 +200,47 @@ def test_open_auction_starting_display_is_not_misclassified_as_a_bid():
     assert result.displayed_auction_price is not None
     assert result.displayed_auction_price.amount == Decimal(7500)
     assert result.displayed_auction_price.price_type is PriceType.DISPLAYED_AUCTION_PRICE
+
+
+
+def test_real_catalogue_detail_layout_uses_public_current_price_not_user_bid_fields():
+    # Minimized/sanitized structure copied from a real 17 Nov 2026 detail page.
+    # The empty maximum_bid span and user-only input fields must not override
+    # the visible public "Текущая цена" value.
+    html = """
+    <div car-id="19740672">
+        <div class="bids active open bids_19740672">
+            <div class="current-price">Текущая цена: € 11 600</div>
+            <span class="maximum_bid_19740672"></span>
+            <input class="maximum_bid2_19740672" value="11600">
+            <input class="my_bid2_19740672" value="0">
+            <input class="v_user_offer_max_19740672" value="0">
+            <input class="bid_19740672" value="11700">
+        </div>
+    </div>
+    """
+
+    result = parse_vehicle_detail(html)
+
+    assert result.sale_type is SaleType.OPEN_AUCTION
+    assert result.displayed_auction_price is not None
+    assert result.displayed_auction_price.amount == Decimal(11600)
+    assert result.displayed_auction_price.currency == "EUR"
+    assert result.displayed_auction_price.source_field == "current-price"
+
+
+def test_maximum_bid_span_is_used_when_current_price_text_is_absent():
+    html = """
+    <div car-id="car-max">
+        <div class="bids active open bids_car-max">
+            <div class="current-price"></div>
+            <span class="maximum_bid_car-max">€ 12 300</span>
+        </div>
+    </div>
+    """
+
+    result = parse_vehicle_detail(html)
+
+    assert result.displayed_auction_price is not None
+    assert result.displayed_auction_price.amount == Decimal(12300)
+    assert result.displayed_auction_price.source_field == "maximum_bid_car-max"

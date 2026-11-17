@@ -210,7 +210,14 @@ def parse_vehicle_detail(
             else None
         )
         current_price_tag = bids_container.select_one(".current-price")
-        raw_price = clean_text(current_price_tag) or clean_text(price_tag)
+        current_price_text = clean_text(current_price_tag)
+        maximum_bid_text = clean_text(price_tag)
+        if current_price_text:
+            raw_price = current_price_text
+            source_field = "current-price"
+        else:
+            raw_price = maximum_bid_text
+            source_field = f"maximum_bid_{car_id}" if price_tag is not None and car_id else None
 
         if raw_price:
             parsed = parse_amount(raw_price)
@@ -221,11 +228,7 @@ def parse_vehicle_detail(
                     amount=amount,
                     currency=currency,
                     raw_text=raw_price,
-                    source_field=(
-                        f"maximum_bid_{car_id}"
-                        if price_tag is not None and car_id
-                        else "current-price"
-                    ),
+                    source_field=source_field or "current-price",
                 )
 
     # A fixed price is taken only from the explicit fixed-price UI block.

@@ -73,25 +73,37 @@ class CapturedApiResponse:
 
 
 class ApiResponseRecorder:
-    """Keep parsed endpoint JSON in memory while a browser page is loading."""
+    """Capture endpoint JSON only after the browser has finished downloading it."""
 
     def __init__(self) -> None:
         self.responses: list[CapturedApiResponse] = []
         self.errors: list[str] = []
+        self.pending_requests: dict[int, Any] = {}
+        self._timed_out_request_ids: set[int] = set()
 
     def attach(self, context: Any) -> None:
-        context.on("response", self._on_response)
+        # The response event only guarantees that headers have arrived. Reading
+        # the body there can race with navigation. requestfinished is emitted
+        # only after the response body has been downloaded.
+        context.on("request", self._on_request)
+        context.on("requestfinished", self._on_request_finished)
+        context.on("requestfailed", self._on_request_failed)
 
-    def _on_response(self, response: Any) -> None:
+    def _on_request(self, request: Any) -> None:
+        if API_ENDPOINT_MARKER in request.url:
+            self.pending_requests[id(request)] = request
+
+    def _capture_response(self, response: Any) -> None:
         if API_ENDPOINT_MARKER not in response.url:
             return
         if not response.ok:
             self.errors.append(f"HTTP {response.status}: {response.url}")
             return
         try:
-            response.finished()
+            # Called from requestfinished, when the response body is downloaded
+            # and still available to Playwright.
             payload = response.json()
-        except (PlaywrightError, ValueError) as exc:  # Browser failures or invalid JSON.
+        except (PlaywrightError, ValueError, TypeError) as exc:
             content_type = getattr(response, "headers", {}).get("content-type", "unknown")
             self.errors.append(
                 f"Could not read JSON from {response.url} "
@@ -102,6 +114,67 @@ class ApiResponseRecorder:
             self.errors.append(f"Unexpected JSON response shape: {response.url}")
             return
         self.responses.append(CapturedApiResponse(response.url, payload))
+
+    def _on_request_finished(self, request: Any) -> None:
+        request_id = id(request)
+        if self.pending_requests.pop(request_id, None) is None:
+            return
+        self._timed_out_request_ids.discard(request_id)
+        try:
+            response = request.response()
+        except PlaywrightError as exc:
+            self.errors.append(
+                f"Could not access completed API response from {request.url}: {exc}"
+            )
+            return
+        if response is None:
+            self.errors.append(
+                f"API request finished without an HTTP response: {request.url}"
+            )
+            return
+        self._capture_response(response)
+
+    def _on_request_failed(self, request: Any) -> None:
+        request_id = id(request)
+        if self.pending_requests.pop(request_id, None) is None:
+            return
+        self._timed_out_request_ids.discard(request_id)
+        failure = getattr(request, "failure", None)
+        if callable(failure):
+            failure = failure()
+        self.errors.append(
+            "API request failed before its response body could be captured: "
+            f"{request.url} ({failure or 'unknown network failure'})"
+        )
+
+    def wait_for_pending(self, page: Any, *, timeout_ms: int = 3_000) -> bool:
+        """Wait briefly for target API bodies before the next page navigation."""
+        if timeout_ms < 0:
+            raise ValueError("timeout_ms cannot be negative")
+        deadline = time.monotonic() + timeout_ms / 1000
+        while self.pending_requests and time.monotonic() < deadline:
+            page.wait_for_timeout(50)
+
+        pending_ids = set(self.pending_requests)
+        newly_timed_out = pending_ids - self._timed_out_request_ids
+        if newly_timed_out:
+            urls = sorted(
+                {
+                    str(self.pending_requests[request_id].url)
+                    for request_id in newly_timed_out
+                }
+            )
+            self.errors.append(
+                f"Timed out waiting for {len(newly_timed_out)} API request(s) "
+                f"before navigation: {'; '.join(urls)}"
+            )
+            self._timed_out_request_ids.update(newly_timed_out)
+        return not self.pending_requests
+
+    # Kept as a compatibility hook for direct recorder unit tests.
+    # Production collection subscribes to requestfinished instead.
+    def _on_response(self, response: Any) -> None:
+        self._capture_response(response)
 
 
 def filter_updates_for_catalog(
@@ -541,6 +614,7 @@ class ExleasingcarCollector:
         try:
             page.goto(detail_url, wait_until="domcontentloaded", timeout=45_000)
             _wait_for_dynamic_content(page)
+            self.recorder.wait_for_pending(page)
         except PlaywrightError as exc:
             print(f"  Retry after manual sign-in failed for {car_id}: {exc}")
             return False
@@ -558,6 +632,7 @@ class ExleasingcarCollector:
         try:
             page.goto(detail_url, wait_until="domcontentloaded", timeout=45_000)
             _wait_for_dynamic_content(page)
+            self.recorder.wait_for_pending(page)
         except PlaywrightError as exc:
             print(f"  Detail page {car_id} failed: {exc}")
             return False
@@ -575,6 +650,7 @@ class ExleasingcarCollector:
             try:
                 page.goto(detail_url, wait_until="domcontentloaded", timeout=45_000)
                 _wait_for_dynamic_content(page)
+                self.recorder.wait_for_pending(page)
             except PlaywrightError as exc:
                 print(f"  Detail retry after automatic login failed for {car_id}: {exc}")
                 return False
@@ -590,6 +666,7 @@ class ExleasingcarCollector:
                 try:
                     page.goto(detail_url, wait_until="domcontentloaded", timeout=45_000)
                     _wait_for_dynamic_content(page)
+                    self.recorder.wait_for_pending(page)
                 except PlaywrightError as exc:
                     print(f"  Detail retry after Continue failed for {car_id}: {exc}")
                     return False
@@ -705,6 +782,7 @@ class ExleasingcarCollector:
             try:
                 page.goto(current_url, wait_until="domcontentloaded", timeout=45_000)
                 _wait_for_dynamic_content(page)
+                self.recorder.wait_for_pending(page)
             except PlaywrightError as exc:
                 print(f"  Catalogue page failed ({current_url}): {exc}")
                 break
@@ -840,6 +918,7 @@ class ExleasingcarCollector:
                 print("Opening Exleasingcar in the collector's own Chromium profile...")
                 page.goto(auction_list_url, wait_until="domcontentloaded", timeout=60_000)
                 _wait_for_dynamic_content(page)
+                self.recorder.wait_for_pending(page)
                 auctions_html = page.content()
                 auctions = parse_auction_listings(auctions_html, page.url)
 
@@ -856,6 +935,7 @@ class ExleasingcarCollector:
                         timeout=60_000,
                     )
                     _wait_for_dynamic_content(page)
+                    self.recorder.wait_for_pending(page)
                     auctions_html = page.content()
                     auctions = parse_auction_listings(auctions_html, page.url)
                 else:
