@@ -434,3 +434,18 @@ def test_api_response_recorder_reports_request_that_did_not_finish():
     assert len(recorder.errors) == 1
     assert "Timed out waiting for 1 API request" in recorder.errors[0]
 
+
+def test_catalog_detail_coverage_separates_repeated_cards_from_missing_links():
+    from exleasingcar_archive.collector import _catalog_detail_coverage
+
+    coverage = _catalog_detail_coverage(
+        lots_seen=5,
+        catalog_lot_ids={"car-1", "car-2", "car-3", "car-4"},
+        detail_url_ids={"car-1", "car-2", "car-3"},
+    )
+
+    assert coverage.unique_lot_ids == 4
+    assert coverage.repeated_card_occurrences == 1
+    assert coverage.detail_urls_found == 3
+    assert coverage.lot_ids_without_detail_url == ("car-4",)
+
