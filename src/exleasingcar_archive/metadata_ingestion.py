@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 
 from .api_parser import parse_car_update_response
 from .database import ArchiveDatabase
+from .detail_parser import parse_vehicle_detail
 from .ingestion import AuctionContext, IngestionSummary, LotMetadata, store_car_updates
 from .metadata_parser import (
     ParsedAuctionListing,
@@ -31,6 +32,8 @@ class MetadataImportSummary:
     catalog_pages_imported: int
     missing_catalog_page_urls: tuple[str, ...]
     api_ingestion: IngestionSummary | None = None
+    sale_type_recognized: bool = False
+    lot_price_observations_inserted: int = 0
 
 
 def _auction_context(listing: ParsedAuctionListing) -> AuctionContext:
@@ -238,6 +241,36 @@ def import_html_snapshots(
         observed_at=timestamp,
     )
 
+    parsed_detail = parse_vehicle_detail(
+        vehicle_detail_html,
+        source_car_id=vehicle.source_car_id,
+        page_url=vehicle_detail_url,
+    )
+    if parsed_detail.sale_type is not None:
+        database.upsert_auction_lot(
+            vehicle.source_car_id,
+            catalog.exleasingcar_auction_id,
+            sale_type=parsed_detail.sale_type,
+            observed_at=timestamp,
+        )
+
+    lot_prices_inserted = 0
+    for price in (
+        parsed_detail.displayed_auction_price,
+        parsed_detail.fixed_price,
+    ):
+        if price is None:
+            continue
+        lot_prices_inserted += int(
+            database.record_lot_price_observation(
+                vehicle.source_car_id,
+                price,
+                observed_at=timestamp,
+                exleasingcar_auction_id=catalog.exleasingcar_auction_id,
+                sale_type=parsed_detail.sale_type,
+            )
+        )
+
     api_summary = None
     if parsed_api_updates is not None:
         api_summary = store_car_updates(
@@ -260,4 +293,6 @@ def import_html_snapshots(
         catalog_pages_imported=len(catalog_html_pages),
         missing_catalog_page_urls=missing_catalog_page_urls,
         api_ingestion=api_summary,
+        sale_type_recognized=parsed_detail.sale_type is not None,
+        lot_price_observations_inserted=lot_prices_inserted,
     )

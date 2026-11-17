@@ -156,3 +156,37 @@ def test_api_response_is_attached_to_the_matching_catalogue_lot(tmp_path):
         ).fetchone()
 
     assert row == ("210547", "19702473", "18300")
+
+
+def test_fixed_price_detail_is_imported_into_separate_price_history(tmp_path):
+    database = ArchiveDatabase(tmp_path / "archive.sqlite3")
+    database.initialize()
+    fixed_detail = _read("vehicle_detail.html").replace(
+        "</body>",
+        """
+        <div class="auto-block" car-id="19702473">
+            <div class="bids active fix bids_19702473"></div>
+            <div class="fixed-price">
+                <input class="buy-offer" value="Купить сейчас за € 16 900">
+            </div>
+        </div>
+        </body>
+        """,
+    )
+
+    summary = _import(database, vehicle_detail_html=fixed_detail)
+
+    assert summary.sale_type_recognized is True
+    assert summary.lot_price_observations_inserted == 1
+    with sqlite3.connect(database.path) as connection:
+        lot = connection.execute("SELECT sale_type FROM auction_lots").fetchone()[0]
+        fixed = connection.execute(
+            "SELECT price_type, amount, currency FROM lot_price_observations"
+        ).fetchone()
+        bid_count = connection.execute(
+            "SELECT COUNT(*) FROM price_observations"
+        ).fetchone()[0]
+
+    assert lot == "fixed_price"
+    assert fixed == ("fixed_price", "16900", "EUR")
+    assert bid_count == 0

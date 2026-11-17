@@ -11,13 +11,14 @@ from exleasingcar_archive.database import (
 )
 
 
-def test_v2_migration_adds_v4_metadata_and_preserves_history(tmp_path):
+def test_v2_migration_adds_current_metadata_and_preserves_history(tmp_path):
     database_path = tmp_path / "archive_v2.sqlite3"
     vehicles_v2_sql = VEHICLES_SQL.replace("    displayed_title TEXT,\n", "")
     vehicles_v2_sql = vehicles_v2_sql.replace("    chassis_number TEXT,\n", "")
     vehicles_v2_sql = vehicles_v2_sql.replace("    chassis_number_fragment TEXT,\n", "")
     vehicles_v2_sql = vehicles_v2_sql.replace("    chassis_number_masked INTEGER,\n", "")
     auction_lots_v2_sql = AUCTION_LOTS_SQL.replace("    mileage_km INTEGER,\n", "")
+    auction_lots_v2_sql = auction_lots_v2_sql.replace("    sale_type TEXT,\n", "")
 
     with sqlite3.connect(database_path) as connection:
         for statement in (
@@ -81,7 +82,7 @@ def test_v2_migration_adds_v4_metadata_and_preserves_history(tmp_path):
             "SELECT highest_offer FROM price_observations"
         ).fetchone()[0]
 
-    assert version == SCHEMA_VERSION == 4
+    assert version == SCHEMA_VERSION == 5
     assert title is None
     assert price == "18300"
     assert connection.execute(
@@ -120,6 +121,7 @@ def test_v3_migration_adds_vehicle_identity_fields_and_reference_table(tmp_path)
     vehicles_v3_sql = vehicles_v3_sql.replace("    chassis_number_fragment TEXT,\n", "")
     vehicles_v3_sql = vehicles_v3_sql.replace("    chassis_number_masked INTEGER,\n", "")
     lots_v3_sql = AUCTION_LOTS_SQL.replace("    mileage_km INTEGER,\n", "")
+    lots_v3_sql = lots_v3_sql.replace("    sale_type TEXT,\n", "")
 
     with sqlite3.connect(database_path) as connection:
         for statement in (
@@ -146,7 +148,7 @@ def test_v3_migration_adds_vehicle_identity_fields_and_reference_table(tmp_path)
     database.upsert_auction_lot("old-car", "auction-1", mileage_km=74002)
 
     with sqlite3.connect(database_path) as connection:
-        assert connection.execute("PRAGMA user_version").fetchone()[0] == 4
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 5
         identity = connection.execute(
             "SELECT chassis_number, chassis_number_fragment, chassis_number_masked "
             "FROM vehicles WHERE source_car_id = 'old-car'"

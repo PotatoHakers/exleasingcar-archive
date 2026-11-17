@@ -23,6 +23,7 @@ from bs4 import BeautifulSoup, Tag
 
 from .api_parser import parse_car_update_response
 from .database import ArchiveDatabase
+from .detail_parser import parse_vehicle_detail
 from .ingestion import AuctionContext, LotMetadata, store_car_updates
 from .metadata_parser import (
     ParsedAuctionListing,
@@ -61,6 +62,8 @@ class CollectorSummary:
     prices_inserted: int
     seller_price_references_inserted: int
     events_inserted: int
+    sale_types_recognized: int
+    lot_price_observations_inserted: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -216,6 +219,8 @@ class ExleasingcarCollector:
         self.prices_inserted = 0
         self.price_references_inserted = 0
         self.events_inserted = 0
+        self.sale_types_recognized = 0
+        self.lot_price_observations_inserted = 0
         # Kept for compatibility with the previous manual-auth test helper.
         # The normal collector flow now uses _authenticate instead.
         self._manual_reauth_prompted = False
@@ -613,6 +618,40 @@ class ExleasingcarCollector:
             )
             return False
 
+        parsed_detail = parse_vehicle_detail(
+            html,
+            source_car_id=car_id,
+            page_url=page.url,
+        )
+        if parsed_detail.sale_type is None:
+            print(
+                f"  WARNING: sale type for vehicle {car_id} is unknown; "
+                "vehicle metadata is saved without guessing the sale mode."
+            )
+        else:
+            self.database.upsert_auction_lot(
+                car_id,
+                auction.exleasingcar_auction_id,
+                sale_type=parsed_detail.sale_type,
+                observed_at=observed_at,
+            )
+            self.sale_types_recognized += 1
+
+        for price in (
+            parsed_detail.displayed_auction_price,
+            parsed_detail.fixed_price,
+        ):
+            if price is None:
+                continue
+            inserted = self.database.record_lot_price_observation(
+                car_id,
+                price,
+                observed_at=observed_at,
+                exleasingcar_auction_id=auction.exleasingcar_auction_id,
+                sale_type=parsed_detail.sale_type,
+            )
+            self.lot_price_observations_inserted += int(inserted)
+
         self.database.upsert_vehicle(
             car_id,
             displayed_title=vehicle.title,
@@ -883,6 +922,8 @@ class ExleasingcarCollector:
             prices_inserted=self.prices_inserted,
             seller_price_references_inserted=self.price_references_inserted,
             events_inserted=self.events_inserted,
+            sale_types_recognized=self.sale_types_recognized,
+            lot_price_observations_inserted=self.lot_price_observations_inserted,
         )
 
 
@@ -907,8 +948,8 @@ def build_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--max-detail-pages",
         type=int,
-        default=5,
-        help="Detail pages per auction: -1 all, 0 none, positive number (default: 5)",
+        default=-1,
+        help="Detail pages per auction: -1 all, 0 none, positive number (default: all)",
     )
     parser.add_argument(
         "--page-delay",

@@ -115,3 +115,87 @@ def test_open_auction_without_visible_price_is_not_guessed():
     assert result.sale_type is SaleType.OPEN_AUCTION
     assert result.should_monitor is True
     assert result.displayed_auction_price is None
+
+
+def test_fixed_price_sale_extracts_buy_now_price_without_treating_it_as_a_bid():
+    html = """
+    <div class="auto-block" car-id="19694139">
+        <div class="bids active fix bids_19694139"></div>
+        <div class="fixed-price">
+            <input class="buy-offer" id="by_this_car_now" type="submit"
+                   value="Купить сейчас за € 16 900">
+        </div>
+        <script type="application/ld+json">
+            {"@type":"Product","offers":{"@type":"Offer",
+             "price":16900,"priceCurrency":"EUR"}}
+        </script>
+    </div>
+    """
+
+    result = parse_vehicle_detail(html)
+
+    assert result.source_car_id == "19694139"
+    assert result.sale_type is SaleType.FIXED_PRICE
+    assert result.should_monitor is False
+    assert result.displayed_auction_price is None
+    assert result.fixed_price is not None
+    assert result.fixed_price.amount == Decimal(16900)
+    assert result.fixed_price.currency == "EUR"
+    assert result.fixed_price.price_type is PriceType.FIXED_PRICE
+    assert result.fixed_price.source_field == "fixed-price .buy-offer"
+
+
+def test_fixed_price_json_ld_is_only_a_fallback_for_confirmed_fixed_mode():
+    fixed_html = """
+    <div car-id="car-fixed">
+        <div class="bids active fix bids_car-fixed"></div>
+        <script type="application/ld+json">
+            {"@type":"Product","offers":{"price":"16900","priceCurrency":"EUR"}}
+        </script>
+    </div>
+    """
+    result = parse_vehicle_detail(fixed_html)
+    assert result.sale_type is SaleType.FIXED_PRICE
+    assert result.fixed_price is not None
+    assert result.fixed_price.amount == Decimal(16900)
+    assert result.fixed_price.source_field == "json-ld offers.price"
+
+    open_html = """
+    <div car-id="car-open">
+        <div class="bids active open bids_car-open"></div>
+        <script type="application/ld+json">
+            {"@type":"Product","offers":{"price":"16900","priceCurrency":"EUR"}}
+        </script>
+    </div>
+    """
+    open_result = parse_vehicle_detail(open_html)
+    assert open_result.sale_type is SaleType.OPEN_AUCTION
+    assert open_result.fixed_price is None
+
+
+def test_conflicting_sale_mode_markers_are_not_guessed():
+    html = """
+    <div car-id="car-ambiguous">
+        <div class="bids active open fix bids_car-ambiguous"></div>
+    </div>
+    """
+    result = parse_vehicle_detail(html)
+    assert result.sale_type is None
+    assert result.fixed_price is None
+    assert result.displayed_auction_price is None
+
+
+def test_open_auction_starting_display_is_not_misclassified_as_a_bid():
+    html = """
+    <div car-id="car-start">
+        <div class="bids active open bids_car-start">
+            <div class="current-price">Начальная цена: € 7 500</div>
+            <input class="my_bid_car-start" value="0">
+        </div>
+    </div>
+    """
+    result = parse_vehicle_detail(html)
+    assert result.sale_type is SaleType.OPEN_AUCTION
+    assert result.displayed_auction_price is not None
+    assert result.displayed_auction_price.amount == Decimal(7500)
+    assert result.displayed_auction_price.price_type is PriceType.DISPLAYED_AUCTION_PRICE

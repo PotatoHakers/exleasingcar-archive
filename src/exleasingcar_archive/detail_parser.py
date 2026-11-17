@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 from dataclasses import dataclass
 
@@ -20,6 +21,7 @@ class ParsedVehicleDetail:
     sale_type: SaleType | None
     bidding_mode_classes: tuple[str, ...]
     displayed_auction_price: PriceObservation | None
+    fixed_price: PriceObservation | None
     is_hot_bid: bool
 
     @property
@@ -95,14 +97,16 @@ def classify_sale_type(
         return None
 
     classes = set(bids_container.get("class", []))
+    modes = classes.intersection({"open", "closed", "fix"})
+    if len(modes) != 1:
+        return None
 
-    if "open" in classes:
-        return SaleType.OPEN_AUCTION
-
-    if "closed" in classes:
-        return SaleType.CLOSED_AUCTION
-
-    return None
+    mode = modes.pop()
+    return {
+        "open": SaleType.OPEN_AUCTION,
+        "closed": SaleType.CLOSED_AUCTION,
+        "fix": SaleType.FIXED_PRICE,
+    }[mode]
 
 
 def has_hot_bid_marker(soup: BeautifulSoup) -> bool:
@@ -139,6 +143,41 @@ def find_field(
     return None
 
 
+def _fixed_price_from_json_ld(soup: BeautifulSoup) -> PriceObservation | None:
+    """Use schema.org Offer only after the page explicitly marks fixed-price mode."""
+    for script in soup.select('script[type="application/ld+json"]'):
+        raw_json = script.string or script.get_text()
+        if not raw_json:
+            continue
+        try:
+            payload = json.loads(raw_json)
+        except (TypeError, ValueError):
+            continue
+
+        candidates = payload if isinstance(payload, list) else [payload]
+        for candidate in candidates:
+            if not isinstance(candidate, dict):
+                continue
+            offers = candidate.get("offers")
+            offers_list = offers if isinstance(offers, list) else [offers]
+            for offer in offers_list:
+                if not isinstance(offer, dict) or offer.get("price") is None:
+                    continue
+                parsed = parse_amount(str(offer["price"]))
+                if parsed is None:
+                    continue
+                amount, currency = parsed
+                currency = str(offer.get("priceCurrency") or currency or "").upper() or None
+                return PriceObservation(
+                    price_type=PriceType.FIXED_PRICE,
+                    amount=amount,
+                    currency=currency,
+                    raw_text=str(offer["price"]),
+                    source_field="json-ld offers.price",
+                )
+    return None
+
+
 def parse_vehicle_detail(
     html: str,
     source_car_id: str | None = None,
@@ -161,33 +200,22 @@ def parse_vehicle_detail(
     )
 
     displayed_price = None
+    fixed_price = None
 
-    # Read a public auction price only for open auctions.
+    # This is a public displayed auction price, never a bid observation.
     if sale_type is SaleType.OPEN_AUCTION and bids_container is not None:
         price_tag = (
-            find_field(
-                bids_container,
-                f"maximum_bid_{car_id}",
-            )
+            find_field(bids_container, f"maximum_bid_{car_id}")
             if car_id
             else None
         )
-
-        current_price_tag = bids_container.select_one(
-            ".current-price"
-        )
-
-        raw_price = (
-            clean_text(current_price_tag)
-            or clean_text(price_tag)
-        )
+        current_price_tag = bids_container.select_one(".current-price")
+        raw_price = clean_text(current_price_tag) or clean_text(price_tag)
 
         if raw_price:
             parsed = parse_amount(raw_price)
-
             if parsed is not None:
                 amount, currency = parsed
-
                 displayed_price = PriceObservation(
                     price_type=PriceType.DISPLAYED_AUCTION_PRICE,
                     amount=amount,
@@ -200,10 +228,39 @@ def parse_vehicle_detail(
                     ),
                 )
 
+    # A fixed price is taken only from the explicit fixed-price UI block.
+    # schema.org Offer is a fallback only after the "fix" mode marker
+    # has independently confirmed the sale mechanism.
+    if sale_type is SaleType.FIXED_PRICE:
+        fixed_block = soup.select_one(".fixed-price")
+        buy_offer = fixed_block.select_one(".buy-offer") if fixed_block else None
+        raw_fixed_price = None
+        if buy_offer is not None:
+            raw_fixed_price = (
+                str(buy_offer.get("value") or "").strip()
+                or clean_text(buy_offer)
+            )
+
+        if raw_fixed_price:
+            parsed = parse_amount(raw_fixed_price)
+            if parsed is not None:
+                amount, currency = parsed
+                fixed_price = PriceObservation(
+                    price_type=PriceType.FIXED_PRICE,
+                    amount=amount,
+                    currency=currency,
+                    raw_text=raw_fixed_price,
+                    source_field="fixed-price .buy-offer",
+                )
+
+        if fixed_price is None:
+            fixed_price = _fixed_price_from_json_ld(soup)
+
     return ParsedVehicleDetail(
         source_car_id=car_id,
         sale_type=sale_type,
         bidding_mode_classes=bidding_classes,
         displayed_auction_price=displayed_price,
+        fixed_price=fixed_price,
         is_hot_bid=has_hot_bid_marker(soup),
     )

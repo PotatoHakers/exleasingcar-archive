@@ -6,7 +6,10 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
 
-SCHEMA_VERSION = 4
+from .models import PriceType, SaleType
+from .parsers import PriceObservation
+
+SCHEMA_VERSION = 5
 DEFAULT_SOURCE = "ajax_update_car_form.v3.1.php"
 
 
@@ -52,6 +55,7 @@ CREATE TABLE IF NOT EXISTS auction_lots (
     displayed_lot_reference TEXT,
     listing_code_attribute TEXT,
     mileage_km INTEGER,
+    sale_type TEXT,
     first_seen_at TEXT NOT NULL,
     last_seen_at TEXT NOT NULL,
     FOREIGN KEY (vehicle_id) REFERENCES vehicles(id) ON DELETE RESTRICT,
@@ -102,6 +106,24 @@ CREATE TABLE IF NOT EXISTS price_reference_observations (
 """
 
 
+LOT_PRICE_OBSERVATIONS_SQL = """
+CREATE TABLE IF NOT EXISTS lot_price_observations (
+    id INTEGER PRIMARY KEY,
+    auction_lot_id INTEGER NOT NULL,
+    price_type TEXT NOT NULL CHECK (
+        price_type IN ('displayed_auction_price', 'fixed_price')
+    ),
+    amount TEXT NOT NULL,
+    currency TEXT,
+    raw_text TEXT NOT NULL,
+    source_field TEXT NOT NULL,
+    observed_at TEXT NOT NULL,
+    source TEXT NOT NULL,
+    FOREIGN KEY (auction_lot_id) REFERENCES auction_lots(id) ON DELETE RESTRICT
+)
+"""
+
+
 class ArchiveDatabase:
     """SQLite storage for Exleasingcar Archive."""
 
@@ -123,7 +145,7 @@ class ArchiveDatabase:
             connection.close()
 
     def initialize(self) -> None:
-        """Create schema v4 or safely migrate older database versions."""
+        """Create schema v5 or safely migrate older database versions."""
         self.path.parent.mkdir(parents=True, exist_ok=True)
 
         with self._connect() as connection:
@@ -142,13 +164,19 @@ class ArchiveDatabase:
                 self._migrate_v1_to_v2(connection)
                 self._migrate_v2_to_v3(connection)
                 self._migrate_v3_to_v4(connection)
+                self._migrate_v4_to_v5(connection)
                 self._create_indexes(connection)
             elif version == 2:
                 self._migrate_v2_to_v3(connection)
                 self._migrate_v3_to_v4(connection)
+                self._migrate_v4_to_v5(connection)
                 self._create_indexes(connection)
             elif version == 3:
                 self._migrate_v3_to_v4(connection)
+                self._migrate_v4_to_v5(connection)
+                self._create_indexes(connection)
+            elif version == 4:
+                self._migrate_v4_to_v5(connection)
                 self._create_indexes(connection)
             else:
                 # Idempotently ensure indexes exist for an already initialized DB.
@@ -167,6 +195,7 @@ class ArchiveDatabase:
             PRICE_OBSERVATIONS_SQL,
             AUCTION_EVENTS_SQL,
             PRICE_REFERENCE_OBSERVATIONS_SQL,
+            LOT_PRICE_OBSERVATIONS_SQL,
         ):
             connection.execute(statement)
         ArchiveDatabase._create_indexes(connection)
@@ -200,6 +229,10 @@ class ArchiveDatabase:
             """
             CREATE INDEX IF NOT EXISTS idx_price_reference_lot_time
             ON price_reference_observations(auction_lot_id, observed_at)
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_lot_price_type_time
+            ON lot_price_observations(auction_lot_id, price_type, observed_at)
             """,
         )
         for statement in statements:
@@ -343,6 +376,12 @@ class ArchiveDatabase:
         )
         cls._add_column_if_missing(connection, "auction_lots", "mileage_km", "INTEGER")
         connection.execute(PRICE_REFERENCE_OBSERVATIONS_SQL)
+
+    @classmethod
+    def _migrate_v4_to_v5(cls, connection: sqlite3.Connection) -> None:
+        """Persist per-lot sale mode and displayed/fixed price observations."""
+        cls._add_column_if_missing(connection, "auction_lots", "sale_type", "TEXT")
+        connection.execute(LOT_PRICE_OBSERVATIONS_SQL)
 
     @staticmethod
     def _serialize_datetime(value: datetime | None) -> str:
@@ -563,6 +602,7 @@ class ArchiveDatabase:
         displayed_lot_reference: str | None = None,
         listing_code_attribute: str | None = None,
         mileage_km: int | None = None,
+        sale_type: str | None = None,
     ) -> int:
         if mileage_km is not None and (
             isinstance(mileage_km, bool)
@@ -585,7 +625,8 @@ class ArchiveDatabase:
                         last_seen_at = MAX(last_seen_at, ?),
                         displayed_lot_reference = COALESCE(?, displayed_lot_reference),
                         listing_code_attribute = COALESCE(?, listing_code_attribute),
-                        mileage_km = COALESCE(?, mileage_km)
+                        mileage_km = COALESCE(?, mileage_km),
+                        sale_type = COALESCE(?, sale_type)
                     WHERE id = ?
                     """,
                     (
@@ -594,6 +635,7 @@ class ArchiveDatabase:
                         displayed_lot_reference,
                         listing_code_attribute,
                         mileage_km,
+                        sale_type,
                         lot_id,
                     ),
                 )
@@ -602,14 +644,16 @@ class ArchiveDatabase:
                 """
                 INSERT INTO auction_lots (
                     vehicle_id, auction_id, displayed_lot_reference,
-                    listing_code_attribute, mileage_km, first_seen_at, last_seen_at
-                ) VALUES (?, NULL, ?, ?, ?, ?, ?)
+                    listing_code_attribute, mileage_km, sale_type,
+                    first_seen_at, last_seen_at
+                ) VALUES (?, NULL, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     vehicle_id,
                     displayed_lot_reference,
                     listing_code_attribute,
                     mileage_km,
+                    sale_type,
                     observed_at,
                     observed_at,
                 ),
@@ -619,8 +663,9 @@ class ArchiveDatabase:
                 """
                 INSERT INTO auction_lots (
                     vehicle_id, auction_id, displayed_lot_reference,
-                    listing_code_attribute, mileage_km, first_seen_at, last_seen_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                    listing_code_attribute, mileage_km, sale_type,
+                    first_seen_at, last_seen_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(vehicle_id, auction_id) DO UPDATE SET
                     first_seen_at = MIN(
                         auction_lots.first_seen_at, excluded.first_seen_at
@@ -638,7 +683,8 @@ class ArchiveDatabase:
                     ),
                     mileage_km = COALESCE(
                         excluded.mileage_km, auction_lots.mileage_km
-                    )
+                    ),
+                    sale_type = COALESCE(excluded.sale_type, auction_lots.sale_type)
                 """,
                 (
                     vehicle_id,
@@ -646,6 +692,7 @@ class ArchiveDatabase:
                     displayed_lot_reference,
                     listing_code_attribute,
                     mileage_km,
+                    sale_type,
                     observed_at,
                     observed_at,
                 ),
@@ -740,6 +787,7 @@ class ArchiveDatabase:
         displayed_lot_reference: str | None = None,
         listing_code_attribute: str | None = None,
         mileage_km: int | None = None,
+        sale_type: SaleType | str | None = None,
         observed_at: datetime | None = None,
     ) -> int:
         car_id = self._validate_identifier(source_car_id, "source_car_id")
@@ -748,6 +796,19 @@ class ArchiveDatabase:
             auction_external_id = self._validate_identifier(
                 exleasingcar_auction_id, "exleasingcar_auction_id"
             )
+        if sale_type is not None:
+            try:
+                normalized_sale_type = SaleType(sale_type).value
+            except ValueError as exc:
+                raise ValueError(f"Unsupported sale_type: {sale_type!r}") from exc
+            if normalized_sale_type not in {
+                SaleType.OPEN_AUCTION.value,
+                SaleType.CLOSED_AUCTION.value,
+                SaleType.FIXED_PRICE.value,
+            }:
+                raise ValueError(f"Unsupported sale_type: {sale_type!r}")
+        else:
+            normalized_sale_type = None
         timestamp = self._serialize_datetime(observed_at)
         with self._connect() as connection:
             vehicle_id = self._ensure_vehicle(connection, car_id, timestamp)
@@ -764,6 +825,7 @@ class ArchiveDatabase:
                 displayed_lot_reference=displayed_lot_reference,
                 listing_code_attribute=listing_code_attribute,
                 mileage_km=mileage_km,
+                sale_type=normalized_sale_type,
             )
 
     def record_price_observation(
@@ -888,6 +950,108 @@ class ArchiveDatabase:
                 ) VALUES (?, ?, ?, ?, ?)
                 """,
                 (lot_id, minimum_value, indicative_value, timestamp, source),
+            )
+        return True
+
+    def record_lot_price_observation(
+        self,
+        source_car_id: str,
+        price: PriceObservation,
+        observed_at: datetime | None = None,
+        source: str = "vehicle_detail_html",
+        *,
+        exleasingcar_auction_id: str | None = None,
+        displayed_lot_reference: str | None = None,
+        listing_code_attribute: str | None = None,
+        sale_type: SaleType | str | None = None,
+    ) -> bool:
+        """Store a public displayed/fixed price separately from bid history."""
+        if not isinstance(price, PriceObservation):
+            raise TypeError("price must be a PriceObservation")
+        if price.price_type not in {
+            PriceType.DISPLAYED_AUCTION_PRICE,
+            PriceType.FIXED_PRICE,
+        }:
+            raise ValueError(
+                "Only displayed auction and fixed prices may be stored here"
+            )
+        amount = self._serialize_decimal(price.amount)
+        if not isinstance(price.raw_text, str) or not price.raw_text.strip():
+            raise ValueError("price.raw_text cannot be empty")
+        if not isinstance(price.source_field, str) or not price.source_field.strip():
+            raise ValueError("price.source_field cannot be empty")
+        if price.currency is not None and not isinstance(price.currency, str):
+            raise TypeError("price.currency must be str or None")
+        if not isinstance(source, str) or not source.strip():
+            raise ValueError("source cannot be empty")
+
+        car_id = self._validate_identifier(source_car_id, "source_car_id")
+        auction_external_id = None
+        if exleasingcar_auction_id is not None:
+            auction_external_id = self._validate_identifier(
+                exleasingcar_auction_id, "exleasingcar_auction_id"
+            )
+        if sale_type is not None:
+            try:
+                normalized_sale_type = SaleType(sale_type).value
+            except ValueError as exc:
+                raise ValueError(f"Unsupported sale_type: {sale_type!r}") from exc
+            if normalized_sale_type not in {
+                SaleType.OPEN_AUCTION.value,
+                SaleType.CLOSED_AUCTION.value,
+                SaleType.FIXED_PRICE.value,
+            }:
+                raise ValueError(f"Unsupported sale_type: {sale_type!r}")
+        else:
+            normalized_sale_type = None
+
+        timestamp = self._serialize_datetime(observed_at)
+        with self._connect() as connection:
+            vehicle_id = self._ensure_vehicle(connection, car_id, timestamp)
+            auction_id = (
+                self._ensure_auction(connection, auction_external_id, timestamp)
+                if auction_external_id is not None
+                else None
+            )
+            lot_id = self._ensure_auction_lot(
+                connection,
+                vehicle_id,
+                auction_id,
+                timestamp,
+                displayed_lot_reference=displayed_lot_reference,
+                listing_code_attribute=listing_code_attribute,
+                sale_type=normalized_sale_type,
+            )
+            latest = connection.execute(
+                """
+                SELECT amount, currency, source_field
+                FROM lot_price_observations
+                WHERE auction_lot_id = ? AND price_type = ?
+                ORDER BY id DESC LIMIT 1
+                """,
+                (lot_id, price.price_type.value),
+            ).fetchone()
+            new_values = (amount, price.currency, price.source_field)
+            if latest is not None and tuple(latest) == new_values:
+                return False
+
+            connection.execute(
+                """
+                INSERT INTO lot_price_observations (
+                    auction_lot_id, price_type, amount, currency,
+                    raw_text, source_field, observed_at, source
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    lot_id,
+                    price.price_type.value,
+                    amount,
+                    price.currency,
+                    price.raw_text.strip(),
+                    price.source_field.strip(),
+                    timestamp,
+                    source,
+                ),
             )
         return True
 

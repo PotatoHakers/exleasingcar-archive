@@ -187,3 +187,128 @@ def test_manual_reauthentication_pauses_and_retries_same_detail_url(
         "19694139",
     ) is False
     assert len(prompts) == 1
+
+
+def test_detail_enrichment_persists_fixed_sale_type_and_price(tmp_path, monkeypatch):
+    import sqlite3
+    from datetime import datetime, timezone
+
+    from exleasingcar_archive.collector import ExleasingcarCollector
+    from exleasingcar_archive.database import ArchiveDatabase
+    from exleasingcar_archive.ingestion import AuctionContext
+
+    html = """
+    <div class="auto-block" car-id="19694139">
+        <div class="bids active fix bids_19694139"></div>
+        <div class="fixed-price">
+            <input class="buy-offer" value="Купить сейчас за € 16 900">
+        </div>
+    </div>
+    """
+
+    class FakePage:
+        url = "https://www.exleasingcar.com/ru/auto-details/19694139"
+
+        def goto(self, url, **kwargs):
+            self.url = url
+
+        def content(self):
+            return html
+
+    monkeypatch.setattr(
+        "exleasingcar_archive.collector._wait_for_dynamic_content",
+        lambda page: None,
+    )
+    database = ArchiveDatabase(tmp_path / "archive.sqlite3")
+    database.initialize()
+    collector = ExleasingcarCollector(database, tmp_path / "raw", page_delay_seconds=0)
+
+    result = collector._enrich_vehicle_detail(
+        AuctionContext("auction-209633"),
+        "19694139",
+        "https://www.exleasingcar.com/ru/auto-details/19694139",
+        FakePage(),
+        datetime(2026, 11, 16, 16, 0, tzinfo=timezone.utc),
+        tmp_path / "snapshot",
+    )
+
+    assert result is True
+    assert collector.sale_types_recognized == 1
+    assert collector.lot_price_observations_inserted == 1
+    with sqlite3.connect(database.path) as connection:
+        row = connection.execute(
+            """
+            SELECT l.sale_type, p.price_type, p.amount, p.currency
+            FROM auction_lots l
+            JOIN vehicles v ON v.id = l.vehicle_id
+            JOIN lot_price_observations p ON p.auction_lot_id = l.id
+            WHERE v.source_car_id = '19694139'
+            """
+        ).fetchone()
+
+    assert row == ("fixed_price", "fixed_price", "16900", "EUR")
+
+
+def test_detail_enrichment_keeps_open_starting_price_out_of_bid_history(
+    tmp_path, monkeypatch
+):
+    import sqlite3
+    from datetime import datetime, timezone
+
+    from exleasingcar_archive.collector import ExleasingcarCollector
+    from exleasingcar_archive.database import ArchiveDatabase
+    from exleasingcar_archive.ingestion import AuctionContext
+
+    html = """
+    <div class="auto-block" car-id="car-start">
+        <div class="bids active open bids_car-start">
+            <div class="current-price">Начальная цена: € 7 500</div>
+            <input class="my_bid_car-start" value="0">
+        </div>
+    </div>
+    """
+
+    class FakePage:
+        url = "https://www.exleasingcar.com/ru/auto-details/car-start"
+
+        def goto(self, url, **kwargs):
+            self.url = url
+
+        def content(self):
+            return html
+
+    monkeypatch.setattr(
+        "exleasingcar_archive.collector._wait_for_dynamic_content",
+        lambda page: None,
+    )
+    database = ArchiveDatabase(tmp_path / "archive.sqlite3")
+    database.initialize()
+    collector = ExleasingcarCollector(database, tmp_path / "raw", page_delay_seconds=0)
+
+    assert collector._enrich_vehicle_detail(
+        AuctionContext("auction-start"),
+        "car-start",
+        "https://www.exleasingcar.com/ru/auto-details/car-start",
+        FakePage(),
+        datetime(2026, 11, 16, 16, 0, tzinfo=timezone.utc),
+        tmp_path / "snapshot",
+    )
+
+    with sqlite3.connect(database.path) as connection:
+        displayed = connection.execute(
+            "SELECT price_type, amount FROM lot_price_observations"
+        ).fetchone()
+        bids = connection.execute(
+            "SELECT COUNT(*) FROM price_observations"
+        ).fetchone()[0]
+
+    assert displayed == ("displayed_auction_price", "7500")
+    assert bids == 0
+
+
+def test_collector_defaults_to_all_detail_pages_for_selected_auction():
+    from exleasingcar_archive.collector import build_argument_parser
+
+    args = build_argument_parser().parse_args([])
+    assert args.max_auctions == 1
+    assert args.max_detail_pages == -1

@@ -35,9 +35,10 @@ footer{color:#7b8795;font-size:12px;margin-top:20px}
 <main>
 <div class="status"><span><i class="dot"></i>Подключено к локальной базе</span><span id="dbpath" class="mono"></span><span id="updated"></span></div>
 <div id="metrics" class="cards"><div class="card">Загрузка…</div></div>
-<section><h2>Лоты автомобилей</h2><p class="hint">Каждая строка — автомобиль в конкретном аукционе. Повторный выход на торги отображается отдельным лотом.</p><div class="wrap"><table><thead><tr><th>Аукцион</th><th>ID автомобиля</th><th>Автомобиль</th><th>Пробег, км</th><th>Номер кузова</th><th>Последняя ставка</th><th>Мин. цена продавца</th><th>Ориентир</th><th>Первое наблюдение</th></tr></thead><tbody id="lots"></tbody></table></div></section>
+<section><h2>Лоты автомобилей</h2><p class="hint">Каждая строка — автомобиль в конкретном аукционе. Повторный выход на торги отображается отдельным лотом.</p><div class="wrap"><table><thead><tr><th>Аукцион</th><th>ID автомобиля</th><th>Автомобиль</th><th>Тип продажи</th><th>Пробег, км</th><th>Номер кузова</th><th>Последняя ставка</th><th>Мин. цена продавца</th><th>Ориентир</th><th>Первое наблюдение</th></tr></thead><tbody id="lots"></tbody></table></div></section>
 <section><h2>История реальных ставок</h2><p class="hint">Здесь отображаются только положительные значения highest_offer. Нулевая ставка не считается сделанной ставкой.</p><div class="wrap"><table><thead><tr><th>Дата наблюдения</th><th>Аукцион</th><th>ID автомобиля</th><th>Максимальная ставка</th><th>Источник</th></tr></thead><tbody id="bids"></tbody></table></div></section>
 <section><h2>История цен продавца</h2><p class="hint">Минимальная и ориентировочная цены — отдельно от реальных ставок.</p><div class="wrap"><table><thead><tr><th>Дата наблюдения</th><th>Аукцион</th><th>ID автомобиля</th><th>Минимальная цена</th><th>Ориентировочная цена</th><th>Источник</th></tr></thead><tbody id="refs"></tbody></table></div></section>
+<section><h2>Отображаемые и фиксированные цены</h2><p class="hint">Начальная/текущая цена открытого аукциона и цена «Купить сейчас» хранятся отдельно от ставок и справочных цен продавца.</p><div class="wrap"><table><thead><tr><th>Дата наблюдения</th><th>Аукцион</th><th>ID автомобиля</th><th>Тип цены</th><th>Сумма</th><th>Валюта</th><th>Поле источника</th></tr></thead><tbody id="lotprices"></tbody></table></div></section>
 <section><h2>События аукционов</h2><div class="wrap"><table><thead><tr><th>Дата наблюдения</th><th>Аукцион</th><th>ID автомобиля</th><th>Фаза</th><th>Статус ставки</th><th>Конец аукциона</th><th>Осталось, сек.</th><th>FINAL CALL</th></tr></thead><tbody id="events"></tbody></table></div></section>
 <footer>Автообновление каждые 5 секунд. Панель работает в режиме чтения: импорт и изменение БД выполняются отдельными командами.</footer>
 </main>
@@ -51,11 +52,12 @@ async function refresh(){
   const d=await response.json();
   document.getElementById('dbpath').textContent=d.database;
   document.getElementById('updated').textContent='Обновлено: '+new Date().toLocaleTimeString();
-  const metrics=[['Аукционов',d.counts.auctions],['Автомобилей',d.counts.vehicles],['Лотов',d.counts.auction_lots],['Наблюдений ставок',d.counts.price_observations],['Цен продавца',d.counts.price_reference_observations],['Событий',d.counts.auction_events]];
+  const metrics=[['Аукционов',d.counts.auctions],['Автомобилей',d.counts.vehicles],['Лотов',d.counts.auction_lots],['Наблюдений ставок',d.counts.price_observations],['Цен продавца',d.counts.price_reference_observations],['Отображаемых/фиксированных цен',d.counts.lot_price_observations],['Событий',d.counts.auction_events]];
   document.getElementById('metrics').innerHTML=metrics.map(x=>`<div class="card"><div class="k">${esc(x[0])}</div><div class="v">${esc(x[1])}</div></div>`).join('');
-  rows('lots',d.lots.map(x=>`<tr>${cell(x.auction_id)}${cell(x.car_id)}${cell(x.title)}${cell(x.mileage_km)}${cell(x.chassis)}${cell(x.highest_offer)}${cell(x.minimum_price)}${cell(x.indicative_price)}${cell(x.first_seen_at)}</tr>`),'Лотов пока нет');
+  rows('lots',d.lots.map(x=>`<tr>${cell(x.auction_id)}${cell(x.car_id)}${cell(x.title)}${cell(x.sale_type)}${cell(x.mileage_km)}${cell(x.chassis)}${cell(x.highest_offer)}${cell(x.minimum_price)}${cell(x.indicative_price)}${cell(x.first_seen_at)}</tr>`),'Лотов пока нет');
   rows('bids',d.bids.map(x=>`<tr>${cell(x.observed_at)}${cell(x.auction_id)}${cell(x.car_id)}${cell(x.highest_offer)}${cell(x.source)}</tr>`),'Положительных ставок пока не записано. Это нормально, если highest_offer равен нулю.');
   rows('refs',d.references.map(x=>`<tr>${cell(x.observed_at)}${cell(x.auction_id)}${cell(x.car_id)}${cell(x.minimum_price)}${cell(x.indicative_price)}${cell(x.source)}</tr>`),'Наблюдений цен продавца пока нет');
+  rows('lotprices',d.lot_prices.map(x=>`<tr>${cell(x.observed_at)}${cell(x.auction_id)}${cell(x.car_id)}${cell(x.price_type)}${cell(x.amount)}${cell(x.currency)}${cell(x.source_field)}</tr>`),'Отображаемые и фиксированные цены пока не записаны');
   rows('events',d.events.map(x=>`<tr>${cell(x.observed_at)}${cell(x.auction_id)}${cell(x.car_id)}${cell(x.auction_phase)}${cell(x.bid_status)}${cell(x.auction_end_at)}${cell(x.remaining_seconds)}<td>${x.final_call_active===1?'<span class="pill warn">Да</span>':x.final_call_active===0?'<span class="pill">Нет</span>':'—'}</td></tr>`),'Событий пока нет');
  }catch(e){document.getElementById('updated').textContent='Ошибка чтения базы: '+e.message;}
 }
@@ -97,9 +99,10 @@ class DashboardHandler(BaseHTTPRequestHandler):
             connection.row_factory = sqlite3.Row
             connection.execute("PRAGMA query_only = ON")
             version = int(connection.execute("PRAGMA user_version").fetchone()[0])
-            if version < 4:
+            if version < 5:
                 raise sqlite3.DatabaseError(
-                    f"Database schema is {version}; expected schema 4 or newer"
+                    f"Database schema is {version}; run the collector or snapshot importer "
+                    "once to migrate it to schema 5"
                 )
             tables = {
                 row[0]
@@ -109,7 +112,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
             }
             required = {
                 "auctions", "vehicles", "auction_lots", "price_observations",
-                "price_reference_observations", "auction_events",
+                "price_reference_observations", "lot_price_observations",
+                "auction_events",
             }
             missing = required - tables
             if missing:
@@ -119,7 +123,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
 
             count_tables = (
                 "auctions", "vehicles", "auction_lots", "price_observations",
-                "price_reference_observations", "auction_events",
+                "price_reference_observations", "lot_price_observations",
+                "auction_events",
             )
             counts = {
                 table: int(connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0])
@@ -130,6 +135,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 SELECT a.exleasingcar_auction_id AS auction_id,
                        v.source_car_id AS car_id,
                        COALESCE(v.displayed_title, trim(COALESCE(v.make,'') || ' ' || COALESCE(v.model,''))) AS title,
+                       al.sale_type,
                        al.mileage_km,
                        CASE
                          WHEN v.chassis_number IS NOT NULL THEN v.chassis_number
@@ -173,6 +179,18 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 ORDER BY pr.observed_at DESC, pr.id DESC LIMIT 100
                 """
             )]
+            lot_prices = [dict(row) for row in connection.execute(
+                """
+                SELECT lp.observed_at, a.exleasingcar_auction_id AS auction_id,
+                       v.source_car_id AS car_id, lp.price_type, lp.amount,
+                       lp.currency, lp.source_field
+                FROM lot_price_observations lp
+                JOIN auction_lots al ON al.id=lp.auction_lot_id
+                JOIN vehicles v ON v.id=al.vehicle_id
+                LEFT JOIN auctions a ON a.id=al.auction_id
+                ORDER BY lp.observed_at DESC, lp.id DESC LIMIT 100
+                """
+            )]
             events = [dict(row) for row in connection.execute(
                 """
                 SELECT ae.observed_at, a.exleasingcar_auction_id AS auction_id,
@@ -192,6 +210,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
             "lots": lots,
             "bids": bids,
             "references": references,
+            "lot_prices": lot_prices,
             "events": events,
         }
 

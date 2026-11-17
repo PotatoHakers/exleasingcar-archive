@@ -11,7 +11,7 @@ UTC_SECOND = datetime(2026, 11, 12, 12, 5, tzinfo=timezone.utc)
 UTC_THIRD = datetime(2026, 11, 12, 12, 10, tzinfo=timezone.utc)
 
 
-def test_database_initialization_creates_v2_schema(tmp_path):
+def test_database_initialization_creates_current_schema(tmp_path):
     database = ArchiveDatabase(tmp_path / "test_archive.sqlite3")
     database.initialize()
 
@@ -31,6 +31,7 @@ def test_database_initialization_creates_v2_schema(tmp_path):
         "auction_lots",
         "price_observations",
         "auction_events",
+        "lot_price_observations",
     }.issubset(tables)
 
 

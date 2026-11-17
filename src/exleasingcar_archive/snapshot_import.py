@@ -66,6 +66,7 @@ def main() -> None:
                 "auction_lots",
                 "price_observations",
                 "price_reference_observations",
+                "lot_price_observations",
                 "auction_events",
             )
         }
@@ -109,6 +110,11 @@ def main() -> None:
         print(f"  {table}: {count}")
     print(f"Stored vehicle metadata: {tuple(stored_vehicle) if stored_vehicle else None}")
     print(f"Stored lot mileage (km): {stored_lot[0] if stored_lot else None}")
+    print(f"Sale type recognized: {summary.sale_type_recognized}")
+    print(
+        "New displayed/fixed price observations inserted: "
+        f"{summary.lot_price_observations_inserted}"
+    )
     if args.api_response is None:
         print("Price observations: not imported (no API response file supplied)")
     else:
