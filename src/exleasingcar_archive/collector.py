@@ -871,7 +871,9 @@ class ExleasingcarCollector:
             )
 
         detail_items = list(detail_urls.items())
-        if max_detail_pages > 0:
+        if max_detail_pages == 0:
+            detail_items = []
+        elif max_detail_pages > 0:
             detail_items = detail_items[:max_detail_pages]
         for car_id, detail_url in detail_items:
             details_attempted += 1
