@@ -312,3 +312,123 @@ def test_collector_defaults_to_all_detail_pages_for_selected_auction():
     args = build_argument_parser().parse_args([])
     assert args.max_auctions == 1
     assert args.max_detail_pages == -1
+
+
+def test_api_response_recorder_captures_body_on_request_finished():
+    from exleasingcar_archive.collector import ApiResponseRecorder
+
+    class FakeContext:
+        def __init__(self):
+            self.handlers = {}
+
+        def on(self, event, callback):
+            self.handlers[event] = callback
+
+    class FakeResponse:
+        url = "https://www.exleasingcar.com/ajax_update_car_form.v3.1.php"
+        ok = True
+        status = 200
+        headers = {"content-type": "application/json"}
+
+        def json(self):
+            return {"car-1": {"highest_offer": "12500"}}
+
+    class FakeRequest:
+        url = "https://www.exleasingcar.com/ajax_update_car_form.v3.1.php"
+
+        def response(self):
+            return FakeResponse()
+
+    context = FakeContext()
+    recorder = ApiResponseRecorder()
+    recorder.attach(context)
+
+    assert set(context.handlers) == {"request", "requestfinished", "requestfailed"}
+
+    request = FakeRequest()
+    context.handlers["request"](request)
+    assert recorder.pending_requests
+
+    context.handlers["requestfinished"](request)
+
+    assert recorder.pending_requests == {}
+    assert len(recorder.responses) == 1
+    assert recorder.responses[0].payload["car-1"]["highest_offer"] == "12500"
+    assert recorder.errors == []
+
+
+def test_api_response_recorder_reports_failed_request():
+    from exleasingcar_archive.collector import ApiResponseRecorder
+
+    class FakeRequest:
+        url = "https://www.exleasingcar.com/ajax_update_car_form.v3.1.php"
+
+        def failure(self):
+            return "net::ERR_ABORTED"
+
+    recorder = ApiResponseRecorder()
+    request = FakeRequest()
+    recorder._on_request(request)
+    recorder._on_request_failed(request)
+
+    assert recorder.pending_requests == {}
+    assert len(recorder.errors) == 1
+    assert "net::ERR_ABORTED" in recorder.errors[0]
+
+
+def test_api_response_recorder_waits_for_pending_request_completion():
+    from exleasingcar_archive.collector import ApiResponseRecorder
+
+    class FakeResponse:
+        url = "https://www.exleasingcar.com/ajax_update_car_form.v3.1.php"
+        ok = True
+        status = 200
+        headers = {"content-type": "application/json"}
+
+        def json(self):
+            return {"car-1": {"highest_offer": 12500}}
+
+    class FakeRequest:
+        url = "https://www.exleasingcar.com/ajax_update_car_form.v3.1.php"
+
+        def response(self):
+            return FakeResponse()
+
+    class FakePage:
+        def __init__(self, callback):
+            self.callback = callback
+            self.waits = 0
+
+        def wait_for_timeout(self, milliseconds):
+            self.waits += 1
+            self.callback()
+
+    recorder = ApiResponseRecorder()
+    request = FakeRequest()
+    recorder._on_request(request)
+    page = FakePage(lambda: recorder._on_request_finished(request))
+
+    assert recorder.wait_for_pending(page, timeout_ms=100) is True
+    assert page.waits == 1
+    assert recorder.pending_requests == {}
+    assert len(recorder.responses) == 1
+
+
+def test_api_response_recorder_reports_request_that_did_not_finish():
+    from exleasingcar_archive.collector import ApiResponseRecorder
+
+    class FakeRequest:
+        url = "https://www.exleasingcar.com/ajax_update_car_form.v3.1.php"
+
+    class FakePage:
+        def wait_for_timeout(self, milliseconds):
+            return None
+
+    recorder = ApiResponseRecorder()
+    request = FakeRequest()
+    recorder._on_request(request)
+
+    assert recorder.wait_for_pending(FakePage(), timeout_ms=0) is False
+    assert len(recorder.errors) == 1
+    assert "Timed out waiting for 1 API request" in recorder.errors[0]
+
