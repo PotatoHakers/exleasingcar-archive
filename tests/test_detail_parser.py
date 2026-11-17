@@ -244,3 +244,22 @@ def test_maximum_bid_span_is_used_when_current_price_text_is_absent():
     assert result.displayed_auction_price is not None
     assert result.displayed_auction_price.amount == Decimal(12300)
     assert result.displayed_auction_price.source_field == "maximum_bid_car-max"
+
+
+def test_open_auction_without_public_price_does_not_create_price_observation():
+    html = """
+    <div class="auto-block" car-id="car-no-price">
+        <div class="bids active open bids_car-no-price">
+            <input class="maximum_bid_car-no-price" value="">
+        </div>
+    </div>
+    """
+
+    result = parse_vehicle_detail(
+        html,
+        source_car_id="car-no-price",
+    )
+
+    assert result.sale_type is SaleType.OPEN_AUCTION
+    assert result.displayed_auction_price is None
+
