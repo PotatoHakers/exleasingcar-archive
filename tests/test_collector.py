@@ -328,7 +328,8 @@ def test_api_response_recorder_captures_body_on_request_finished():
         url = "https://www.exleasingcar.com/ajax_update_car_form.v3.1.php"
         ok = True
         status = 200
-        headers = {"content-type": "application/json"}
+        def __init__(self):
+            self.headers = {"content-type": "application/json"}
 
         def json(self):
             return {"car-1": {"highest_offer": "12500"}}
@@ -383,7 +384,8 @@ def test_api_response_recorder_waits_for_pending_request_completion():
         url = "https://www.exleasingcar.com/ajax_update_car_form.v3.1.php"
         ok = True
         status = 200
-        headers = {"content-type": "application/json"}
+        def __init__(self):
+            self.headers = {"content-type": "application/json"}
 
         def json(self):
             return {"car-1": {"highest_offer": 12500}}
