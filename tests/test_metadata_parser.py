@@ -1,4 +1,5 @@
 from pathlib import Path
+from urllib.parse import unquote
 
 from exleasingcar_archive.metadata_parser import (
     parse_auction_catalog_metadata,
@@ -96,3 +97,58 @@ def test_auction_id_is_not_confused_with_vehicle_id():
 
     assert result.source_car_id is None
     assert result.exleasingcar_auction_id == "210547"
+
+
+
+def test_parse_varied_auction_cards_with_encoded_links_and_company_names():
+    result = parse_auction_listings(
+        _read_fixture("auction_listings_varied.html"),
+        "https://www.exleasingcar.com/ru/auto-auctions",
+    )
+    auctions = {auction.exleasingcar_auction_id: auction for auction in result}
+
+    assert set(auctions) == {
+        "210836",
+        "210951",
+        "210895",
+        "210847",
+        "210839",
+        "210945",
+        "210854",
+        "210981",
+        "210884",
+    }
+
+    expected = {
+        "210836": ("VWE Remarketing", "FR", "Франция", "Закрытые торги аукциона", None),
+        "210951": ("CarNext", "DE", "Германия", "Английский аукцион", "FINAL CALL"),
+        "210895": ("BCA", "NL", "Нидерланды", "Английский аукцион", "FINAL CALL"),
+        "210847": ("Alphabet", "DE", "Германия", "Английский аукцион", "FINAL CALL"),
+        "210839": ("BCA SE", "SE", "Швеция", "Английский аукцион", "FINAL CALL"),
+        "210945": ("eCarsTrade ARVAL", "BE", "Бельгия", "Английский аукцион", "HOT BID"),
+        "210854": ("Copart Germany", "DE", "Германия", "Английский аукцион", "FINAL CALL"),
+        "210981": ("eCarsTrade ALD", "BE", "Бельгия", "Закрытые торги аукциона", None),
+    }
+
+    for auction_id, values in expected.items():
+        auction = auctions[auction_id]
+        (
+            expected_name,
+            expected_country_code,
+            expected_country_name,
+            expected_type,
+            expected_status,
+        ) = values
+        assert auction.source_auction_name == expected_name
+        assert auction.source_auction_country_code == expected_country_code
+        assert auction.source_auction_country_name == expected_country_name
+        assert auction.auction_type_label == expected_type
+        assert auction.auction_status_label == expected_status
+        assert auction.source_url is not None
+        assert f"аукцион-{auction_id}" in unquote(auction.source_url)
+
+    # These two registration-only cards have an auction ID but no catalogue
+    # address or company name. Do not invent either value.
+    restricted = auctions["210884"]
+    assert restricted.source_auction_name is None
+    assert restricted.source_url is None
