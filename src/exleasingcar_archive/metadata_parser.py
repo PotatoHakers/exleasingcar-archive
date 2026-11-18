@@ -6,7 +6,7 @@ import re
 from collections.abc import Iterable
 from dataclasses import dataclass
 from html import unescape
-from urllib.parse import urljoin
+from urllib.parse import unquote, urljoin
 
 from bs4 import BeautifulSoup, Tag
 
@@ -120,7 +120,7 @@ def _detect_car_id(soup: BeautifulSoup, page_url: str | None) -> str | None:
 def _auction_id_from_url(url: str | None) -> str | None:
     if not url:
         return None
-    match = AUCTION_ID_PATTERN.search(url)
+    match = AUCTION_ID_PATTERN.search(unquote(url))
     return match.group(1) if match else None
 
 
@@ -186,13 +186,42 @@ def _parse_auction_card(
     card: Tag,
     page_url: str | None,
 ) -> ParsedAuctionListing | None:
-    link = card.find_parent("a", href=AUCTION_ID_PATTERN) or card.find(
-        "a", href=AUCTION_ID_PATTERN
-    )
-    href = str(link.get("href")) if isinstance(link, Tag) else None
-    source_url = urljoin(page_url or "https://www.exleasingcar.com/", href) if href else None
+    link_candidates: list[Tag] = []
+    parent_link = card.find_parent("a", href=True)
+    if isinstance(parent_link, Tag):
+        link_candidates.append(parent_link)
+    link_candidates.extend(card.find_all("a", href=True))
 
-    auction_id = _auction_id_from_url(href)
+    source_url = None
+    auction_id = None
+    for link in link_candidates:
+        candidate_url = str(link.get("href") or "").strip()
+        candidate_id = _auction_id_from_url(candidate_url)
+        if candidate_id:
+            auction_id = candidate_id
+            source_url = urljoin(
+                page_url or "https://www.exleasingcar.com/",
+                candidate_url,
+            )
+            break
+
+    # Some page versions use a JavaScript click handler instead of a link.
+    if source_url is None:
+        onclick = str(card.get("onclick") or "")
+        for candidate_url in re.findall(
+            r"""['"]((?:https?://|/)[^'"]+)['"]""",
+            onclick,
+        ):
+            candidate_url = unescape(candidate_url)
+            candidate_id = _auction_id_from_url(candidate_url)
+            if candidate_id:
+                auction_id = candidate_id
+                source_url = urljoin(
+                    page_url or "https://www.exleasingcar.com/",
+                    candidate_url,
+                )
+                break
+
     if auction_id is None:
         for item in card.select(".ac-head-item"):
             item_text = _text(item) or ""
