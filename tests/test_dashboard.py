@@ -190,3 +190,87 @@ def test_dashboard_search_shows_full_history_across_relisted_auctions(tmp_path):
             "auction-new",
         }
         assert {row["car_id"] for row in history} == {"car-target"}
+
+
+
+def test_dashboard_car_card_shows_vehicle_details_and_all_auction_history(tmp_path):
+    database = ArchiveDatabase(tmp_path / "dashboard.sqlite3")
+    database.initialize()
+    database.upsert_vehicle(
+        "car-card-1",
+        make="Audi",
+        model="A6",
+        displayed_title="Audi A6 3.0 TDI",
+        chassis_number="WAUZZZ12345678901",
+        location_text="DE-04509, Germany",
+        location_country_code="DE",
+        location_country_name="Germany",
+        last_registration_country_code="DE",
+        last_registration_country_name="Germany",
+    )
+    database.upsert_auction_lot(
+        "car-card-1", "auction-old", mileage_km=120000
+    )
+    database.upsert_auction_lot(
+        "car-card-1", "auction-new", mileage_km=135000
+    )
+    database.upsert_vehicle(
+        "car-card-other",
+        displayed_title="BMW 530d",
+    )
+    database.upsert_auction_lot("car-card-other", "auction-other")
+
+    with sqlite3.connect(database.path) as connection:
+        lot_ids = dict(connection.execute(
+            """
+            SELECT a.exleasingcar_auction_id, al.id
+            FROM auction_lots al
+            JOIN auctions a ON a.id = al.auction_id
+            """
+        ).fetchall())
+        for auction_id, amount in (
+            ("auction-old", "9000"),
+            ("auction-new", "10500"),
+            ("auction-other", "15000"),
+        ):
+            lot_id = lot_ids[auction_id]
+            connection.execute(
+                """
+                INSERT INTO price_observations
+                    (auction_lot_id, highest_offer, observed_at, source)
+                VALUES (?, ?, ?, 'test')
+                """,
+                (lot_id, amount, f"2026-01-0{len(amount)}T00:00:00Z"),
+            )
+            connection.execute(
+                """
+                INSERT INTO auction_events
+                    (auction_lot_id, auction_phase, final_call_active,
+                     observed_at, source)
+                VALUES (?, 'final-call', 1, '2026-01-01T00:00:00Z', 'test')
+                """,
+                (lot_id,),
+            )
+
+    handler = object.__new__(DashboardHandler)
+    handler.database_path = database.path
+    payload = handler._load_data(selected_car_id="car-card-1")
+
+    vehicle = payload["selected_vehicle"]
+    assert vehicle["source_car_id"] == "car-card-1"
+    assert vehicle["displayed_title"] == "Audi A6 3.0 TDI"
+    assert vehicle["make"] == "Audi"
+    assert vehicle["model"] == "A6"
+    assert vehicle["chassis_number"] == "WAUZZZ12345678901"
+    assert vehicle["location_text"] == "DE-04509, Germany"
+    assert vehicle["last_registration_country_name"] == "Germany"
+
+    assert {lot["auction_id"] for lot in payload["lots"]} == {
+        "auction-old",
+        "auction-new",
+    }
+    assert {lot["mileage_km"] for lot in payload["lots"]} == {120000, 135000}
+    assert len(payload["bids"]) == 2
+    assert len(payload["events"]) == 2
+    assert {row["car_id"] for row in payload["bids"]} == {"car-card-1"}
+    assert {row["car_id"] for row in payload["events"]} == {"car-card-1"}
