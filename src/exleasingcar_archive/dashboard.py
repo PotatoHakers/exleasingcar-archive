@@ -190,19 +190,43 @@ class DashboardHandler(BaseHTTPRequestHandler):
             if not normalized_search:
                 lots_sql += " LIMIT 500"
             lots = [dict(row) for row in connection.execute(lots_sql, parameters)]
-            bids = [dict(row) for row in connection.execute(
+            history_filter = ""
+            history_parameters: tuple[str, ...] = ()
+            history_limit = "" if normalized_search else " LIMIT 100"
+            if normalized_search:
+                history_filter = """
+                    WHERE (
+                        lower(COALESCE(v.displayed_title, '') || ' ' ||
+                              COALESCE(v.make, '') || ' ' || COALESCE(v.model, ''))
+                            LIKE lower(?)
+                        OR lower(v.source_car_id) LIKE lower(?)
+                        OR lower(COALESCE(v.chassis_number, '')) LIKE lower(?)
+                        OR lower(COALESCE(v.chassis_number_fragment, '')) LIKE lower(?)
+                    )
                 """
+                history_pattern = f"%{normalized_search}%"
+                history_parameters = (
+                    history_pattern,
+                    history_pattern,
+                    history_pattern,
+                    history_pattern,
+                )
+
+            bids = [dict(row) for row in connection.execute(
+                f"""
                 SELECT po.observed_at, a.exleasingcar_auction_id AS auction_id,
                        v.source_car_id AS car_id, po.highest_offer, po.source
                 FROM price_observations po
                 JOIN auction_lots al ON al.id=po.auction_lot_id
                 JOIN vehicles v ON v.id=al.vehicle_id
                 LEFT JOIN auctions a ON a.id=al.auction_id
-                ORDER BY po.observed_at DESC, po.id DESC LIMIT 100
-                """
+                {history_filter}
+                ORDER BY po.observed_at DESC, po.id DESC{history_limit}
+                """,
+                history_parameters,
             )]
             references = [dict(row) for row in connection.execute(
-                """
+                f"""
                 SELECT pr.observed_at, a.exleasingcar_auction_id AS auction_id,
                        v.source_car_id AS car_id, pr.minimum_price,
                        pr.indicative_price, pr.source
@@ -210,11 +234,13 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 JOIN auction_lots al ON al.id=pr.auction_lot_id
                 JOIN vehicles v ON v.id=al.vehicle_id
                 LEFT JOIN auctions a ON a.id=al.auction_id
-                ORDER BY pr.observed_at DESC, pr.id DESC LIMIT 100
-                """
+                {history_filter}
+                ORDER BY pr.observed_at DESC, pr.id DESC{history_limit}
+                """,
+                history_parameters,
             )]
             lot_prices = [dict(row) for row in connection.execute(
-                """
+                f"""
                 SELECT lp.observed_at, a.exleasingcar_auction_id AS auction_id,
                        v.source_car_id AS car_id, lp.price_type, lp.amount,
                        lp.currency, lp.source_field
@@ -222,11 +248,13 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 JOIN auction_lots al ON al.id=lp.auction_lot_id
                 JOIN vehicles v ON v.id=al.vehicle_id
                 LEFT JOIN auctions a ON a.id=al.auction_id
-                ORDER BY lp.observed_at DESC, lp.id DESC LIMIT 100
-                """
+                {history_filter}
+                ORDER BY lp.observed_at DESC, lp.id DESC{history_limit}
+                """,
+                history_parameters,
             )]
             events = [dict(row) for row in connection.execute(
-                """
+                f"""
                 SELECT ae.observed_at, a.exleasingcar_auction_id AS auction_id,
                        v.source_car_id AS car_id, ae.auction_phase, ae.bid_status,
                        ae.auction_end_at, ae.remaining_seconds, ae.final_call_active
@@ -234,8 +262,10 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 JOIN auction_lots al ON al.id=ae.auction_lot_id
                 JOIN vehicles v ON v.id=al.vehicle_id
                 LEFT JOIN auctions a ON a.id=al.auction_id
-                ORDER BY ae.observed_at DESC, ae.id DESC LIMIT 100
-                """
+                {history_filter}
+                ORDER BY ae.observed_at DESC, ae.id DESC{history_limit}
+                """,
+                history_parameters,
             )]
         return {
             "database": str(self.database_path),
