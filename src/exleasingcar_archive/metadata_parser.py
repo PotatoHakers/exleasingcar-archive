@@ -241,10 +241,19 @@ def _parse_auction_card(
     country_code = _flag_country_code(country_container)
     country_name = _text(country_container.select_one(".ml-2"))
 
-    type_image = card.find(
+    auction_header = card.select_one(".card-header .ac-head-items") or card
+    type_image = auction_header.find(
         "img",
         attrs={"alt": re.compile(r"аукцион", re.IGNORECASE)},
     )
+    if type_image is None:
+        # The site uses the fixed-price icon as the main type only on
+        # "Buy now" cards. On mixed cards the open/closed icon takes priority.
+        type_image = auction_header.find(
+            "img",
+            attrs={"alt": re.compile(r"фиксирован", re.IGNORECASE)},
+        )
+
     auction_type_label = None
     if isinstance(type_image, Tag):
         auction_type_label = (
