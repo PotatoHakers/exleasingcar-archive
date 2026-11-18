@@ -32,6 +32,18 @@ footer{color:#7b8795;font-size:12px;margin-top:20px}
 .search-controls label{font-size:13px;color:#536273}
 .search-controls input{flex:1;min-width:240px;max-width:560px;padding:10px 12px;border:1px solid #ccd5e0;border-radius:8px;font:inherit}
 #search-status{font-size:12px}
+.detail-card{background:#fff;border:1px solid #ccd7e3;border-radius:12px;padding:18px;margin:16px 0;box-shadow:0 2px 8px #182b450c}
+.detail-card[hidden]{display:none}
+.detail-top{display:flex;justify-content:space-between;align-items:flex-start;gap:12px;flex-wrap:wrap}
+.detail-top h2{margin:0 0 5px}
+.detail-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:10px;margin:16px 0}
+.detail-item{padding:10px 12px;background:#f7f9fc;border-radius:8px;min-width:0}
+.detail-item .k{display:block;font-size:11px;color:#687789;margin-bottom:5px}
+.detail-item .v{font-size:13px;overflow-wrap:anywhere}
+.detail-auctions{margin-top:16px;overflow:auto}
+.detail-auctions table{font-size:12px}
+.open-car,.close-card{border:1px solid #cbd5e1;background:#fff;color:#23364c;padding:6px 10px;border-radius:7px;cursor:pointer;font:inherit;font-size:12px}
+.open-car:hover,.close-card:hover{background:#eef3f8}
 @media(max-width:640px){.top{padding:20px}.top h1{font-size:20px}main{padding:0 12px 28px}.card .v{font-size:22px}}
 </style>
 </head>
@@ -40,7 +52,7 @@ footer{color:#7b8795;font-size:12px;margin-top:20px}
 <main>
 <div class="status"><span><i class="dot"></i>Подключено к локальной базе</span><span id="dbpath" class="mono"></span><span id="updated"></span></div>
 <div id="metrics" class="cards"><div class="card">Загрузка…</div></div>
-<section><h2>Лоты автомобилей</h2><p class="hint">Каждая строка — автомобиль в конкретном аукционе. Повторный выход на торги отображается отдельным лотом.</p><div class="search-controls"><label for="lot-search">Поиск по названию, ID или номеру кузова</label><input id="lot-search" type="search" autocomplete="off" placeholder="Например, Mercedes, 19702473 или VIN"><span id="search-status" class="muted" aria-live="polite"></span></div><div class="wrap"><table><thead><tr><th>Аукцион</th><th>ID автомобиля</th><th>Автомобиль</th><th>Тип продажи</th><th>Пробег, км</th><th>Номер кузова</th><th>Последняя ставка</th><th>Мин. цена продавца</th><th>Ориентир</th><th>Первое наблюдение</th></tr></thead><tbody id="lots"></tbody></table></div></section>
+<section><h2>Лоты автомобилей</h2><p class="hint">Каждая строка — автомобиль в конкретном аукционе. Повторный выход на торги отображается отдельным лотом.</p><div class="search-controls"><label for="lot-search">Поиск по названию, ID или номеру кузова</label><input id="lot-search" type="search" autocomplete="off" placeholder="Например, Mercedes, 19702473 или VIN"><span id="search-status" class="muted" aria-live="polite"></span></div><section id="car-card" class="detail-card" hidden aria-live="polite"></section><div class="wrap"><table><thead><tr><th></th><th>Аукцион</th><th>ID автомобиля</th><th>Автомобиль</th><th>Тип продажи</th><th>Пробег, км</th><th>Номер кузова</th><th>Последняя ставка</th><th>Мин. цена продавца</th><th>Ориентир</th><th>Первое наблюдение</th></tr></thead><tbody id="lots"></tbody></table></div></section>
 <section><h2>История реальных ставок</h2><p class="hint">Здесь отображаются только положительные значения highest_offer. Нулевая ставка не считается сделанной ставкой.</p><div class="wrap"><table><thead><tr><th>Дата наблюдения</th><th>Аукцион</th><th>ID автомобиля</th><th>Максимальная ставка</th><th>Источник</th></tr></thead><tbody id="bids"></tbody></table></div></section>
 <section><h2>История цен продавца</h2><p class="hint">Минимальная и ориентировочная цены — отдельно от реальных ставок.</p><div class="wrap"><table><thead><tr><th>Дата наблюдения</th><th>Аукцион</th><th>ID автомобиля</th><th>Минимальная цена</th><th>Ориентировочная цена</th><th>Источник</th></tr></thead><tbody id="refs"></tbody></table></div></section>
 <section><h2>Отображаемые и фиксированные цены</h2><p class="hint">Начальная/текущая цена открытого аукциона и цена «Купить сейчас» хранятся отдельно от ставок и справочных цен продавца.</p><div class="wrap"><table><thead><tr><th>Дата наблюдения</th><th>Аукцион</th><th>ID автомобиля</th><th>Тип цены</th><th>Сумма</th><th>Валюта</th><th>Поле источника</th></tr></thead><tbody id="lotprices"></tbody></table></div></section>
@@ -51,18 +63,51 @@ footer{color:#7b8795;font-size:12px;margin-top:20px}
 const esc = v => String(v ?? "—").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 const cell = v => `<td>${esc(v)}</td>`;
 function rows(id, values, empty) { const el=document.getElementById(id); el.innerHTML=values.length?values.join(""):`<tr><td class="empty" colspan="12">${esc(empty)}</td></tr>`; }
+let selectedCarId=null;
+function renderCarCard(vehicle,lots){
+ const panel=document.getElementById('car-card');
+ if(!vehicle){panel.hidden=true;panel.innerHTML='';return;}
+ const title=vehicle.displayed_title || [vehicle.make,vehicle.model].filter(Boolean).join(' ') || vehicle.source_car_id;
+ const chassis=vehicle.chassis_number || (vehicle.chassis_number_fragment ? vehicle.chassis_number_fragment+(vehicle.chassis_number_masked?'… (частично скрыт)':'') : null);
+ const fields=[
+  ['ID автомобиля',vehicle.source_car_id],
+  ['Марка',vehicle.make],
+  ['Модель',vehicle.model],
+  ['Номер кузова / VIN',chassis],
+  ['Местонахождение',vehicle.location_text],
+  ['Страна местонахождения',vehicle.location_country_name || vehicle.location_country_code],
+  ['Последняя регистрация',vehicle.last_registration_country_name || vehicle.last_registration_country_code],
+  ['Впервые добавлен',vehicle.first_seen_at],
+  ['Последнее обновление',vehicle.last_seen_at]
+ ];
+ panel.innerHTML=`
+  <div class="detail-top"><div><h2>${esc(title)}</h2><p class="hint">Карточка автомобиля · сохранённые сведения из архива</p></div><button type="button" class="close-card">Закрыть карточку</button></div>
+  <div class="detail-grid">${fields.map(([label,value])=>`<div class="detail-item"><span class="k">${esc(label)}</span><span class="v">${esc(value)}</span></div>`).join('')}</div>
+  <div class="detail-auctions"><h3>Участие в аукционах (${lots.length})</h3><table><thead><tr><th>ID аукциона</th><th>Аукцион</th><th>Страна</th><th>Тип</th><th>Статус</th><th>Тип продажи</th><th>Пробег, км</th><th>Первое появление</th><th>Последнее появление</th></tr></thead><tbody>${lots.map(lot=>`<tr>${cell(lot.auction_id)}${cell(lot.source_auction_name)}${cell(lot.source_auction_country_name)}${cell(lot.auction_type_label)}${cell(lot.auction_status_label)}${cell(lot.sale_type)}${cell(lot.mileage_km)}${cell(lot.first_seen_at)}${cell(lot.last_seen_at)}</tr>`).join('') || '<tr><td colspan="9" class="empty">Аукционы не найдены</td></tr>'}</tbody></table></div>
+  <p class="hint">История ставок и цен этого автомобиля отображается в таблицах ниже.</p>`;
+ panel.hidden=false;
+ panel.querySelector('.close-card').addEventListener('click',()=>{
+  selectedCarId=null;
+  refresh();
+ });
+}
 async function refresh(){
  try{
   const query=document.getElementById('lot-search').value.trim();
-  const apiUrl='/api/data'+(query?'?q='+encodeURIComponent(query):'');
+  const params=new URLSearchParams();
+  if(selectedCarId) params.set('car_id',selectedCarId);
+  else if(query) params.set('q',query);
+  const queryString=params.toString();
+  const apiUrl='/api/data'+(queryString?'?'+queryString:'');
   const response=await fetch(apiUrl,{cache:'no-store'}); if(!response.ok) throw new Error(await response.text());
   const d=await response.json();
   document.getElementById('dbpath').textContent=d.database;
   document.getElementById('updated').textContent='Обновлено: '+new Date().toLocaleTimeString();
   const metrics=[['Аукционов',d.counts.auctions],['Автомобилей',d.counts.vehicles],['Лотов',d.counts.auction_lots],['Наблюдений ставок',d.counts.price_observations],['Цен продавца',d.counts.price_reference_observations],['Отображаемых/фиксированных цен',d.counts.lot_price_observations],['Событий',d.counts.auction_events]];
   document.getElementById('metrics').innerHTML=metrics.map(x=>`<div class="card"><div class="k">${esc(x[0])}</div><div class="v">${esc(x[1])}</div></div>`).join('');
-  document.getElementById('search-status').textContent=query?`Найдено лотов: ${d.lots.length}`:`Показаны последние ${d.lots.length} из ${d.counts.auction_lots}`;
-  rows('lots',d.lots.map(x=>`<tr>${cell(x.auction_id)}${cell(x.car_id)}${cell(x.title)}${cell(x.sale_type)}${cell(x.mileage_km)}${cell(x.chassis)}${cell(x.highest_offer)}${cell(x.minimum_price)}${cell(x.indicative_price)}${cell(x.first_seen_at)}</tr>`),query?'По этому запросу ничего не найдено':'Лотов пока нет');
+  renderCarCard(d.selected_vehicle,d.lots);
+  document.getElementById('search-status').textContent=selectedCarId?`Карточка: ${d.selected_vehicle?esc(d.selected_vehicle.source_car_id):'не найдена'}`:query?`Найдено лотов: ${d.lots.length}`:`Показаны последние ${d.lots.length} из ${d.counts.auction_lots}`;
+  rows('lots',d.lots.map(x=>`<tr><td><button type="button" class="open-car" data-car-id="${esc(x.car_id)}">Открыть</button></td>${cell(x.auction_id)}${cell(x.car_id)}${cell(x.title)}${cell(x.sale_type)}${cell(x.mileage_km)}${cell(x.chassis)}${cell(x.highest_offer)}${cell(x.minimum_price)}${cell(x.indicative_price)}${cell(x.first_seen_at)}</tr>`),query?'По этому запросу ничего не найдено':'Лотов пока нет');
   rows('bids',d.bids.map(x=>`<tr>${cell(x.observed_at)}${cell(x.auction_id)}${cell(x.car_id)}${cell(x.highest_offer)}${cell(x.source)}</tr>`),'Положительных ставок пока не записано. Это нормально, если highest_offer равен нулю.');
   rows('refs',d.references.map(x=>`<tr>${cell(x.observed_at)}${cell(x.auction_id)}${cell(x.car_id)}${cell(x.minimum_price)}${cell(x.indicative_price)}${cell(x.source)}</tr>`),'Наблюдений цен продавца пока нет');
   rows('lotprices',d.lot_prices.map(x=>`<tr>${cell(x.observed_at)}${cell(x.auction_id)}${cell(x.car_id)}${cell(x.price_type)}${cell(x.amount)}${cell(x.currency)}${cell(x.source_field)}</tr>`),'Отображаемые и фиксированные цены пока не записаны');
@@ -72,8 +117,15 @@ async function refresh(){
 const searchInput=document.getElementById('lot-search');
 let searchTimer;
 searchInput.addEventListener('input',()=>{
+ selectedCarId=null;
  clearTimeout(searchTimer);
  searchTimer=setTimeout(refresh,250);
+});
+document.getElementById('lots').addEventListener('click',event=>{
+ const button=event.target.closest('button[data-car-id]');
+ if(!button)return;
+ selectedCarId=button.dataset.carId;
+ refresh();
 });
 refresh();setInterval(refresh,5000);
 </script>
@@ -90,10 +142,13 @@ class DashboardHandler(BaseHTTPRequestHandler):
         request_url = urlsplit(self.path)
         if request_url.path == "/api/data":
             try:
-                search_query = parse_qs(
-                    request_url.query, keep_blank_values=True
-                ).get("q", [""])[0]
-                payload = self._load_data(search_query=search_query)
+                query_values = parse_qs(request_url.query, keep_blank_values=True)
+                search_query = query_values.get("q", [""])[0]
+                selected_car_id = query_values.get("car_id", [""])[0]
+                payload = self._load_data(
+                    search_query=search_query,
+                    selected_car_id=selected_car_id,
+                )
                 body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
                 self._send(200, body, "application/json; charset=utf-8")
             except (sqlite3.Error, KeyError) as exc:
@@ -109,7 +164,11 @@ class DashboardHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
-    def _load_data(self, search_query: str | None = None) -> dict[str, Any]:
+    def _load_data(
+        self,
+        search_query: str | None = None,
+        selected_car_id: str | None = None,
+    ) -> dict[str, Any]:
         if not self.database_path.is_file():
             raise FileNotFoundError(f"Database not found: {self.database_path}")
         uri = self.database_path.resolve().as_uri() + "?mode=ro"
@@ -149,6 +208,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 for table in count_tables
             }
             normalized_search = " ".join((search_query or "").split())[:100]
+            selected_car_id = " ".join((selected_car_id or "").split())[:100]
             lots_sql = """
                 SELECT a.exleasingcar_auction_id AS auction_id,
                        v.source_car_id AS car_id,
@@ -167,13 +227,21 @@ class DashboardHandler(BaseHTTPRequestHandler):
                         WHERE pr.auction_lot_id=al.id ORDER BY pr.observed_at DESC, pr.id DESC LIMIT 1) AS minimum_price,
                        (SELECT pr.indicative_price FROM price_reference_observations pr
                         WHERE pr.auction_lot_id=al.id ORDER BY pr.observed_at DESC, pr.id DESC LIMIT 1) AS indicative_price,
-                       al.first_seen_at
+                       al.first_seen_at,
+                       al.last_seen_at,
+                       a.source_auction_name,
+                       a.source_auction_country_name,
+                       a.auction_type_label,
+                       a.auction_status_label
                 FROM auction_lots al
                 JOIN vehicles v ON v.id=al.vehicle_id
                 LEFT JOIN auctions a ON a.id=al.auction_id
             """
             parameters: tuple[str, ...] = ()
-            if normalized_search:
+            if selected_car_id:
+                lots_sql += " WHERE v.source_car_id = ?"
+                parameters = (selected_car_id,)
+            elif normalized_search:
                 lots_sql += """
                     WHERE (
                         lower(COALESCE(v.displayed_title, '') || ' ' ||
@@ -187,13 +255,18 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 pattern = f"%{normalized_search}%"
                 parameters = (pattern, pattern, pattern, pattern)
             lots_sql += " ORDER BY al.last_seen_at DESC, al.id DESC"
-            if not normalized_search:
+            if not normalized_search and not selected_car_id:
                 lots_sql += " LIMIT 500"
             lots = [dict(row) for row in connection.execute(lots_sql, parameters)]
             history_filter = ""
             history_parameters: tuple[str, ...] = ()
-            history_limit = "" if normalized_search else " LIMIT 100"
-            if normalized_search:
+            history_limit = (
+                "" if normalized_search or selected_car_id else " LIMIT 100"
+            )
+            if selected_car_id:
+                history_filter = " WHERE v.source_car_id = ?"
+                history_parameters = (selected_car_id,)
+            elif normalized_search:
                 history_filter = """
                     WHERE (
                         lower(COALESCE(v.displayed_title, '') || ' ' ||
@@ -211,6 +284,24 @@ class DashboardHandler(BaseHTTPRequestHandler):
                     history_pattern,
                     history_pattern,
                 )
+
+            vehicle = None
+            if selected_car_id:
+                vehicle_row = connection.execute(
+                    """
+                    SELECT source_car_id, displayed_title, make, model,
+                           chassis_number, chassis_number_fragment,
+                           chassis_number_masked, location_text,
+                           location_country_code, location_country_name,
+                           last_registration_country_code,
+                           last_registration_country_name,
+                           first_seen_at, last_seen_at
+                    FROM vehicles
+                    WHERE source_car_id = ?
+                    """,
+                    (selected_car_id,),
+                ).fetchone()
+                vehicle = dict(vehicle_row) if vehicle_row is not None else None
 
             bids = [dict(row) for row in connection.execute(
                 f"""
@@ -271,6 +362,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
             "database": str(self.database_path),
             "schema_version": version,
             "counts": counts,
+            "selected_vehicle": vehicle,
             "lots": lots,
             "bids": bids,
             "references": references,
