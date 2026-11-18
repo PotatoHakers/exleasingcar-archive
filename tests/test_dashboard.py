@@ -102,3 +102,91 @@ def test_dashboard_search_finds_cars_outside_the_recent_500_rows(tmp_path):
     assert len(recent["lots"]) == 500
     assert "car-0000" not in {lot["car_id"] for lot in recent["lots"]}
     assert [lot["car_id"] for lot in found["lots"]] == ["car-0000"]
+
+
+
+def test_dashboard_search_shows_full_history_across_relisted_auctions(tmp_path):
+    database = ArchiveDatabase(tmp_path / "dashboard.sqlite3")
+    database.initialize()
+    database.upsert_vehicle(
+        "car-target",
+        displayed_title="Audi A6",
+        chassis_number_fragment="WAUZZZ",
+        chassis_number_masked=True,
+    )
+    database.upsert_auction_lot("car-target", "auction-old")
+    database.upsert_auction_lot("car-target", "auction-new")
+    database.upsert_vehicle("car-other", displayed_title="BMW 5 Series")
+    database.upsert_auction_lot("car-other", "auction-other")
+
+    with sqlite3.connect(database.path) as connection:
+        lots = dict(connection.execute(
+            """
+            SELECT a.exleasingcar_auction_id, al.id
+            FROM auction_lots al
+            JOIN auctions a ON a.id = al.auction_id
+            """
+        ).fetchall())
+
+        for auction_id, amount, observed_at in (
+            ("auction-old", "8000", "2021-01-01T00:00:00Z"),
+            ("auction-new", "9500", "2024-01-01T00:00:00Z"),
+            ("auction-other", "12000", "2025-01-01T00:00:00Z"),
+        ):
+            lot_id = lots[auction_id]
+            connection.execute(
+                """
+                INSERT INTO price_observations
+                    (auction_lot_id, highest_offer, observed_at, source)
+                VALUES (?, ?, ?, 'test')
+                """,
+                (lot_id, amount, observed_at),
+            )
+            connection.execute(
+                """
+                INSERT INTO price_reference_observations
+                    (auction_lot_id, minimum_price, indicative_price, observed_at, source)
+                VALUES (?, ?, ?, ?, 'test')
+                """,
+                (lot_id, amount, amount, observed_at),
+            )
+            connection.execute(
+                """
+                INSERT INTO lot_price_observations
+                    (auction_lot_id, price_type, amount, currency, raw_text,
+                     source_field, observed_at, source)
+                VALUES (?, 'displayed_auction_price', ?, 'EUR', ?, 'test',
+                        ?, 'test')
+                """,
+                (lot_id, amount, f"€ {amount}", observed_at),
+            )
+            connection.execute(
+                """
+                INSERT INTO auction_events
+                    (auction_lot_id, auction_phase, bid_status, final_call_active,
+                     live_bidding, auction_end_at, remaining_seconds, observed_at, source)
+                VALUES (?, 'final-call', NULL, 1, 0, NULL, 20, ?, 'test')
+                """,
+                (lot_id, observed_at),
+            )
+
+    handler = object.__new__(DashboardHandler)
+    handler.database_path = database.path
+
+    all_data = handler._load_data()
+    searched = handler._load_data(search_query="WAUZZZ")
+
+    assert len(all_data["bids"]) == 3
+    assert len(searched["lots"]) == 2
+    assert {lot["auction_id"] for lot in searched["lots"]} == {
+        "auction-old",
+        "auction-new",
+    }
+    for history_name in ("bids", "references", "lot_prices", "events"):
+        history = searched[history_name]
+        assert len(history) == 2
+        assert {row["auction_id"] for row in history} == {
+            "auction-old",
+            "auction-new",
+        }
+        assert {row["car_id"] for row in history} == {"car-target"}
