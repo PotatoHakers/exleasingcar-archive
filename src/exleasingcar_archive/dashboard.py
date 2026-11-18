@@ -7,6 +7,7 @@ import sqlite3
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
+from urllib.parse import parse_qs, urlsplit
 
 PAGE = r"""<!doctype html>
 <html lang="ru">
@@ -27,6 +28,10 @@ section{background:#fff;border:1px solid #e1e7ef;border-radius:12px;margin:16px 
 h2{margin:0 0 12px;font-size:17px}.hint{color:#697789;font-size:12px;margin:-4px 0 12px}
 .wrap{overflow:auto}table{border-collapse:collapse;width:100%;font-size:13px;white-space:nowrap}th,td{padding:9px 10px;text-align:left;border-bottom:1px solid #edf0f4;vertical-align:top}th{color:#657386;font-weight:600;background:#f8fafc;position:sticky;top:0}tbody tr:hover{background:#f9fbfd}.mono{font-family:ui-monospace,SFMono-Regular,Consolas,monospace}.muted{color:#778394}.pill{display:inline-block;border-radius:999px;padding:3px 8px;background:#eef2f7;color:#46566c;font-size:11px}.good{background:#e8f5ee;color:#187347}.warn{background:#fff4df;color:#8c5a00}.empty{padding:18px;text-align:center;color:#7a8796}
 footer{color:#7b8795;font-size:12px;margin-top:20px}
+.search-controls{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin:12px 0 14px}
+.search-controls label{font-size:13px;color:#536273}
+.search-controls input{flex:1;min-width:240px;max-width:560px;padding:10px 12px;border:1px solid #ccd5e0;border-radius:8px;font:inherit}
+#search-status{font-size:12px}
 @media(max-width:640px){.top{padding:20px}.top h1{font-size:20px}main{padding:0 12px 28px}.card .v{font-size:22px}}
 </style>
 </head>
@@ -35,7 +40,7 @@ footer{color:#7b8795;font-size:12px;margin-top:20px}
 <main>
 <div class="status"><span><i class="dot"></i>Подключено к локальной базе</span><span id="dbpath" class="mono"></span><span id="updated"></span></div>
 <div id="metrics" class="cards"><div class="card">Загрузка…</div></div>
-<section><h2>Лоты автомобилей</h2><p class="hint">Каждая строка — автомобиль в конкретном аукционе. Повторный выход на торги отображается отдельным лотом.</p><div class="wrap"><table><thead><tr><th>Аукцион</th><th>ID автомобиля</th><th>Автомобиль</th><th>Тип продажи</th><th>Пробег, км</th><th>Номер кузова</th><th>Последняя ставка</th><th>Мин. цена продавца</th><th>Ориентир</th><th>Первое наблюдение</th></tr></thead><tbody id="lots"></tbody></table></div></section>
+<section><h2>Лоты автомобилей</h2><p class="hint">Каждая строка — автомобиль в конкретном аукционе. Повторный выход на торги отображается отдельным лотом.</p><div class="search-controls"><label for="lot-search">Поиск по названию, ID или номеру кузова</label><input id="lot-search" type="search" autocomplete="off" placeholder="Например, Mercedes, 19702473 или VIN"><span id="search-status" class="muted" aria-live="polite"></span></div><div class="wrap"><table><thead><tr><th>Аукцион</th><th>ID автомобиля</th><th>Автомобиль</th><th>Тип продажи</th><th>Пробег, км</th><th>Номер кузова</th><th>Последняя ставка</th><th>Мин. цена продавца</th><th>Ориентир</th><th>Первое наблюдение</th></tr></thead><tbody id="lots"></tbody></table></div></section>
 <section><h2>История реальных ставок</h2><p class="hint">Здесь отображаются только положительные значения highest_offer. Нулевая ставка не считается сделанной ставкой.</p><div class="wrap"><table><thead><tr><th>Дата наблюдения</th><th>Аукцион</th><th>ID автомобиля</th><th>Максимальная ставка</th><th>Источник</th></tr></thead><tbody id="bids"></tbody></table></div></section>
 <section><h2>История цен продавца</h2><p class="hint">Минимальная и ориентировочная цены — отдельно от реальных ставок.</p><div class="wrap"><table><thead><tr><th>Дата наблюдения</th><th>Аукцион</th><th>ID автомобиля</th><th>Минимальная цена</th><th>Ориентировочная цена</th><th>Источник</th></tr></thead><tbody id="refs"></tbody></table></div></section>
 <section><h2>Отображаемые и фиксированные цены</h2><p class="hint">Начальная/текущая цена открытого аукциона и цена «Купить сейчас» хранятся отдельно от ставок и справочных цен продавца.</p><div class="wrap"><table><thead><tr><th>Дата наблюдения</th><th>Аукцион</th><th>ID автомобиля</th><th>Тип цены</th><th>Сумма</th><th>Валюта</th><th>Поле источника</th></tr></thead><tbody id="lotprices"></tbody></table></div></section>
@@ -48,19 +53,28 @@ const cell = v => `<td>${esc(v)}</td>`;
 function rows(id, values, empty) { const el=document.getElementById(id); el.innerHTML=values.length?values.join(""):`<tr><td class="empty" colspan="12">${esc(empty)}</td></tr>`; }
 async function refresh(){
  try{
-  const response=await fetch('/api/data',{cache:'no-store'}); if(!response.ok) throw new Error(await response.text());
+  const query=document.getElementById('lot-search').value.trim();
+  const apiUrl='/api/data'+(query?'?q='+encodeURIComponent(query):'');
+  const response=await fetch(apiUrl,{cache:'no-store'}); if(!response.ok) throw new Error(await response.text());
   const d=await response.json();
   document.getElementById('dbpath').textContent=d.database;
   document.getElementById('updated').textContent='Обновлено: '+new Date().toLocaleTimeString();
   const metrics=[['Аукционов',d.counts.auctions],['Автомобилей',d.counts.vehicles],['Лотов',d.counts.auction_lots],['Наблюдений ставок',d.counts.price_observations],['Цен продавца',d.counts.price_reference_observations],['Отображаемых/фиксированных цен',d.counts.lot_price_observations],['Событий',d.counts.auction_events]];
   document.getElementById('metrics').innerHTML=metrics.map(x=>`<div class="card"><div class="k">${esc(x[0])}</div><div class="v">${esc(x[1])}</div></div>`).join('');
-  rows('lots',d.lots.map(x=>`<tr>${cell(x.auction_id)}${cell(x.car_id)}${cell(x.title)}${cell(x.sale_type)}${cell(x.mileage_km)}${cell(x.chassis)}${cell(x.highest_offer)}${cell(x.minimum_price)}${cell(x.indicative_price)}${cell(x.first_seen_at)}</tr>`),'Лотов пока нет');
+  document.getElementById('search-status').textContent=query?`Найдено лотов: ${d.lots.length}`:`Показаны последние ${d.lots.length} из ${d.counts.auction_lots}`;
+  rows('lots',d.lots.map(x=>`<tr>${cell(x.auction_id)}${cell(x.car_id)}${cell(x.title)}${cell(x.sale_type)}${cell(x.mileage_km)}${cell(x.chassis)}${cell(x.highest_offer)}${cell(x.minimum_price)}${cell(x.indicative_price)}${cell(x.first_seen_at)}</tr>`),query?'По этому запросу ничего не найдено':'Лотов пока нет');
   rows('bids',d.bids.map(x=>`<tr>${cell(x.observed_at)}${cell(x.auction_id)}${cell(x.car_id)}${cell(x.highest_offer)}${cell(x.source)}</tr>`),'Положительных ставок пока не записано. Это нормально, если highest_offer равен нулю.');
   rows('refs',d.references.map(x=>`<tr>${cell(x.observed_at)}${cell(x.auction_id)}${cell(x.car_id)}${cell(x.minimum_price)}${cell(x.indicative_price)}${cell(x.source)}</tr>`),'Наблюдений цен продавца пока нет');
   rows('lotprices',d.lot_prices.map(x=>`<tr>${cell(x.observed_at)}${cell(x.auction_id)}${cell(x.car_id)}${cell(x.price_type)}${cell(x.amount)}${cell(x.currency)}${cell(x.source_field)}</tr>`),'Отображаемые и фиксированные цены пока не записаны');
   rows('events',d.events.map(x=>`<tr>${cell(x.observed_at)}${cell(x.auction_id)}${cell(x.car_id)}${cell(x.auction_phase)}${cell(x.bid_status)}${cell(x.auction_end_at)}${cell(x.remaining_seconds)}<td>${x.final_call_active===1?'<span class="pill warn">Да</span>':x.final_call_active===0?'<span class="pill">Нет</span>':'—'}</td></tr>`),'Событий пока нет');
  }catch(e){document.getElementById('updated').textContent='Ошибка чтения базы: '+e.message;}
 }
+const searchInput=document.getElementById('lot-search');
+let searchTimer;
+searchInput.addEventListener('input',()=>{
+ clearTimeout(searchTimer);
+ searchTimer=setTimeout(refresh,250);
+});
 refresh();setInterval(refresh,5000);
 </script>
 </body></html>"""
@@ -73,9 +87,13 @@ class DashboardHandler(BaseHTTPRequestHandler):
         if self.path in ("/", "/index.html"):
             self._send(200, PAGE.encode("utf-8"), "text/html; charset=utf-8")
             return
-        if self.path == "/api/data":
+        request_url = urlsplit(self.path)
+        if request_url.path == "/api/data":
             try:
-                payload = self._load_data()
+                search_query = parse_qs(
+                    request_url.query, keep_blank_values=True
+                ).get("q", [""])[0]
+                payload = self._load_data(search_query=search_query)
                 body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
                 self._send(200, body, "application/json; charset=utf-8")
             except (sqlite3.Error, KeyError) as exc:
@@ -91,7 +109,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
-    def _load_data(self) -> dict[str, Any]:
+    def _load_data(self, search_query: str | None = None) -> dict[str, Any]:
         if not self.database_path.is_file():
             raise FileNotFoundError(f"Database not found: {self.database_path}")
         uri = self.database_path.resolve().as_uri() + "?mode=ro"
@@ -130,8 +148,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 table: int(connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0])
                 for table in count_tables
             }
-            lots = [dict(row) for row in connection.execute(
-                """
+            normalized_search = " ".join((search_query or "").split())[:100]
+            lots_sql = """
                 SELECT a.exleasingcar_auction_id AS auction_id,
                        v.source_car_id AS car_id,
                        COALESCE(v.displayed_title, trim(COALESCE(v.make,'') || ' ' || COALESCE(v.model,''))) AS title,
@@ -153,9 +171,25 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 FROM auction_lots al
                 JOIN vehicles v ON v.id=al.vehicle_id
                 LEFT JOIN auctions a ON a.id=al.auction_id
-                ORDER BY al.last_seen_at DESC, al.id DESC LIMIT 500
+            """
+            parameters: tuple[str, ...] = ()
+            if normalized_search:
+                lots_sql += """
+                    WHERE (
+                        lower(COALESCE(v.displayed_title, '') || ' ' ||
+                              COALESCE(v.make, '') || ' ' || COALESCE(v.model, ''))
+                            LIKE lower(?)
+                        OR lower(v.source_car_id) LIKE lower(?)
+                        OR lower(COALESCE(v.chassis_number, '')) LIKE lower(?)
+                        OR lower(COALESCE(v.chassis_number_fragment, '')) LIKE lower(?)
+                    )
                 """
-            )]
+                pattern = f"%{normalized_search}%"
+                parameters = (pattern, pattern, pattern, pattern)
+            lots_sql += " ORDER BY al.last_seen_at DESC, al.id DESC"
+            if not normalized_search:
+                lots_sql += " LIMIT 500"
+            lots = [dict(row) for row in connection.execute(lots_sql, parameters)]
             bids = [dict(row) for row in connection.execute(
                 """
                 SELECT po.observed_at, a.exleasingcar_auction_id AS auction_id,
