@@ -152,3 +152,27 @@ def test_parse_varied_auction_cards_with_encoded_links_and_company_names():
     restricted = auctions["210884"]
     assert restricted.source_auction_name is None
     assert restricted.source_url is None
+
+
+
+def test_parse_fixed_price_only_auction_without_overriding_mixed_auction_types():
+    result = parse_auction_listings(
+        _read_fixture("auction_listings_fixed_price.html"),
+        "https://www.exleasingcar.com/ru/авто-аукционы",
+    )
+    auctions = {auction.exleasingcar_auction_id: auction for auction in result}
+
+    fixed_only = auctions["209633"]
+    assert fixed_only.source_auction_name == "Our Stock"
+    assert fixed_only.source_auction_country_code == "LT"
+    assert fixed_only.source_auction_country_name == "Литва"
+    assert fixed_only.auction_type_label == "Фиксированная цена автомобилей"
+
+    open_with_fixed_price_cars = auctions["210854"]
+    assert open_with_fixed_price_cars.auction_type_label == "Английский аукцион"
+
+    closed_with_fixed_price_cars = auctions["209954"]
+    assert closed_with_fixed_price_cars.auction_type_label == "Закрытые торги аукциона"
+
+    unknown = auctions["210999"]
+    assert unknown.auction_type_label is None
