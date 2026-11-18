@@ -17,7 +17,13 @@ htmlcov/
 data/raw/
 data/exports/
 data/browser_profile/
+
+# Local SQLite databases and their sidecar files
+*.sqlite
 *.sqlite3
+*.db
+*-shm
+*-wal
 
 # IDE
 .idea/

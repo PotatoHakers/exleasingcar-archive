@@ -1,6 +1,8 @@
 # Exleasingcar Archive
 
-Локальный архив публичных данных Exleasingcar
+Локальный архив публичных данных Exleasingcar.
+
+## Проверка кода
 
 ```bash
 source .venv/Scripts/activate
@@ -8,9 +10,9 @@ python -m ruff check src tests
 python -m pytest -q
 ```
 
-## Тестовый сбор через браузер
+## Ограниченный тестовый сбор через браузер
 
-Для ограниченного прогона одного аукциона:
+Для прогона одного аукциона с ограничением количества страниц:
 
 ```bash
 PYTHONPATH=src python -m exleasingcar_archive.collector \
@@ -20,12 +22,17 @@ PYTHONPATH=src python -m exleasingcar_archive.collector \
   --max-detail-pages 5
 ```
 
+## Импорт сохранённого HTML-снимка
+
+В репозитории есть небольшой пример снимка в `tests/fixtures/fresh_docu_sample/`:
 
 ```bash
 PYTHONPATH=src python -m exleasingcar_archive.snapshot_import \
-  --auction-list docu/auction_list.html \
-  --catalog docu/car_list.html \
-  --vehicle-detail docu/car.html \
-  --api-response docu/response.txt \
+  --auction-list tests/fixtures/fresh_docu_sample/auction_list.html \
+  --catalog tests/fixtures/fresh_docu_sample/car_list.html \
+  --vehicle-detail tests/fixtures/fresh_docu_sample/car.html \
+  --api-response tests/fixtures/fresh_docu_sample/response.txt \
   --database data/parser_validation.sqlite3
 ```
+
+Команда импортирует сохранённые данные в локальную SQLite-базу и не выполняет сетевых запросов.
