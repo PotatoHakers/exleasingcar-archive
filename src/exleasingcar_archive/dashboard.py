@@ -131,6 +131,7 @@ async function refresh(){
   document.getElementById('metrics').innerHTML=metrics.map(x=>`<div class="card"><div class="k">${esc(x[0])}</div><div class="v">${esc(x[1])}</div></div>`).join('');
   renderCarCard(d.selected_vehicle,d.lots);
   const pagination=d.pagination;
+  if(!selectedCarId) currentPage=pagination.page;
   const paginationPanel=document.getElementById('lot-pagination');
   if(selectedCarId){
    document.getElementById('search-status').textContent=`Карточка: ${d.selected_vehicle?esc(d.selected_vehicle.source_car_id):'не найдена'}`;
