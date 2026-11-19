@@ -10,6 +10,8 @@ from urllib.parse import unquote, urljoin
 
 from bs4 import BeautifulSoup, Tag
 
+from .models import AuctionCardMarker
+
 AUCTION_ID_PATTERN = re.compile(r"(?:auction|аукцион)-(\d+)", re.IGNORECASE)
 FLAG_PATTERN = re.compile(r"^flag-([a-z]{2})$", re.IGNORECASE)
 
@@ -26,6 +28,7 @@ class ParsedAuctionListing:
     auction_status_label: str | None
     vehicle_count: int | None
     source_url: str | None
+    markers: tuple[AuctionCardMarker, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -182,6 +185,55 @@ def _parse_vehicle_count(card: Tag) -> int | None:
     return int(match.group(1)) if match else None
 
 
+
+def _parse_auction_card_markers(header: Tag) -> tuple[AuctionCardMarker, ...]:
+    """Keep each independent SVG marker shown in the auction-card header."""
+    marker_groups = {
+        "ac.svg": "auction_format",
+        "mail-b.svg": "auction_format",
+        "euro-sign.svg": "fixed_price_option",
+        "type-2.svg": "vehicle_condition",
+        "type-3.svg": "vehicle_category",
+        "favorite.svg": "recommendation",
+    }
+    markers: dict[str, AuctionCardMarker] = {}
+
+    for image in header.find_all("img"):
+        source = str(image.get("src") or "").strip()
+        icon_filename = source.rsplit("/", 1)[-1].split("?", 1)[0].lower()
+        if not icon_filename.endswith(".svg") or icon_filename == "car.svg":
+            continue
+
+        label = (
+            str(image.get("title") or image.get("alt") or "").strip() or None
+        )
+        if label is not None and label.casefold() == "icon":
+            label = None
+
+        # The recommendation star has its explanation in a hidden tooltip
+        # next to the image rather than in its alt/title attributes.
+        if label is None:
+            parent = image.parent
+            for _ in range(3):
+                if not isinstance(parent, Tag):
+                    break
+                candidate = _text(parent)
+                if candidate:
+                    label = candidate
+                    break
+                parent = parent.parent
+
+        marker = AuctionCardMarker(
+            icon_filename=icon_filename,
+            marker_group=marker_groups.get(icon_filename, "other"),
+            label=label,
+        )
+        existing = markers.get(icon_filename)
+        if existing is None or (existing.label is None and marker.label is not None):
+            markers[icon_filename] = marker
+
+    return tuple(markers.values())
+
 def _parse_auction_card(
     card: Tag,
     page_url: str | None,
@@ -260,6 +312,7 @@ def _parse_auction_card(
             str(type_image.get("alt") or type_image.get("title") or "").strip()
             or None
         )
+    auction_markers = _parse_auction_card_markers(auction_header)
 
     auction_status_label = None
     for button in card.find_all("button"):
@@ -277,6 +330,7 @@ def _parse_auction_card(
         auction_status_label=auction_status_label,
         vehicle_count=_parse_vehicle_count(card),
         source_url=source_url,
+        markers=auction_markers,
     )
 
 
