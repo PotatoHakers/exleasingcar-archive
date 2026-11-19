@@ -331,12 +331,23 @@ def test_dashboard_returns_current_markers_per_auction_without_crossing_relisted
 
     assert len(markers_by_auction["auction-fixed"]) == 2
     assert {
-        marker["marker_group"]
+        (
+            marker["icon_filename"],
+            marker["marker_group"],
+            marker["label"],
+        )
         for marker in markers_by_auction["auction-fixed"]
-    } == {"fixed_price_option", "recommendation"}
-    assert markers_by_auction["auction-fixed"][0]["icon_filename"] in {
-        "euro-sign.svg",
-        "favorite.svg",
+    } == {
+        (
+            "euro-sign.svg",
+            "fixed_price_option",
+            "Фиксированная цена автомобилей",
+        ),
+        (
+            "favorite.svg",
+            "recommendation",
+            "Аукцион рекомендован Exleasingcar",
+        ),
     }
     assert markers_by_auction["auction-other"] == [
         {
