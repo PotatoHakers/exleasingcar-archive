@@ -9,6 +9,8 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlsplit
 
+LOT_PAGE_SIZE = 500
+
 PAGE = r"""<!doctype html>
 <html lang="ru">
 <head>
@@ -32,6 +34,10 @@ footer{color:#7b8795;font-size:12px;margin-top:20px}
 .search-controls label{font-size:13px;color:#536273}
 .search-controls input{flex:1;min-width:240px;max-width:560px;padding:10px 12px;border:1px solid #ccd5e0;border-radius:8px;font:inherit}
 #search-status{font-size:12px}
+.pagination-controls{display:flex;justify-content:flex-end;align-items:center;gap:10px;flex-wrap:wrap;margin-top:12px;color:#536273;font-size:12px}
+.pagination-controls[hidden]{display:none}
+.pagination-controls button{border:1px solid #cbd5e1;background:#fff;color:#23364c;padding:7px 11px;border-radius:7px;cursor:pointer;font:inherit}
+.pagination-controls button:disabled{opacity:.45;cursor:default}
 .detail-card{background:#fff;border:1px solid #ccd7e3;border-radius:12px;padding:18px;margin:16px 0;box-shadow:0 2px 8px #182b450c}
 .detail-card[hidden]{display:none}
 .detail-top{display:flex;justify-content:space-between;align-items:flex-start;gap:12px;flex-wrap:wrap}
@@ -52,7 +58,7 @@ footer{color:#7b8795;font-size:12px;margin-top:20px}
 <main>
 <div class="status"><span><i class="dot"></i>Подключено к локальной базе</span><span id="dbpath" class="mono"></span><span id="updated"></span></div>
 <div id="metrics" class="cards"><div class="card">Загрузка…</div></div>
-<section><h2>Лоты автомобилей</h2><p class="hint">Каждая строка — автомобиль в конкретном аукционе. Повторный выход на торги отображается отдельным лотом. Маркеры относятся к карточке аукциона, а не к отдельной машине.</p><div class="search-controls"><label for="lot-search">Поиск по названию, ID или номеру кузова</label><input id="lot-search" type="search" autocomplete="off" placeholder="Например, Mercedes, 19702473 или VIN"><span id="search-status" class="muted" aria-live="polite"></span></div><section id="car-card" class="detail-card" hidden aria-live="polite"></section><div class="wrap"><table><thead><tr><th></th><th>Аукцион</th><th>ID автомобиля</th><th>Автомобиль</th><th>Тип продажи</th><th>Маркеры аукциона</th><th>Пробег, км</th><th>Номер кузова</th><th>Последняя ставка</th><th>Мин. цена продавца</th><th>Ориентир</th><th>Первое наблюдение</th></tr></thead><tbody id="lots"></tbody></table></div></section>
+<section><h2>Лоты автомобилей</h2><p class="hint">Каждая строка — автомобиль в конкретном аукционе. Повторный выход на торги отображается отдельным лотом. Маркеры относятся к карточке аукциона, а не к отдельной машине.</p><div class="search-controls"><label for="lot-search">Поиск по названию, ID или номеру кузова</label><input id="lot-search" type="search" autocomplete="off" placeholder="Например, Mercedes, 19702473 или VIN"><span id="search-status" class="muted" aria-live="polite"></span></div><section id="car-card" class="detail-card" hidden aria-live="polite"></section><div class="wrap"><table><thead><tr><th></th><th>Аукцион</th><th>ID автомобиля</th><th>Автомобиль</th><th>Тип продажи</th><th>Маркеры аукциона</th><th>Пробег, км</th><th>Номер кузова</th><th>Последняя ставка</th><th>Мин. цена продавца</th><th>Ориентир</th><th>Первое наблюдение</th></tr></thead><tbody id="lots"></tbody></table></div><div id="lot-pagination" class="pagination-controls" hidden><button type="button" id="page-prev">← Назад</button><span id="page-info"></span><button type="button" id="page-next">Дальше →</button></div></section>
 <section><h2>История реальных ставок</h2><p class="hint">Здесь отображаются только положительные значения highest_offer. Нулевая ставка не считается сделанной ставкой.</p><div class="wrap"><table><thead><tr><th>Дата наблюдения</th><th>Аукцион</th><th>ID автомобиля</th><th>Максимальная ставка</th><th>Источник</th></tr></thead><tbody id="bids"></tbody></table></div></section>
 <section><h2>История цен продавца</h2><p class="hint">Минимальная и ориентировочная цены — отдельно от реальных ставок.</p><div class="wrap"><table><thead><tr><th>Дата наблюдения</th><th>Аукцион</th><th>ID автомобиля</th><th>Минимальная цена</th><th>Ориентировочная цена</th><th>Источник</th></tr></thead><tbody id="refs"></tbody></table></div></section>
 <section><h2>Отображаемые и фиксированные цены</h2><p class="hint">Начальная/текущая цена открытого аукциона и цена «Купить сейчас» хранятся отдельно от ставок и справочных цен продавца.</p><div class="wrap"><table><thead><tr><th>Дата наблюдения</th><th>Аукцион</th><th>ID автомобиля</th><th>Тип цены</th><th>Сумма</th><th>Валюта</th><th>Поле источника</th></tr></thead><tbody id="lotprices"></tbody></table></div></section>
@@ -80,6 +86,7 @@ const markerBadges = markers => {
 };
 function rows(id, values, empty) { const el=document.getElementById(id); el.innerHTML=values.length?values.join(""):`<tr><td class="empty" colspan="12">${esc(empty)}</td></tr>`; }
 let selectedCarId=null;
+let currentPage=1;
 function renderCarCard(vehicle,lots){
  const panel=document.getElementById('car-card');
  if(!vehicle){panel.hidden=true;panel.innerHTML='';return;}
@@ -113,6 +120,7 @@ async function refresh(){
   const params=new URLSearchParams();
   if(selectedCarId) params.set('car_id',selectedCarId);
   else if(query) params.set('q',query);
+  params.set('page',String(currentPage));
   const queryString=params.toString();
   const apiUrl='/api/data'+(queryString?'?'+queryString:'');
   const response=await fetch(apiUrl,{cache:'no-store'}); if(!response.ok) throw new Error(await response.text());
@@ -122,7 +130,21 @@ async function refresh(){
   const metrics=[['Аукционов',d.counts.auctions],['Автомобилей',d.counts.vehicles],['Лотов',d.counts.auction_lots],['Наблюдений ставок',d.counts.price_observations],['Цен продавца',d.counts.price_reference_observations],['Отображаемых/фиксированных цен',d.counts.lot_price_observations],['Событий',d.counts.auction_events]];
   document.getElementById('metrics').innerHTML=metrics.map(x=>`<div class="card"><div class="k">${esc(x[0])}</div><div class="v">${esc(x[1])}</div></div>`).join('');
   renderCarCard(d.selected_vehicle,d.lots);
-  document.getElementById('search-status').textContent=selectedCarId?`Карточка: ${d.selected_vehicle?esc(d.selected_vehicle.source_car_id):'не найдена'}`:query?`Найдено лотов: ${d.lots.length}`:`Показаны последние ${d.lots.length} из ${d.counts.auction_lots}`;
+  const pagination=d.pagination;
+  if(!selectedCarId) currentPage=pagination.page;
+  const paginationPanel=document.getElementById('lot-pagination');
+  if(selectedCarId){
+   document.getElementById('search-status').textContent=`Карточка: ${d.selected_vehicle?esc(d.selected_vehicle.source_car_id):'не найдена'}`;
+   paginationPanel.hidden=true;
+  }else{
+   const first= pagination.total_lots ? (pagination.page-1)*pagination.page_size+1 : 0;
+   const last=Math.min(pagination.page*pagination.page_size,pagination.total_lots);
+   document.getElementById('search-status').textContent=`Показаны ${first}–${last} из ${pagination.total_lots}${query?' найденных':' лотов'}`;
+   document.getElementById('page-info').textContent=`Страница ${pagination.page} из ${pagination.total_pages}`;
+   document.getElementById('page-prev').disabled=!pagination.has_previous;
+   document.getElementById('page-next').disabled=!pagination.has_next;
+   paginationPanel.hidden=pagination.total_pages<=1;
+  }
   rows('lots',d.lots.map(x=>`<tr><td><button type="button" class="open-car" data-car-id="${esc(x.car_id)}">Открыть</button></td>${cell(x.auction_id)}${cell(x.car_id)}${cell(x.title)}${cell(x.sale_type)}<td>${markerBadges(x.markers)}</td>${cell(x.mileage_km)}${cell(x.chassis)}${cell(x.highest_offer)}${cell(x.minimum_price)}${cell(x.indicative_price)}${cell(x.first_seen_at)}</tr>`),query?'По этому запросу ничего не найдено':'Лотов пока нет');
   rows('bids',d.bids.map(x=>`<tr>${cell(x.observed_at)}${cell(x.auction_id)}${cell(x.car_id)}${cell(x.highest_offer)}${cell(x.source)}</tr>`),'Положительных ставок пока не записано. Это нормально, если highest_offer равен нулю.');
   rows('refs',d.references.map(x=>`<tr>${cell(x.observed_at)}${cell(x.auction_id)}${cell(x.car_id)}${cell(x.minimum_price)}${cell(x.indicative_price)}${cell(x.source)}</tr>`),'Наблюдений цен продавца пока нет');
@@ -134,6 +156,7 @@ const searchInput=document.getElementById('lot-search');
 let searchTimer;
 searchInput.addEventListener('input',()=>{
  selectedCarId=null;
+ currentPage=1;
  clearTimeout(searchTimer);
  searchTimer=setTimeout(refresh,250);
 });
@@ -142,6 +165,12 @@ document.getElementById('lots').addEventListener('click',event=>{
  if(!button)return;
  selectedCarId=button.dataset.carId;
  refresh();
+});
+document.getElementById('page-prev').addEventListener('click',()=>{
+ if(currentPage>1){currentPage-=1;refresh();}
+});
+document.getElementById('page-next').addEventListener('click',()=>{
+ currentPage+=1;refresh();
 });
 refresh();setInterval(refresh,5000);
 </script>
@@ -161,9 +190,14 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 query_values = parse_qs(request_url.query, keep_blank_values=True)
                 search_query = query_values.get("q", [""])[0]
                 selected_car_id = query_values.get("car_id", [""])[0]
+                try:
+                    page = int(query_values.get("page", ["1"])[0])
+                except ValueError:
+                    page = 1
                 payload = self._load_data(
                     search_query=search_query,
                     selected_car_id=selected_car_id,
+                    page=page,
                 )
                 body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
                 self._send(200, body, "application/json; charset=utf-8")
@@ -184,6 +218,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
         self,
         search_query: str | None = None,
         selected_car_id: str | None = None,
+        page: int = 1,
     ) -> dict[str, Any]:
         if not self.database_path.is_file():
             raise FileNotFoundError(f"Database not found: {self.database_path}")
@@ -253,12 +288,13 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 JOIN vehicles v ON v.id=al.vehicle_id
                 LEFT JOIN auctions a ON a.id=al.auction_id
             """
+            lots_filter = ""
             parameters: tuple[str, ...] = ()
             if selected_car_id:
-                lots_sql += " WHERE v.source_car_id = ?"
+                lots_filter = " WHERE v.source_car_id = ?"
                 parameters = (selected_car_id,)
             elif normalized_search:
-                lots_sql += """
+                lots_filter = """
                     WHERE (
                         lower(COALESCE(v.displayed_title, '') || ' ' ||
                               COALESCE(v.make, '') || ' ' || COALESCE(v.model, ''))
@@ -270,9 +306,30 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 """
                 pattern = f"%{normalized_search}%"
                 parameters = (pattern, pattern, pattern, pattern)
-            lots_sql += " ORDER BY al.last_seen_at DESC, al.id DESC"
-            if not normalized_search and not selected_car_id:
-                lots_sql += " LIMIT 500"
+
+            total_lots = int(connection.execute(
+                """
+                SELECT COUNT(*)
+                FROM auction_lots al
+                JOIN vehicles v ON v.id=al.vehicle_id
+                """ + lots_filter,
+                parameters,
+            ).fetchone()[0])
+            total_pages = max(1, (total_lots + LOT_PAGE_SIZE - 1) // LOT_PAGE_SIZE)
+
+            requested_page = max(1, int(page))
+            if selected_car_id:
+                current_page = 1
+                lots_sql += lots_filter + " ORDER BY al.last_seen_at DESC, al.id DESC"
+            else:
+                current_page = min(requested_page, total_pages)
+                offset = (current_page - 1) * LOT_PAGE_SIZE
+                lots_sql += (
+                    lots_filter
+                    + " ORDER BY al.last_seen_at DESC, al.id DESC LIMIT ? OFFSET ?"
+                )
+                parameters = (*parameters, LOT_PAGE_SIZE, offset)
+
             lots = [dict(row) for row in connection.execute(lots_sql, parameters)]
             markers_by_auction: dict[str, list[dict[str, Any]]] = {}
             auction_ids = sorted({
@@ -412,6 +469,14 @@ class DashboardHandler(BaseHTTPRequestHandler):
             "counts": counts,
             "selected_vehicle": vehicle,
             "lots": lots,
+            "pagination": {
+                "page": current_page,
+                "page_size": LOT_PAGE_SIZE,
+                "total_lots": total_lots,
+                "total_pages": total_pages,
+                "has_previous": not bool(selected_car_id) and current_page > 1,
+                "has_next": not bool(selected_car_id) and current_page < total_pages,
+            },
             "bids": bids,
             "references": references,
             "lot_prices": lot_prices,
