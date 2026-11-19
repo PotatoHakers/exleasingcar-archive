@@ -162,7 +162,7 @@ class ArchiveDatabase:
             connection.close()
 
     def initialize(self) -> None:
-        """Create schema v5 or safely migrate older database versions."""
+        """Create schema v6 or safely migrate older database versions."""
         self.path.parent.mkdir(parents=True, exist_ok=True)
 
         with self._connect() as connection:
