@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 
 from .api_parser import ParsedCarUpdate
 from .database import ArchiveDatabase
+from .models import AuctionCardMarker
 
 
 @dataclass(frozen=True, slots=True)
@@ -20,6 +21,7 @@ class AuctionContext:
     source_auction_country_name: str | None = None
     auction_type_label: str | None = None
     auction_status_label: str | None = None
+    markers: tuple[AuctionCardMarker, ...] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -96,6 +98,7 @@ def store_car_updates(
         source_auction_country_name=auction.source_auction_country_name,
         auction_type_label=auction.auction_type_label,
         auction_status_label=auction.auction_status_label,
+        markers=auction.markers,
         observed_at=timestamp,
     )
 
