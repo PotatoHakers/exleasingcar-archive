@@ -97,16 +97,22 @@ def classify_sale_type(
         return None
 
     classes = set(bids_container.get("class", []))
-    modes = classes.intersection({"open", "closed", "fix"})
-    if len(modes) != 1:
-        return None
+    has_open = "open" in classes
+    has_closed = "closed" in classes
+    has_fixed_price = "fix" in classes
 
-    mode = modes.pop()
-    return {
-        "open": SaleType.OPEN_AUCTION,
-        "closed": SaleType.CLOSED_AUCTION,
-        "fix": SaleType.FIXED_PRICE,
-    }[mode]
+    # The site can mark an auction as both "open"/"closed" and "fix".
+    # In that case the fixed-price option is additional; the auction mode
+    # remains the open/closed mode shown by the page.
+    if has_open and has_closed:
+        return None
+    if has_open:
+        return SaleType.OPEN_AUCTION
+    if has_closed:
+        return SaleType.CLOSED_AUCTION
+    if has_fixed_price:
+        return SaleType.FIXED_PRICE
+    return None
 
 
 def has_hot_bid_marker(soup: BeautifulSoup) -> bool:
