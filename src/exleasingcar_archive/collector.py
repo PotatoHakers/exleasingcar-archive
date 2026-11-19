@@ -429,7 +429,7 @@ class ExleasingcarCollector:
             return False
 
         dismiss_pattern = re.compile(
-            r"^\\s*(?:NO\\s+THANKS|NOT\\s+NOW|НЕТ,?\\s*СПАСИБО|НЕ\\s+СЕЙЧАС)\\s*$",
+            r"^\s*(?:NO\s+THANKS|NOT\s+NOW|НЕТ,?\s*СПАСИБО|НЕ\s+СЕЙЧАС)\s*$",
             re.IGNORECASE,
         )
         candidates = (
