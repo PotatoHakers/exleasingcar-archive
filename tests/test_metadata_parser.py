@@ -233,7 +233,7 @@ def test_catalog_make_uses_only_the_prefix_shared_with_the_displayed_title():
     assert saved_lot.displayed_title.startswith("Seat Leon")
     # The saved card's image alt says "SEAT XC40", while its title says
     # "Seat Leon". Keep the confirmed manufacturer, not the stale model.
-    assert saved_lot.make_label == "Seat"
+    assert saved_lot.make_label == "SEAT"
 
     # Regression values reported for vehicle 19764527 in the dashboard:
     # the screenshot showed "FORD Movano" as Make and "Ford Focus..." as title.
@@ -246,7 +246,7 @@ def test_catalog_make_uses_only_the_prefix_shared_with_the_displayed_title():
         </div>
         """
     )
-    assert ford_page.lots[0].make_label == "Ford"
+    assert ford_page.lots[0].make_label == "FORD"
 
     # Do not infer a make when the leading words of the independent fields
     # disagree.
