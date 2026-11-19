@@ -3,7 +3,7 @@ from decimal import Decimal
 
 from exleasingcar_archive.dashboard import DashboardHandler
 from exleasingcar_archive.database import ArchiveDatabase
-from exleasingcar_archive.models import PriceType, SaleType
+from exleasingcar_archive.models import AuctionCardMarker, PriceType, SaleType
 from exleasingcar_archive.parsers import PriceObservation
 
 
@@ -274,3 +274,86 @@ def test_dashboard_car_card_shows_vehicle_details_and_all_auction_history(tmp_pa
     assert len(payload["events"]) == 2
     assert {row["car_id"] for row in payload["bids"]} == {"car-card-1"}
     assert {row["car_id"] for row in payload["events"]} == {"car-card-1"}
+
+
+
+def test_dashboard_returns_current_markers_per_auction_without_crossing_relisted_lots(
+    tmp_path,
+):
+    database = ArchiveDatabase(tmp_path / "dashboard-markers.sqlite3")
+    database.initialize()
+
+    database.upsert_vehicle("car-shared", displayed_title="Audi A6")
+    database.upsert_auction_lot("car-shared", "auction-fixed")
+    database.upsert_auction_lot("car-shared", "auction-other")
+    database.upsert_auction(
+        "auction-fixed",
+        source_auction_name="Our Stock",
+        markers=(
+            AuctionCardMarker(
+                "euro-sign.svg",
+                "fixed_price_option",
+                "Фиксированная цена автомобилей",
+            ),
+            AuctionCardMarker(
+                "favorite.svg",
+                "recommendation",
+                "Аукцион рекомендован Exleasingcar",
+            ),
+        ),
+    )
+    database.upsert_auction(
+        "auction-other",
+        source_auction_name="CarNext",
+        markers=(AuctionCardMarker("custom.svg", "other", None),),
+    )
+
+    database.upsert_vehicle("car-no-markers", displayed_title="BMW 530d")
+    database.upsert_auction_lot("car-no-markers", "auction-empty")
+    database.upsert_auction(
+        "auction-empty",
+        markers=(
+            AuctionCardMarker("retired.svg", "other", "Устаревший маркер"),
+        ),
+    )
+    # A later observation with an empty marker set removes it from the current view,
+    # while retaining its historical row in the database.
+    database.upsert_auction("auction-empty", markers=())
+
+    handler = object.__new__(DashboardHandler)
+    handler.database_path = database.path
+
+    payload = handler._load_data(selected_car_id="car-shared")
+    assert payload["schema_version"] == 6
+    markers_by_auction = {
+        lot["auction_id"]: lot["markers"] for lot in payload["lots"]
+    }
+
+    assert len(markers_by_auction["auction-fixed"]) == 2
+    assert {
+        marker["marker_group"]
+        for marker in markers_by_auction["auction-fixed"]
+    } == {"fixed_price_option", "recommendation"}
+    assert markers_by_auction["auction-fixed"][0]["icon_filename"] in {
+        "euro-sign.svg",
+        "favorite.svg",
+    }
+    assert markers_by_auction["auction-other"] == [
+        {
+            "icon_filename": "custom.svg",
+            "marker_group": "other",
+            "label": None,
+        }
+    ]
+
+    empty_payload = handler._load_data(selected_car_id="car-no-markers")
+    assert empty_payload["lots"][0]["markers"] == []
+    with sqlite3.connect(database.path) as connection:
+        historical_marker = connection.execute(
+            """
+            SELECT is_present
+            FROM auction_markers
+            WHERE icon_filename = 'retired.svg'
+            """
+        ).fetchone()
+    assert historical_marker == (0,)
