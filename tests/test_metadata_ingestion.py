@@ -254,6 +254,6 @@ def test_catalog_reimport_replaces_stale_make_with_confirmed_prefix(tmp_path):
             """
         ).fetchone()
 
-    assert make == "Ford"
+    assert make == "FORD"
     assert model is None
     assert title == "Ford Focus - 2021 Ford Focus Lim. ST-Line"
