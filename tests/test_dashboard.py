@@ -255,6 +255,11 @@ def test_dashboard_car_card_shows_vehicle_details_and_all_auction_history(tmp_pa
     handler = object.__new__(DashboardHandler)
     handler.database_path = database.path
     payload = handler._load_data(selected_car_id="car-card-1")
+    later_page = handler._load_data(selected_car_id="car-card-1", page=2)
+
+    assert len(later_page["lots"]) == 2
+    assert later_page["pagination"]["page"] == 1
+    assert later_page["pagination"]["has_next"] is False
 
     vehicle = payload["selected_vehicle"]
     assert vehicle["source_car_id"] == "car-card-1"
@@ -368,3 +373,74 @@ def test_dashboard_returns_current_markers_per_auction_without_crossing_relisted
             """
         ).fetchone()
     assert historical_marker == (0,)
+
+
+
+def test_dashboard_paginates_full_archive_and_search_results(tmp_path):
+    database = ArchiveDatabase(tmp_path / "dashboard-pagination.sqlite3")
+    database.initialize()
+    database.upsert_auction("auction-pagination", source_auction_name="Test auction")
+
+    with sqlite3.connect(database.path) as connection:
+        auction_id = connection.execute(
+            """
+            SELECT id FROM auctions
+            WHERE exleasingcar_auction_id = 'auction-pagination'
+            """
+        ).fetchone()[0]
+        for index in range(501):
+            car_id = f"car-{index:04d}"
+            cursor = connection.execute(
+                """
+                INSERT INTO vehicles (
+                    source_car_id, displayed_title, first_seen_at, last_seen_at
+                ) VALUES (?, 'Target vehicle', '2026-01-01T00:00:00Z',
+                          '2026-01-01T00:00:00Z')
+                """,
+                (car_id,),
+            )
+            connection.execute(
+                """
+                INSERT INTO auction_lots (
+                    vehicle_id, auction_id, first_seen_at, last_seen_at
+                ) VALUES (?, ?, '2026-01-01T00:00:00Z',
+                          '2026-01-01T00:00:00Z')
+                """,
+                (cursor.lastrowid, auction_id),
+            )
+
+    handler = object.__new__(DashboardHandler)
+    handler.database_path = database.path
+
+    first_page = handler._load_data()
+    second_page = handler._load_data(page=2)
+
+    assert len(first_page["lots"]) == 500
+    assert len(second_page["lots"]) == 1
+    assert first_page["pagination"] == {
+        "page": 1,
+        "page_size": 500,
+        "total_lots": 501,
+        "total_pages": 2,
+        "has_previous": False,
+        "has_next": True,
+    }
+    assert second_page["pagination"]["has_previous"] is True
+    assert second_page["pagination"]["has_next"] is False
+    first_ids = {lot["car_id"] for lot in first_page["lots"]}
+    second_ids = {lot["car_id"] for lot in second_page["lots"]}
+    assert first_ids.isdisjoint(second_ids)
+    assert second_ids == {"car-0000"}
+
+    searched_second_page = handler._load_data(
+        search_query="Target vehicle",
+        page=2,
+    )
+    assert len(searched_second_page["lots"]) == 1
+    assert searched_second_page["lots"][0]["car_id"] == "car-0000"
+    assert searched_second_page["pagination"]["total_lots"] == 501
+
+    # A page beyond the end is safely clamped to the last available page.
+    clamped = handler._load_data(page=10)
+    assert clamped["pagination"]["page"] == 2
+    assert {lot["car_id"] for lot in clamped["lots"]} == second_ids
