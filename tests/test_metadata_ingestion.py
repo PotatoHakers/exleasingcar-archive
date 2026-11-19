@@ -199,3 +199,61 @@ def test_fixed_price_detail_is_imported_into_separate_price_history(tmp_path):
     assert lot == "fixed_price"
     assert fixed == ("fixed_price", "16900", "EUR")
     assert bid_count == 0
+
+
+
+def test_catalog_reimport_replaces_stale_make_with_confirmed_prefix(tmp_path):
+    database = ArchiveDatabase(tmp_path / "archive.sqlite3")
+    database.initialize()
+    # This is the value shown by the old parser for the reported Ford card.
+    database.upsert_vehicle("19764527", make="FORD Movano")
+
+    catalog_html = """
+    <!doctype html>
+    <input type="hidden" name="aukciono_id" value="210547">
+    <div class="s-car-list auto-block" car-id="19764527">
+      <img class="card-img-top" alt="FORD Movano">
+      <h5>Ford Focus - 2021 Ford Focus Lim. ST-Line</h5>
+    </div>
+    """
+    detail_html = """
+    <!doctype html>
+    <html lang="ru">
+    <head>
+      <meta property="og:url"
+            content="https://www.exleasingcar.com/ru/auto-details/19764527">
+    </head>
+    <body>
+      <h1>Ford Focus - 2021 Ford Focus Lim. ST-Line</h1>
+      <div>ID аукциона:
+        <a href="/ru/авто-аукционы/аукцион-210547">210547</a>
+      </div>
+    </body>
+    </html>
+    """
+
+    import_html_snapshots(
+        database,
+        auction_list_html=_read("auction_listings.html"),
+        catalog_html=catalog_html,
+        vehicle_detail_html=detail_html,
+        vehicle_detail_url=(
+            "https://www.exleasingcar.com/ru/auto-details/19764527"
+        ),
+        catalog_url=(
+            "https://www.exleasingcar.com/ru/авто-аукционы/аукцион-210547"
+        ),
+    )
+
+    with sqlite3.connect(database.path) as connection:
+        make, model, title = connection.execute(
+            """
+            SELECT make, model, displayed_title
+            FROM vehicles
+            WHERE source_car_id = '19764527'
+            """
+        ).fetchone()
+
+    assert make == "Ford"
+    assert model is None
+    assert title == "Ford Focus - 2021 Ford Focus Lim. ST-Line"
