@@ -415,7 +415,7 @@ def test_auction_markers_are_stored_separately_and_current_set_is_updated(tmp_pa
         first_rows = connection.execute(
             """
             SELECT icon_filename, marker_group, label, is_present,
-                   first_seen_at, last_seen_at
+                   auction_markers.first_seen_at, auction_markers.last_seen_at
             FROM auction_markers
             JOIN auctions ON auctions.id = auction_markers.auction_id
             WHERE auctions.exleasingcar_auction_id = '210944'
@@ -446,7 +446,8 @@ def test_auction_markers_are_stored_separately_and_current_set_is_updated(tmp_pa
     with sqlite3.connect(database.path) as connection:
         current_rows = connection.execute(
             """
-            SELECT icon_filename, is_present, first_seen_at, last_seen_at
+            SELECT icon_filename, is_present,
+                   auction_markers.first_seen_at, auction_markers.last_seen_at
             FROM auction_markers
             JOIN auctions ON auctions.id = auction_markers.auction_id
             WHERE auctions.exleasingcar_auction_id = '210944'
