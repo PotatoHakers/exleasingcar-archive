@@ -26,7 +26,7 @@ main{max-width:1500px;margin:22px auto;padding:0 20px 40px}.status{display:flex;
 .card .k{color:#667487;font-size:12px}.card .v{font-size:25px;font-weight:700;margin-top:7px;font-variant-numeric:tabular-nums}
 section{background:#fff;border:1px solid #e1e7ef;border-radius:12px;margin:16px 0;padding:16px;box-shadow:0 1px 2px #182b4510;overflow:hidden}
 h2{margin:0 0 12px;font-size:17px}.hint{color:#697789;font-size:12px;margin:-4px 0 12px}
-.wrap{overflow:auto}table{border-collapse:collapse;width:100%;font-size:13px;white-space:nowrap}th,td{padding:9px 10px;text-align:left;border-bottom:1px solid #edf0f4;vertical-align:top}th{color:#657386;font-weight:600;background:#f8fafc;position:sticky;top:0}tbody tr:hover{background:#f9fbfd}.mono{font-family:ui-monospace,SFMono-Regular,Consolas,monospace}.muted{color:#778394}.pill{display:inline-block;border-radius:999px;padding:3px 8px;background:#eef2f7;color:#46566c;font-size:11px}.good{background:#e8f5ee;color:#187347}.warn{background:#fff4df;color:#8c5a00}.empty{padding:18px;text-align:center;color:#7a8796}
+.wrap{overflow:auto}table{border-collapse:collapse;width:100%;font-size:13px;white-space:nowrap}th,td{padding:9px 10px;text-align:left;border-bottom:1px solid #edf0f4;vertical-align:top}th{color:#657386;font-weight:600;background:#f8fafc;position:sticky;top:0}tbody tr:hover{background:#f9fbfd}.mono{font-family:ui-monospace,SFMono-Regular,Consolas,monospace}.muted{color:#778394}.pill{display:inline-block;border-radius:999px;padding:3px 8px;background:#eef2f7;color:#46566c;font-size:11px}.marker-list{display:flex;gap:5px;align-items:flex-start;flex-wrap:wrap;min-width:180px}.marker-pill{display:inline-flex;flex-direction:column;gap:2px;max-width:260px;border:1px solid #dce4ed;border-radius:8px;padding:4px 7px;background:#f8fafc;white-space:normal}.marker-pill>span{font-size:11px;color:#34465c}.marker-pill small{font-size:9px;color:#758398}.good{background:#e8f5ee;color:#187347}.warn{background:#fff4df;color:#8c5a00}.empty{padding:18px;text-align:center;color:#7a8796}
 footer{color:#7b8795;font-size:12px;margin-top:20px}
 .search-controls{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin:12px 0 14px}
 .search-controls label{font-size:13px;color:#536273}
@@ -52,7 +52,7 @@ footer{color:#7b8795;font-size:12px;margin-top:20px}
 <main>
 <div class="status"><span><i class="dot"></i>Подключено к локальной базе</span><span id="dbpath" class="mono"></span><span id="updated"></span></div>
 <div id="metrics" class="cards"><div class="card">Загрузка…</div></div>
-<section><h2>Лоты автомобилей</h2><p class="hint">Каждая строка — автомобиль в конкретном аукционе. Повторный выход на торги отображается отдельным лотом.</p><div class="search-controls"><label for="lot-search">Поиск по названию, ID или номеру кузова</label><input id="lot-search" type="search" autocomplete="off" placeholder="Например, Mercedes, 19702473 или VIN"><span id="search-status" class="muted" aria-live="polite"></span></div><section id="car-card" class="detail-card" hidden aria-live="polite"></section><div class="wrap"><table><thead><tr><th></th><th>Аукцион</th><th>ID автомобиля</th><th>Автомобиль</th><th>Тип продажи</th><th>Пробег, км</th><th>Номер кузова</th><th>Последняя ставка</th><th>Мин. цена продавца</th><th>Ориентир</th><th>Первое наблюдение</th></tr></thead><tbody id="lots"></tbody></table></div></section>
+<section><h2>Лоты автомобилей</h2><p class="hint">Каждая строка — автомобиль в конкретном аукционе. Повторный выход на торги отображается отдельным лотом.</p><div class="search-controls"><label for="lot-search">Поиск по названию, ID или номеру кузова</label><input id="lot-search" type="search" autocomplete="off" placeholder="Например, Mercedes, 19702473 или VIN"><span id="search-status" class="muted" aria-live="polite"></span></div><section id="car-card" class="detail-card" hidden aria-live="polite"></section><div class="wrap"><table><thead><tr><th></th><th>Аукцион</th><th>ID автомобиля</th><th>Автомобиль</th><th>Тип продажи</th><th>Маркеры аукциона</th><th>Пробег, км</th><th>Номер кузова</th><th>Последняя ставка</th><th>Мин. цена продавца</th><th>Ориентир</th><th>Первое наблюдение</th></tr></thead><tbody id="lots"></tbody></table></div></section>
 <section><h2>История реальных ставок</h2><p class="hint">Здесь отображаются только положительные значения highest_offer. Нулевая ставка не считается сделанной ставкой.</p><div class="wrap"><table><thead><tr><th>Дата наблюдения</th><th>Аукцион</th><th>ID автомобиля</th><th>Максимальная ставка</th><th>Источник</th></tr></thead><tbody id="bids"></tbody></table></div></section>
 <section><h2>История цен продавца</h2><p class="hint">Минимальная и ориентировочная цены — отдельно от реальных ставок.</p><div class="wrap"><table><thead><tr><th>Дата наблюдения</th><th>Аукцион</th><th>ID автомобиля</th><th>Минимальная цена</th><th>Ориентировочная цена</th><th>Источник</th></tr></thead><tbody id="refs"></tbody></table></div></section>
 <section><h2>Отображаемые и фиксированные цены</h2><p class="hint">Начальная/текущая цена открытого аукциона и цена «Купить сейчас» хранятся отдельно от ставок и справочных цен продавца.</p><div class="wrap"><table><thead><tr><th>Дата наблюдения</th><th>Аукцион</th><th>ID автомобиля</th><th>Тип цены</th><th>Сумма</th><th>Валюта</th><th>Поле источника</th></tr></thead><tbody id="lotprices"></tbody></table></div></section>
@@ -62,6 +62,22 @@ footer{color:#7b8795;font-size:12px;margin-top:20px}
 <script>
 const esc = v => String(v ?? "—").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 const cell = v => `<td>${esc(v)}</td>`;
+const markerGroupLabels = {
+ auction_format:'Формат торгов',
+ fixed_price_option:'Фиксированная цена',
+ vehicle_condition:'Состояние автомобиля',
+ vehicle_category:'Категория автомобиля',
+ recommendation:'Рекомендация',
+ other:'Другой маркер'
+};
+const markerBadges = markers => {
+ if(!markers || markers.length===0) return '<span class="muted">—</span>';
+ return `<div class="marker-list">${markers.map(marker=>{
+  const label=marker.label || marker.icon_filename || 'Маркер';
+  const group=markerGroupLabels[marker.marker_group] || marker.marker_group || 'Другой маркер';
+  return `<span class="marker-pill" title="${esc(marker.marker_group)} · ${esc(marker.icon_filename)}"><span>${esc(label)}</span><small>${esc(group)}</small></span>`;
+ }).join('')}</div>`;
+};
 function rows(id, values, empty) { const el=document.getElementById(id); el.innerHTML=values.length?values.join(""):`<tr><td class="empty" colspan="12">${esc(empty)}</td></tr>`; }
 let selectedCarId=null;
 function renderCarCard(vehicle,lots){
@@ -83,7 +99,7 @@ function renderCarCard(vehicle,lots){
  panel.innerHTML=`
   <div class="detail-top"><div><h2>${esc(title)}</h2><p class="hint">Карточка автомобиля · сохранённые сведения из архива</p></div><button type="button" class="close-card">Закрыть карточку</button></div>
   <div class="detail-grid">${fields.map(([label,value])=>`<div class="detail-item"><span class="k">${esc(label)}</span><span class="v">${esc(value)}</span></div>`).join('')}</div>
-  <div class="detail-auctions"><h3>Участие в аукционах (${lots.length})</h3><table><thead><tr><th>ID аукциона</th><th>Аукцион</th><th>Страна</th><th>Тип</th><th>Статус</th><th>Тип продажи</th><th>Пробег, км</th><th>Первое появление</th><th>Последнее появление</th></tr></thead><tbody>${lots.map(lot=>`<tr>${cell(lot.auction_id)}${cell(lot.source_auction_name)}${cell(lot.source_auction_country_name)}${cell(lot.auction_type_label)}${cell(lot.auction_status_label)}${cell(lot.sale_type)}${cell(lot.mileage_km)}${cell(lot.first_seen_at)}${cell(lot.last_seen_at)}</tr>`).join('') || '<tr><td colspan="9" class="empty">Аукционы не найдены</td></tr>'}</tbody></table></div>
+  <div class="detail-auctions"><h3>Участие в аукционах (${lots.length})</h3><table><thead><tr><th>ID аукциона</th><th>Аукцион</th><th>Страна</th><th>Тип</th><th>Статус</th><th>Тип продажи</th><th>Маркеры аукциона</th><th>Пробег, км</th><th>Первое появление</th><th>Последнее появление</th></tr></thead><tbody>${lots.map(lot=>`<tr>${cell(lot.auction_id)}${cell(lot.source_auction_name)}${cell(lot.source_auction_country_name)}${cell(lot.auction_type_label)}${cell(lot.auction_status_label)}${cell(lot.sale_type)}<td>${markerBadges(lot.markers)}</td>${cell(lot.mileage_km)}${cell(lot.first_seen_at)}${cell(lot.last_seen_at)}</tr>`).join('') || '<tr><td colspan="9" class="empty">Аукционы не найдены</td></tr>'}</tbody></table></div>
   <p class="hint">История ставок и цен этого автомобиля отображается в таблицах ниже.</p>`;
  panel.hidden=false;
  panel.querySelector('.close-card').addEventListener('click',()=>{
@@ -107,7 +123,7 @@ async function refresh(){
   document.getElementById('metrics').innerHTML=metrics.map(x=>`<div class="card"><div class="k">${esc(x[0])}</div><div class="v">${esc(x[1])}</div></div>`).join('');
   renderCarCard(d.selected_vehicle,d.lots);
   document.getElementById('search-status').textContent=selectedCarId?`Карточка: ${d.selected_vehicle?esc(d.selected_vehicle.source_car_id):'не найдена'}`:query?`Найдено лотов: ${d.lots.length}`:`Показаны последние ${d.lots.length} из ${d.counts.auction_lots}`;
-  rows('lots',d.lots.map(x=>`<tr><td><button type="button" class="open-car" data-car-id="${esc(x.car_id)}">Открыть</button></td>${cell(x.auction_id)}${cell(x.car_id)}${cell(x.title)}${cell(x.sale_type)}${cell(x.mileage_km)}${cell(x.chassis)}${cell(x.highest_offer)}${cell(x.minimum_price)}${cell(x.indicative_price)}${cell(x.first_seen_at)}</tr>`),query?'По этому запросу ничего не найдено':'Лотов пока нет');
+  rows('lots',d.lots.map(x=>`<tr><td><button type="button" class="open-car" data-car-id="${esc(x.car_id)}">Открыть</button></td>${cell(x.auction_id)}${cell(x.car_id)}${cell(x.title)}${cell(x.sale_type)}<td>${markerBadges(x.markers)}</td>${cell(x.mileage_km)}${cell(x.chassis)}${cell(x.highest_offer)}${cell(x.minimum_price)}${cell(x.indicative_price)}${cell(x.first_seen_at)}</tr>`),query?'По этому запросу ничего не найдено':'Лотов пока нет');
   rows('bids',d.bids.map(x=>`<tr>${cell(x.observed_at)}${cell(x.auction_id)}${cell(x.car_id)}${cell(x.highest_offer)}${cell(x.source)}</tr>`),'Положительных ставок пока не записано. Это нормально, если highest_offer равен нулю.');
   rows('refs',d.references.map(x=>`<tr>${cell(x.observed_at)}${cell(x.auction_id)}${cell(x.car_id)}${cell(x.minimum_price)}${cell(x.indicative_price)}${cell(x.source)}</tr>`),'Наблюдений цен продавца пока нет');
   rows('lotprices',d.lot_prices.map(x=>`<tr>${cell(x.observed_at)}${cell(x.auction_id)}${cell(x.car_id)}${cell(x.price_type)}${cell(x.amount)}${cell(x.currency)}${cell(x.source_field)}</tr>`),'Отображаемые и фиксированные цены пока не записаны');
@@ -258,6 +274,38 @@ class DashboardHandler(BaseHTTPRequestHandler):
             if not normalized_search and not selected_car_id:
                 lots_sql += " LIMIT 500"
             lots = [dict(row) for row in connection.execute(lots_sql, parameters)]
+            markers_by_auction: dict[str, list[dict[str, Any]]] = {}
+            auction_ids = sorted({
+                lot["auction_id"] for lot in lots if lot["auction_id"]
+            })
+            if "auction_markers" in tables:
+                for offset in range(0, len(auction_ids), 900):
+                    auction_chunk = auction_ids[offset : offset + 900]
+                    placeholders = ", ".join("?" for _ in auction_chunk)
+                    marker_rows = connection.execute(
+                        f"""
+                        SELECT a.exleasingcar_auction_id AS auction_id,
+                               m.icon_filename, m.marker_group, m.label
+                        FROM auction_markers AS m
+                        JOIN auctions AS a ON a.id = m.auction_id
+                        WHERE m.is_present = 1
+                          AND a.exleasingcar_auction_id IN ({placeholders})
+                        ORDER BY m.marker_group, m.icon_filename
+                        """,
+                        auction_chunk,
+                    )
+                    for marker_row in marker_rows:
+                        marker = {
+                            "icon_filename": marker_row["icon_filename"],
+                            "marker_group": marker_row["marker_group"],
+                            "label": marker_row["label"],
+                        }
+                        markers_by_auction.setdefault(
+                            marker_row["auction_id"], []
+                        ).append(marker)
+            for lot in lots:
+                lot["markers"] = markers_by_auction.get(lot["auction_id"], [])
+
             history_filter = ""
             history_parameters: tuple[str, ...] = ()
             history_limit = (
