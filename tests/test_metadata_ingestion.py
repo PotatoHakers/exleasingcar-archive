@@ -63,6 +63,12 @@ def test_html_metadata_is_written_to_database(tmp_path):
         price_count = connection.execute(
             "SELECT COUNT(*) FROM price_observations"
         ).fetchone()[0]
+        markers = connection.execute(
+            """
+            SELECT icon_filename, marker_group, label, is_present
+            FROM auction_markers
+            """
+        ).fetchall()
 
     assert auction == (
         "210547", "BCA DE 3.3", "DE", "Английский аукцион", "FINAL CALL"
@@ -76,6 +82,9 @@ def test_html_metadata_is_written_to_database(tmp_path):
     )
     assert lot == ("2258673/41", "2352500179", "210547")
     assert price_count == 0
+    assert markers == [
+        ("ac.svg", "auction_format", "Английский аукцион", 1)
+    ]
 
 
 def test_reimporting_same_html_does_not_duplicate_auctions_or_lots(tmp_path):
