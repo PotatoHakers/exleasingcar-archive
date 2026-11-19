@@ -1,5 +1,6 @@
 
 from decimal import Decimal
+from pathlib import Path
 
 from exleasingcar_archive.detail_parser import parse_vehicle_detail
 from exleasingcar_archive.models import PriceType, SaleType
@@ -174,10 +175,10 @@ def test_fixed_price_json_ld_is_only_a_fallback_for_confirmed_fixed_mode():
     assert open_result.fixed_price is None
 
 
-def test_conflicting_sale_mode_markers_are_not_guessed():
+def test_conflicting_open_and_closed_sale_markers_are_not_guessed():
     html = """
     <div car-id="car-ambiguous">
-        <div class="bids active open fix bids_car-ambiguous"></div>
+        <div class="bids active open closed fix bids_car-ambiguous"></div>
     </div>
     """
     result = parse_vehicle_detail(html)
@@ -263,3 +264,39 @@ def test_open_auction_without_public_price_does_not_create_price_observation():
     assert result.sale_type is SaleType.OPEN_AUCTION
     assert result.displayed_auction_price is None
 
+
+
+def test_open_auction_with_fixed_price_option_extracts_public_current_price():
+    fixture = (
+        Path(__file__).parent
+        / "fixtures"
+        / "vehicle_detail_open_fixed_option.html"
+    )
+    html = fixture.read_text(encoding="utf-8")
+
+    result = parse_vehicle_detail(html)
+
+    assert result.source_car_id == "19764527"
+    assert result.sale_type is SaleType.OPEN_AUCTION
+    assert {"open", "fix"}.issubset(set(result.bidding_mode_classes))
+    assert result.displayed_auction_price is not None
+    assert result.displayed_auction_price.amount == Decimal(9900)
+    assert result.displayed_auction_price.currency == "EUR"
+    assert result.displayed_auction_price.source_field == "current-price"
+    assert result.fixed_price is None
+
+
+def test_closed_auction_with_fixed_price_option_keeps_closed_type():
+    html = """
+    <div class="auto-block" car-id="car-closed-fix">
+        <div class="bids active closed fix bids_car-closed-fix">
+            <div class="current-price">Текущая цена: € 8 500</div>
+        </div>
+    </div>
+    """
+
+    result = parse_vehicle_detail(html)
+
+    assert result.sale_type is SaleType.CLOSED_AUCTION
+    assert result.displayed_auction_price is None
+    assert result.fixed_price is None
