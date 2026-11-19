@@ -417,7 +417,7 @@ def _make_label(card: Tag) -> str | None:
 
     if confirmed_tokens == 0:
         return None
-    return " ".join(title_tokens[:confirmed_tokens])
+    return " ".join(image_tokens[:confirmed_tokens])
 
 
 def _parse_chassis_number(
