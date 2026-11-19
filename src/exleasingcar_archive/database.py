@@ -6,10 +6,10 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
 
-from .models import PriceType, SaleType
+from .models import AuctionCardMarker, PriceType, SaleType
 from .parsers import PriceObservation
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 DEFAULT_SOURCE = "ajax_update_car_form.v3.1.php"
 
 
@@ -124,6 +124,23 @@ CREATE TABLE IF NOT EXISTS lot_price_observations (
 """
 
 
+
+AUCTION_MARKERS_SQL = """
+CREATE TABLE IF NOT EXISTS auction_markers (
+    id INTEGER PRIMARY KEY,
+    auction_id INTEGER NOT NULL,
+    icon_filename TEXT NOT NULL,
+    marker_group TEXT NOT NULL,
+    label TEXT,
+    is_present INTEGER NOT NULL DEFAULT 1 CHECK (is_present IN (0, 1)),
+    first_seen_at TEXT NOT NULL,
+    last_seen_at TEXT NOT NULL,
+    FOREIGN KEY (auction_id) REFERENCES auctions(id) ON DELETE RESTRICT,
+    UNIQUE (auction_id, icon_filename)
+)
+"""
+
+
 class ArchiveDatabase:
     """SQLite storage for Exleasingcar Archive."""
 
@@ -165,18 +182,25 @@ class ArchiveDatabase:
                 self._migrate_v2_to_v3(connection)
                 self._migrate_v3_to_v4(connection)
                 self._migrate_v4_to_v5(connection)
+                self._migrate_v5_to_v6(connection)
                 self._create_indexes(connection)
             elif version == 2:
                 self._migrate_v2_to_v3(connection)
                 self._migrate_v3_to_v4(connection)
                 self._migrate_v4_to_v5(connection)
+                self._migrate_v5_to_v6(connection)
                 self._create_indexes(connection)
             elif version == 3:
                 self._migrate_v3_to_v4(connection)
                 self._migrate_v4_to_v5(connection)
+                self._migrate_v5_to_v6(connection)
                 self._create_indexes(connection)
             elif version == 4:
                 self._migrate_v4_to_v5(connection)
+                self._migrate_v5_to_v6(connection)
+                self._create_indexes(connection)
+            elif version == 5:
+                self._migrate_v5_to_v6(connection)
                 self._create_indexes(connection)
             else:
                 # Idempotently ensure indexes exist for an already initialized DB.
@@ -196,6 +220,7 @@ class ArchiveDatabase:
             AUCTION_EVENTS_SQL,
             PRICE_REFERENCE_OBSERVATIONS_SQL,
             LOT_PRICE_OBSERVATIONS_SQL,
+            AUCTION_MARKERS_SQL,
         ):
             connection.execute(statement)
         ArchiveDatabase._create_indexes(connection)
@@ -233,6 +258,10 @@ class ArchiveDatabase:
             """
             CREATE INDEX IF NOT EXISTS idx_lot_price_type_time
             ON lot_price_observations(auction_lot_id, price_type, observed_at)
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_auction_markers_auction_present
+            ON auction_markers(auction_id, is_present, marker_group)
             """,
         )
         for statement in statements:
@@ -382,6 +411,11 @@ class ArchiveDatabase:
         """Persist per-lot sale mode and displayed/fixed price observations."""
         cls._add_column_if_missing(connection, "auction_lots", "sale_type", "TEXT")
         connection.execute(LOT_PRICE_OBSERVATIONS_SQL)
+
+    @classmethod
+    def _migrate_v5_to_v6(cls, connection: sqlite3.Connection) -> None:
+        """Store the independent icons and labels shown on each auction card."""
+        connection.execute(AUCTION_MARKERS_SQL)
 
     @staticmethod
     def _serialize_datetime(value: datetime | None) -> str:
@@ -715,6 +749,60 @@ class ArchiveDatabase:
             raise RuntimeError("Failed to create or find unassigned auction lot")
         return int(row["id"])
 
+    @staticmethod
+    def _sync_auction_markers(
+        connection: sqlite3.Connection,
+        auction_id: int,
+        markers: tuple[AuctionCardMarker, ...],
+        observed_at: str,
+    ) -> None:
+        """Replace the current marker set while retaining first/last seen times."""
+        connection.execute(
+            "UPDATE auction_markers SET is_present = 0 "
+            "WHERE auction_id = ? AND is_present = 1",
+            (auction_id,),
+        )
+
+        seen_icons: set[str] = set()
+        for marker in markers:
+            if not isinstance(marker, AuctionCardMarker):
+                raise TypeError("markers must contain AuctionCardMarker values")
+            icon_filename = ArchiveDatabase._validate_identifier(
+                marker.icon_filename, "marker.icon_filename"
+            )
+            marker_group = ArchiveDatabase._validate_identifier(
+                marker.marker_group, "marker.marker_group"
+            )
+            if marker.label is not None and not isinstance(marker.label, str):
+                raise TypeError("marker.label must be str or None")
+            if icon_filename in seen_icons:
+                continue
+            seen_icons.add(icon_filename)
+
+            connection.execute(
+                """
+                INSERT INTO auction_markers (
+                    auction_id, icon_filename, marker_group, label,
+                    is_present, first_seen_at, last_seen_at
+                ) VALUES (?, ?, ?, ?, 1, ?, ?)
+                ON CONFLICT(auction_id, icon_filename) DO UPDATE SET
+                    marker_group = excluded.marker_group,
+                    label = COALESCE(excluded.label, auction_markers.label),
+                    is_present = 1,
+                    last_seen_at = MAX(
+                        auction_markers.last_seen_at, excluded.last_seen_at
+                    )
+                """,
+                (
+                    auction_id,
+                    icon_filename,
+                    marker_group,
+                    marker.label,
+                    observed_at,
+                    observed_at,
+                ),
+            )
+
     def upsert_auction(
         self,
         exleasingcar_auction_id: str,
@@ -724,14 +812,17 @@ class ArchiveDatabase:
         source_auction_country_name: str | None = None,
         auction_type_label: str | None = None,
         auction_status_label: str | None = None,
+        markers: tuple[AuctionCardMarker, ...] | None = None,
         observed_at: datetime | None = None,
     ) -> int:
         auction_id = self._validate_identifier(
             exleasingcar_auction_id, "exleasingcar_auction_id"
         )
+        if markers is not None and not isinstance(markers, tuple):
+            raise TypeError("markers must be a tuple of AuctionCardMarker or None")
         timestamp = self._serialize_datetime(observed_at)
         with self._connect() as connection:
-            return self._ensure_auction(
+            database_auction_id = self._ensure_auction(
                 connection,
                 auction_id,
                 timestamp,
@@ -741,6 +832,14 @@ class ArchiveDatabase:
                 auction_type_label=auction_type_label,
                 auction_status_label=auction_status_label,
             )
+            if markers is not None:
+                self._sync_auction_markers(
+                    connection,
+                    database_auction_id,
+                    markers,
+                    timestamp,
+                )
+            return database_auction_id
 
     def upsert_vehicle(
         self,
