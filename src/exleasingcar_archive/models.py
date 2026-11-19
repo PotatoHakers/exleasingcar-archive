@@ -1,6 +1,16 @@
 """Core domain types for Exleasingcar listings."""
 
+from dataclasses import dataclass
 from enum import Enum
+
+
+@dataclass(frozen=True, slots=True)
+class AuctionCardMarker:
+    """One independent icon/label displayed on an auction card."""
+
+    icon_filename: str
+    marker_group: str
+    label: str | None = None
 
 
 class SaleType(str, Enum):
