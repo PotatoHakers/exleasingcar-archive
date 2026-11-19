@@ -386,11 +386,38 @@ def _parse_mileage_km(card: Tag) -> int | None:
 
 
 def _make_label(card: Tag) -> str | None:
+    """Keep only the leading make confirmed by both the image alt and title.
+
+    The catalogue's image alt can contain a stale model name from another
+    vehicle card. The leading words shared with this card's displayed title
+    are the only portion treated as a make; a disagreement stays unknown.
+    """
     image = card.select_one("img.card-img-top[alt]")
-    if image is None:
+    title = _text(card.select_one("h5, .car-title"))
+    if image is None or title is None:
         return None
-    value = str(image.get("alt", "")).strip()
-    return value or None
+
+    image_alt = str(image.get("alt") or "").strip()
+    image_tokens = re.findall(
+        r"[^\W_]+(?:[-'][^\W_]+)*",
+        image_alt,
+        flags=re.UNICODE,
+    )
+    title_tokens = re.findall(
+        r"[^\W_]+(?:[-'][^\W_]+)*",
+        title,
+        flags=re.UNICODE,
+    )
+
+    confirmed_tokens = 0
+    for image_token, title_token in zip(image_tokens, title_tokens):
+        if image_token.casefold() != title_token.casefold():
+            break
+        confirmed_tokens += 1
+
+    if confirmed_tokens == 0:
+        return None
+    return " ".join(title_tokens[:confirmed_tokens])
 
 
 def _parse_chassis_number(
