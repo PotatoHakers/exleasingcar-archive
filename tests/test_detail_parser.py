@@ -278,6 +278,7 @@ def test_open_auction_with_fixed_price_option_extracts_public_current_price():
 
     assert result.source_car_id == "19764527"
     assert result.sale_type is SaleType.OPEN_AUCTION
+    assert {"open", "fix"}.issubset(set(result.bidding_mode_classes))
     assert result.displayed_auction_price is not None
     assert result.displayed_auction_price.amount == Decimal(9900)
     assert result.displayed_auction_price.currency == "EUR"
