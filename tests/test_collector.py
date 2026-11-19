@@ -1,3 +1,5 @@
+import pytest
+
 from exleasingcar_archive.collector import (
     extract_vehicle_detail_urls,
     filter_updates_for_catalog,
@@ -449,3 +451,126 @@ def test_catalog_detail_coverage_separates_repeated_cards_from_missing_links():
     assert coverage.detail_urls_found == 3
     assert coverage.lot_ids_without_detail_url == ("car-4",)
 
+
+
+def test_dismiss_notification_prompt_chooses_no_thanks_and_waits_for_it_to_close():
+    from exleasingcar_archive.collector import ExleasingcarCollector
+
+    class FakeLocator:
+        def __init__(self, *, visible=True, on_click=None):
+            self.visible = visible
+            self.on_click = on_click
+            self.role_button = None
+            self.fallback_button = None
+            self.text_button = None
+            self.clicked = 0
+
+        def count(self):
+            return int(self.visible)
+
+        def nth(self, index):
+            return self
+
+        def is_visible(self):
+            return self.visible
+
+        def get_by_role(self, role, *, name):
+            assert role == "button"
+            assert name.search("NO THANKS")
+            return self.role_button
+
+        def locator(self, selector):
+            assert "cancel" in selector
+            return self.fallback_button
+
+        def get_by_text(self, pattern):
+            assert pattern.search("NO THANKS")
+            return self.text_button
+
+        def click(self, *, timeout):
+            self.clicked += 1
+            if self.on_click:
+                self.on_click()
+
+        def wait_for(self, *, state, timeout):
+            assert state == "hidden"
+            assert self.visible is False
+
+    class FakePage:
+        def __init__(self, container):
+            self.container = container
+
+        def locator(self, selector):
+            assert selector == "#onesignal-slidedown-container"
+            return self.container
+
+    container = FakeLocator()
+    no_thanks = FakeLocator(on_click=lambda: setattr(container, "visible", False))
+    container.role_button = no_thanks
+    container.fallback_button = FakeLocator(visible=False)
+    container.text_button = FakeLocator(visible=False)
+
+    assert ExleasingcarCollector._dismiss_notification_prompt(
+        FakePage(container)
+    ) is True
+    assert no_thanks.clicked == 1
+    assert container.visible is False
+
+
+def test_dismiss_notification_prompt_does_nothing_when_prompt_is_absent():
+    from exleasingcar_archive.collector import ExleasingcarCollector
+
+    class FakeLocator:
+        def count(self):
+            return 0
+
+    class FakePage:
+        def locator(self, selector):
+            assert selector == "#onesignal-slidedown-container"
+            return FakeLocator()
+
+    assert ExleasingcarCollector._dismiss_notification_prompt(FakePage()) is False
+
+
+def test_dismiss_notification_prompt_never_grants_permission():
+    from exleasingcar_archive.collector import ExleasingcarCollector
+
+    class FakeLocator:
+        def __init__(self, *, visible=True):
+            self.visible = visible
+            self.clicked = 0
+            self.role_queries = []
+
+        def count(self):
+            return int(self.visible)
+
+        def nth(self, index):
+            return self
+
+        def is_visible(self):
+            return self.visible
+
+        def get_by_role(self, role, *, name):
+            self.role_queries.append(name.pattern)
+            return FakeLocator(visible=False)
+
+        def locator(self, selector):
+            return FakeLocator(visible=False)
+
+        def get_by_text(self, pattern):
+            return FakeLocator(visible=False)
+
+    class FakePage:
+        def __init__(self, container):
+            self.container = container
+
+        def locator(self, selector):
+            return self.container
+
+    container = FakeLocator()
+
+    with pytest.raises(RuntimeError, match="NO THANKS"):
+        ExleasingcarCollector._dismiss_notification_prompt(FakePage(container))
+
+    assert container.clicked == 0
+    assert all("ALLOW" not in pattern for pattern in container.role_queries)
