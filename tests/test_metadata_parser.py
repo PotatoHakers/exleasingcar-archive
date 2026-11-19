@@ -176,3 +176,47 @@ def test_parse_fixed_price_only_auction_without_overriding_mixed_auction_types()
 
     unknown = auctions["210999"]
     assert unknown.auction_type_label is None
+
+
+
+def test_parse_all_independent_auction_card_markers_and_keep_primary_type():
+    result = parse_auction_listings(
+        _read_fixture("auction_listings_all_markers.html"),
+        "https://www.exleasingcar.com/ru/авто-аукционы",
+    )
+    auctions = {auction.exleasingcar_auction_id: auction for auction in result}
+
+    our_stock = auctions["209633"]
+    our_stock_markers = {marker.icon_filename: marker for marker in our_stock.markers}
+    assert set(our_stock_markers) == {"euro-sign.svg", "favorite.svg"}
+    assert our_stock_markers["euro-sign.svg"].marker_group == "fixed_price_option"
+    assert our_stock_markers["euro-sign.svg"].label == "Фиксированная цена автомобилей"
+    assert our_stock_markers["favorite.svg"].marker_group == "recommendation"
+    assert "тщательно проверен и рекомендован" in our_stock_markers["favorite.svg"].label
+    assert our_stock.auction_type_label == "Фиксированная цена автомобилей"
+
+    carnext = auctions["211030"]
+    assert carnext.auction_type_label == "Английский аукцион"
+    assert [marker.icon_filename for marker in carnext.markers] == ["ac.svg"]
+
+    copart = auctions["210944"]
+    copart_markers = {marker.icon_filename: marker for marker in copart.markers}
+    assert set(copart_markers) == {
+        "ac.svg",
+        "euro-sign.svg",
+        "type-2.svg",
+    }
+    assert copart.auction_type_label == "Английский аукцион"
+    assert copart_markers["type-2.svg"].marker_group == "vehicle_condition"
+    assert copart_markers["type-2.svg"].label == "Автомобиль с техническими неисправностями"
+
+    vpauto = auctions["210630"]
+    assert vpauto.auction_type_label == "Закрытые торги аукциона"
+    assert [marker.icon_filename for marker in vpauto.markers] == ["mail-b.svg"]
+
+    ald = auctions["211004"]
+    assert ald.auction_type_label == "Закрытые торги аукциона"
+    assert {marker.icon_filename for marker in ald.markers} == {
+        "mail-b.svg",
+        "euro-sign.svg",
+    }

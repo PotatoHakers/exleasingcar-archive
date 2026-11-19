@@ -44,6 +44,7 @@ def _auction_context(listing: ParsedAuctionListing) -> AuctionContext:
         source_auction_country_name=listing.source_auction_country_name,
         auction_type_label=listing.auction_type_label,
         auction_status_label=listing.auction_status_label,
+        markers=listing.markers,
     )
 
 
@@ -197,6 +198,7 @@ def import_html_snapshots(
             source_auction_country_name=listing.source_auction_country_name,
             auction_type_label=listing.auction_type_label,
             auction_status_label=listing.auction_status_label,
+            markers=listing.markers,
             observed_at=timestamp,
         )
 
@@ -208,6 +210,7 @@ def import_html_snapshots(
         source_auction_country_name=selected_context.source_auction_country_name,
         auction_type_label=selected_context.auction_type_label,
         auction_status_label=selected_context.auction_status_label,
+        markers=selected_context.markers,
         observed_at=timestamp,
     )
 

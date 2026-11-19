@@ -265,6 +265,7 @@ def _auction_context(listing: ParsedAuctionListing) -> AuctionContext:
         source_auction_country_name=listing.source_auction_country_name,
         auction_type_label=listing.auction_type_label,
         auction_status_label=listing.auction_status_label,
+        markers=listing.markers,
     )
 
 
@@ -834,6 +835,7 @@ class ExleasingcarCollector:
             source_auction_country_name=listing.source_auction_country_name,
             auction_type_label=listing.auction_type_label,
             auction_status_label=listing.auction_status_label,
+            markers=listing.markers,
         )
         auction_dir = snapshot_dir / f"auction_{_safe_component(listing.exleasingcar_auction_id)}"
         auction_dir.mkdir(parents=True, exist_ok=True)
@@ -1065,6 +1067,7 @@ class ExleasingcarCollector:
                         source_auction_country_name=listing.source_auction_country_name,
                         auction_type_label=listing.auction_type_label,
                         auction_status_label=listing.auction_status_label,
+                        markers=listing.markers,
                     )
 
                 print(f"Auction cards discovered: {len(auctions)}")

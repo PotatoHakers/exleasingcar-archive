@@ -29,7 +29,7 @@ def test_dashboard_exposes_sale_type_and_fixed_price_without_bid_mixing(tmp_path
     handler.database_path = database.path
     payload = handler._load_data()
 
-    assert payload["schema_version"] == 5
+    assert payload["schema_version"] == 6
     assert payload["counts"]["lot_price_observations"] == 1
     assert payload["lots"][0]["sale_type"] == "fixed_price"
     assert payload["lot_prices"][0]["price_type"] == "fixed_price"

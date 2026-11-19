@@ -5,6 +5,7 @@ from decimal import Decimal
 import pytest
 
 from exleasingcar_archive.database import SCHEMA_VERSION, ArchiveDatabase
+from exleasingcar_archive.models import AuctionCardMarker
 
 UTC_FIRST = datetime(2026, 11, 12, 12, 0, tzinfo=timezone.utc)
 UTC_SECOND = datetime(2026, 11, 12, 12, 5, tzinfo=timezone.utc)
@@ -32,6 +33,7 @@ def test_database_initialization_creates_current_schema(tmp_path):
         "price_observations",
         "auction_events",
         "lot_price_observations",
+        "auction_markers",
     }.issubset(tables)
 
 
@@ -383,3 +385,114 @@ def test_newer_database_version_is_rejected(tmp_path):
     database = ArchiveDatabase(database_path)
     with pytest.raises(RuntimeError, match="newer than supported"):
         database.initialize()
+
+
+def test_auction_markers_are_stored_separately_and_current_set_is_updated(tmp_path):
+    database = ArchiveDatabase(tmp_path / "test_archive.sqlite3")
+    database.initialize()
+
+    english = AuctionCardMarker(
+        "ac.svg", "auction_format", "Английский аукцион"
+    )
+    fixed = AuctionCardMarker(
+        "euro-sign.svg", "fixed_price_option", "Фиксированная цена автомобилей"
+    )
+    technical = AuctionCardMarker(
+        "type-2.svg",
+        "vehicle_condition",
+        "Автомобиль с техническими неисправностями",
+    )
+
+    database.upsert_auction(
+        "210944",
+        source_auction_name="Copart Germany",
+        auction_type_label="Английский аукцион",
+        markers=(english, fixed, technical),
+        observed_at=UTC_FIRST,
+    )
+
+    with sqlite3.connect(database.path) as connection:
+        first_rows = connection.execute(
+            """
+            SELECT icon_filename, marker_group, label, is_present,
+                   auction_markers.first_seen_at, auction_markers.last_seen_at
+            FROM auction_markers
+            JOIN auctions ON auctions.id = auction_markers.auction_id
+            WHERE auctions.exleasingcar_auction_id = '210944'
+            ORDER BY icon_filename
+            """
+        ).fetchall()
+
+    assert [row[:4] for row in first_rows] == [
+        ("ac.svg", "auction_format", "Английский аукцион", 1),
+        ("euro-sign.svg", "fixed_price_option", "Фиксированная цена автомобилей", 1),
+        (
+            "type-2.svg",
+            "vehicle_condition",
+            "Автомобиль с техническими неисправностями",
+            1,
+        ),
+    ]
+    assert all(row[4] == row[5] for row in first_rows)
+
+    database.upsert_auction(
+        "210944",
+        source_auction_name="Copart Germany",
+        auction_type_label="Английский аукцион",
+        markers=(english,),
+        observed_at=UTC_SECOND,
+    )
+
+    with sqlite3.connect(database.path) as connection:
+        current_rows = connection.execute(
+            """
+            SELECT icon_filename, is_present,
+                   auction_markers.first_seen_at, auction_markers.last_seen_at
+            FROM auction_markers
+            JOIN auctions ON auctions.id = auction_markers.auction_id
+            WHERE auctions.exleasingcar_auction_id = '210944'
+            ORDER BY icon_filename
+            """
+        ).fetchall()
+
+    assert current_rows == [
+        ("ac.svg", 1, first_rows[0][4], ArchiveDatabase._serialize_datetime(UTC_SECOND)),
+        ("euro-sign.svg", 0, first_rows[1][4], first_rows[1][5]),
+        ("type-2.svg", 0, first_rows[2][4], first_rows[2][5]),
+    ]
+
+
+def test_v5_database_migrates_to_v6_without_losing_auction_rows(tmp_path):
+    database = ArchiveDatabase(tmp_path / "legacy_v5.sqlite3")
+    database.initialize()
+    database.upsert_auction(
+        "210547",
+        source_auction_name="BCA DE 3.3",
+        observed_at=UTC_FIRST,
+    )
+
+    with sqlite3.connect(database.path) as connection:
+        connection.execute("DROP TABLE auction_markers")
+        connection.execute("PRAGMA user_version = 5")
+
+    database.initialize()
+
+    with sqlite3.connect(database.path) as connection:
+        version = connection.execute("PRAGMA user_version").fetchone()[0]
+        auction = connection.execute(
+            """
+            SELECT exleasingcar_auction_id, source_auction_name
+            FROM auctions
+            """
+        ).fetchone()
+        marker_table = connection.execute(
+            """
+            SELECT COUNT(*) FROM sqlite_master
+            WHERE type = 'table' AND name = 'auction_markers'
+            """
+        ).fetchone()[0]
+
+    assert version == 6
+    assert auction == ("210547", "BCA DE 3.3")
+    assert marker_table == 1
+
