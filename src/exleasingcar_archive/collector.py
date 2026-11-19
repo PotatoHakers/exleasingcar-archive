@@ -420,6 +420,53 @@ class ExleasingcarCollector:
         return None
 
     @classmethod
+    def _dismiss_notification_prompt(cls, page: Any) -> bool:
+        """Dismiss the site's optional OneSignal prompt without granting permission."""
+        container = cls._first_visible(
+            page.locator("#onesignal-slidedown-container")
+        )
+        if container is None:
+            return False
+
+        dismiss_pattern = re.compile(
+            r"^\s*(?:NO\s+THANKS|NOT\s+NOW|НЕТ,?\s*СПАСИБО|НЕ\s+СЕЙЧАС)\s*$",
+            re.IGNORECASE,
+        )
+        candidates = (
+            container.get_by_role("button", name=dismiss_pattern),
+            container.locator(
+                "#onesignal-slidedown-cancel-button, "
+                ".onesignal-slidedown-cancel-button, "
+                "button[class*='cancel'], a[class*='cancel']"
+            ),
+            container.get_by_text(dismiss_pattern),
+        )
+        dismiss_button = None
+        for locator in candidates:
+            dismiss_button = cls._first_visible(locator)
+            if dismiss_button is not None:
+                break
+
+        if dismiss_button is None:
+            raise RuntimeError(
+                "The website notification prompt is blocking the page, but its "
+                "'NO THANKS' control was not found. Close the prompt manually; "
+                "the collector will not enable notifications."
+            )
+
+        dismiss_button.click(timeout=5_000)
+        try:
+            container.wait_for(state="hidden", timeout=3_000)
+        except PlaywrightError as exc:
+            raise RuntimeError(
+                "The 'NO THANKS' button was clicked, but the website notification "
+                "prompt is still visible. Inspect the Chromium window."
+            ) from exc
+
+        print("Website notification prompt dismissed (NO THANKS).")
+        return True
+
+    @classmethod
     def _click_visible_text(
         cls,
         page: Any,
@@ -428,6 +475,7 @@ class ExleasingcarCollector:
         roles: tuple[str, ...] = ("button", "link"),
     ) -> bool:
         """Click the first visible button/link/text matching a known UI label."""
+        cls._dismiss_notification_prompt(page)
         for role in roles:
             try:
                 candidate = cls._first_visible(
