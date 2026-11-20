@@ -813,6 +813,11 @@ class ExleasingcarCollector:
             last_registration_country_name=vehicle.last_registration_country_name,
             observed_at=observed_at,
         )
+        self.database.mark_detail_checked(
+            car_id,
+            auction.exleasingcar_auction_id,
+            checked_at=observed_at,
+        )
         return True
 
     def _collect_auction(
@@ -920,7 +925,14 @@ class ExleasingcarCollector:
                 "Catalog may be incomplete."
             )
 
-        detail_items = list(detail_urls.items())
+        ordered_car_ids = self.database.get_detail_check_order(
+            listing.exleasingcar_auction_id,
+            set(detail_urls),
+        )
+        detail_items = [
+            (car_id, detail_urls[car_id]) for car_id in ordered_car_ids
+            if car_id in detail_urls
+        ]
         if max_detail_pages == 0:
             detail_items = []
         elif max_detail_pages > 0:
@@ -1137,8 +1149,8 @@ def build_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--max-detail-pages",
         type=int,
-        default=-1,
-        help="Detail pages per auction: -1 all, 0 none, positive number (default: all)",
+        default=30,
+        help="Detail pages per auction: -1 all, 0 none, positive number (default: 30)",
     )
     parser.add_argument(
         "--page-delay",
