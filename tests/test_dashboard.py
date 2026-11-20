@@ -444,3 +444,88 @@ def test_dashboard_paginates_full_archive_and_search_results(tmp_path):
     clamped = handler._load_data(page=10)
     assert clamped["pagination"]["page"] == 2
     assert {lot["car_id"] for lot in clamped["lots"]} == second_ids
+
+def test_dashboard_make_filter_combines_with_search_and_pagination(tmp_path, monkeypatch):
+    from exleasingcar_archive import dashboard as dashboard_module
+
+    monkeypatch.setattr(dashboard_module, "LOT_PAGE_SIZE", 1)
+    database = ArchiveDatabase(tmp_path / "dashboard-make-filter.sqlite3")
+    database.initialize()
+    vehicles = (
+        ("ford-focus-1", "Ford", "Ford Focus Mk1"),
+        ("ford-focus-2", "ford", "Ford Focus Mk2"),
+        ("ford-fiesta", "Ford", "Ford Fiesta"),
+        ("bmw-focus", "BMW", "BMW Focus"),
+        ("unknown-focus", None, "Unknown Focus"),
+    )
+    for car_id, make, title in vehicles:
+        database.upsert_vehicle(car_id, make=make, displayed_title=title)
+        database.upsert_auction_lot(car_id, "auction-make-filter")
+
+    handler = object.__new__(DashboardHandler)
+    handler.database_path = database.path
+
+    first_page = handler._load_data(
+        search_query="Focus",
+        selected_make="Ford",
+        page=1,
+    )
+    second_page = handler._load_data(
+        search_query="Focus",
+        selected_make="Ford",
+        page=2,
+    )
+    clamped_page = handler._load_data(
+        search_query="Focus",
+        selected_make="Ford",
+        page=99,
+    )
+
+    assert first_page["available_makes"] == ["BMW", "Ford"]
+    assert first_page["selected_make"] == "Ford"
+    assert first_page["pagination"]["total_lots"] == 2
+    assert first_page["pagination"]["total_pages"] == 2
+    assert first_page["pagination"]["has_next"] is True
+    assert second_page["pagination"]["has_previous"] is True
+    assert len(first_page["lots"]) == 1
+    assert len(second_page["lots"]) == 1
+    assert {first_page["lots"][0]["car_id"], second_page["lots"][0]["car_id"]} == {
+        "ford-focus-1",
+        "ford-focus-2",
+    }
+    assert clamped_page["pagination"]["page"] == 2
+    assert clamped_page["lots"][0]["car_id"] == "ford-focus-1"
+
+
+def test_dashboard_selected_car_keeps_full_history_when_make_filter_is_present(
+    tmp_path,
+):
+    database = ArchiveDatabase(tmp_path / "dashboard-selected-car-make-filter.sqlite3")
+    database.initialize()
+    database.upsert_vehicle(
+        "car-audi",
+        make="Audi",
+        displayed_title="Audi A6",
+    )
+    database.upsert_auction_lot("car-audi", "auction-old")
+    database.upsert_auction_lot("car-audi", "auction-new")
+    database.upsert_vehicle(
+        "car-bmw",
+        make="BMW",
+        displayed_title="BMW 530d",
+    )
+    database.upsert_auction_lot("car-bmw", "auction-bmw")
+
+    handler = object.__new__(DashboardHandler)
+    handler.database_path = database.path
+    payload = handler._load_data(
+        selected_car_id="car-audi",
+        selected_make="BMW",
+    )
+
+    assert payload["selected_vehicle"]["make"] == "Audi"
+    assert {lot["auction_id"] for lot in payload["lots"]} == {
+        "auction-old",
+        "auction-new",
+    }
+    assert payload["pagination"]["total_lots"] == 2
