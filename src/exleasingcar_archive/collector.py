@@ -10,6 +10,7 @@ CAPTCHAs, bypass additional verification, or extract passwords from Chrome.
 from __future__ import annotations
 
 import argparse
+import json
 import re
 import time
 from collections.abc import Mapping
@@ -59,11 +60,19 @@ class CollectorSummary:
     detail_pages_processed: int
     api_responses_seen: int
     api_cars_processed: int
+    prices_checked: int
     prices_inserted: int
+    prices_unchanged: int
+    seller_price_references_checked: int
     seller_price_references_inserted: int
+    seller_price_references_unchanged: int
+    events_checked: int
     events_inserted: int
+    events_unchanged: int
     sale_types_recognized: int
+    lot_price_observations_checked: int
     lot_price_observations_inserted: int
+    lot_price_observations_unchanged: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -95,19 +104,21 @@ class CapturedApiResponse:
 
 
 class ApiResponseRecorder:
-    """Capture endpoint JSON only after the browser has finished downloading it."""
+    """Capture target API bodies as soon as response headers arrive."""
 
     def __init__(self) -> None:
         self.responses: list[CapturedApiResponse] = []
         self.errors: list[str] = []
         self.pending_requests: dict[int, Any] = {}
         self._timed_out_request_ids: set[int] = set()
+        self._responses_received: set[int] = set()
 
     def attach(self, context: Any) -> None:
-        # The response event only guarantees that headers have arrived. Reading
-        # the body there can race with navigation. requestfinished is emitted
-        # only after the response body has been downloaded.
+        # Read the body in the response handler. Response.body() waits until the
+        # body is available, while doing so before a later page navigation can
+        # make Chromium discard the response resource.
         context.on("request", self._on_request)
+        context.on("response", self._on_response_received)
         context.on("requestfinished", self._on_request_finished)
         context.on("requestfailed", self._on_request_failed)
 
@@ -115,52 +126,67 @@ class ApiResponseRecorder:
         if API_ENDPOINT_MARKER in request.url:
             self.pending_requests[id(request)] = request
 
-    def _capture_response(self, response: Any) -> None:
+    def _capture_response(self, response: Any) -> bool:
         if API_ENDPOINT_MARKER not in response.url:
-            return
+            return False
         if not response.ok:
             self.errors.append(f"HTTP {response.status}: {response.url}")
-            return
+            return False
         try:
-            # Called from requestfinished, when the response body is downloaded
-            # and still available to Playwright.
-            payload = response.json()
-        except (PlaywrightError, ValueError, TypeError) as exc:
+            payload = json.loads(response.body())
+        except (PlaywrightError, ValueError, TypeError, UnicodeDecodeError) as exc:
             content_type = getattr(response, "headers", {}).get("content-type", "unknown")
             self.errors.append(
                 f"Could not read JSON from {response.url} "
                 f"(HTTP {response.status}, content-type={content_type}): {exc}"
             )
-            return
+            return False
         if not isinstance(payload, Mapping):
             self.errors.append(f"Unexpected JSON response shape: {response.url}")
-            return
+            return False
         self.responses.append(CapturedApiResponse(response.url, payload))
+        return True
+
+    def _on_response_received(self, response: Any) -> None:
+        if API_ENDPOINT_MARKER not in response.url:
+            return
+        request = response.request
+        self._responses_received.add(id(request))
+        self._capture_response(response)
 
     def _on_request_finished(self, request: Any) -> None:
         request_id = id(request)
         if self.pending_requests.pop(request_id, None) is None:
             return
         self._timed_out_request_ids.discard(request_id)
-        try:
-            response = request.response()
-        except PlaywrightError as exc:
-            self.errors.append(
-                f"Could not access completed API response from {request.url}: {exc}"
-            )
-            return
-        if response is None:
-            self.errors.append(
-                f"API request finished without an HTTP response: {request.url}"
-            )
-            return
-        self._capture_response(response)
+        if request_id not in self._responses_received:
+            # Keep a fallback for contexts where a response event was not
+            # observed, but the completed request still exposes its response.
+            try:
+                response = request.response()
+            except PlaywrightError as exc:
+                self.errors.append(
+                    f"Could not access completed API response from {request.url}: {exc}"
+                )
+                return
+            if response is None:
+                self.errors.append(
+                    f"API request finished without an HTTP response: {request.url}"
+                )
+                return
+            self._capture_response(response)
+        self._responses_received.discard(request_id)
 
     def _on_request_failed(self, request: Any) -> None:
         request_id = id(request)
         if self.pending_requests.pop(request_id, None) is None:
             return
         self._timed_out_request_ids.discard(request_id)
+        if request_id in self._responses_received:
+            # The response handler already recorded either the payload or its
+            # parsing/body-read error; avoid a second misleading abort warning.
+            self._responses_received.discard(request_id)
+            return
         failure = getattr(request, "failure", None)
         if callable(failure):
             failure = failure()
@@ -193,11 +219,9 @@ class ApiResponseRecorder:
             self._timed_out_request_ids.update(newly_timed_out)
         return not self.pending_requests
 
-    # Kept as a compatibility hook for direct recorder unit tests.
-    # Production collection subscribes to requestfinished instead.
+    # Compatibility hook for direct recorder tests.
     def _on_response(self, response: Any) -> None:
         self._capture_response(response)
-
 
 def filter_updates_for_catalog(
     updates: Mapping[str, Any],
@@ -316,11 +340,19 @@ class ExleasingcarCollector:
         self.api_cursor = 0
         self.api_responses_seen = 0
         self.api_cars_processed = 0
+        self.prices_checked = 0
         self.prices_inserted = 0
+        self.prices_unchanged = 0
+        self.price_references_checked = 0
         self.price_references_inserted = 0
+        self.price_references_unchanged = 0
+        self.events_checked = 0
         self.events_inserted = 0
+        self.events_unchanged = 0
         self.sale_types_recognized = 0
+        self.lot_price_observations_checked = 0
         self.lot_price_observations_inserted = 0
+        self.lot_price_observations_unchanged = 0
         # Kept for compatibility with the previous manual-auth test helper.
         # The normal collector flow now uses _authenticate instead.
         self._manual_reauth_prompted = False
@@ -363,9 +395,15 @@ class ExleasingcarCollector:
                 },
             )
             self.api_cars_processed += summary.cars_processed
+            self.prices_checked += summary.prices_checked
             self.prices_inserted += summary.prices_inserted
+            self.prices_unchanged += summary.prices_unchanged
+            self.price_references_checked += summary.price_references_checked
             self.price_references_inserted += summary.price_references_inserted
+            self.price_references_unchanged += summary.price_references_unchanged
+            self.events_checked += summary.events_checked
             self.events_inserted += summary.events_inserted
+            self.events_unchanged += summary.events_unchanged
 
     def _upsert_catalog_lots(
         self,
@@ -804,7 +842,9 @@ class ExleasingcarCollector:
                 exleasingcar_auction_id=auction.exleasingcar_auction_id,
                 sale_type=parsed_detail.sale_type,
             )
+            self.lot_price_observations_checked += 1
             self.lot_price_observations_inserted += int(inserted)
+            self.lot_price_observations_unchanged += int(not inserted)
 
         self.database.upsert_vehicle(
             car_id,
@@ -1131,11 +1171,19 @@ class ExleasingcarCollector:
             detail_pages_processed=details_processed,
             api_responses_seen=self.api_responses_seen,
             api_cars_processed=self.api_cars_processed,
+            prices_checked=self.prices_checked,
             prices_inserted=self.prices_inserted,
+            prices_unchanged=self.prices_unchanged,
+            seller_price_references_checked=self.price_references_checked,
             seller_price_references_inserted=self.price_references_inserted,
+            seller_price_references_unchanged=self.price_references_unchanged,
+            events_checked=self.events_checked,
             events_inserted=self.events_inserted,
+            events_unchanged=self.events_unchanged,
             sale_types_recognized=self.sale_types_recognized,
+            lot_price_observations_checked=self.lot_price_observations_checked,
             lot_price_observations_inserted=self.lot_price_observations_inserted,
+            lot_price_observations_unchanged=self.lot_price_observations_unchanged,
         )
 
 
