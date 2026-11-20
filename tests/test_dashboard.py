@@ -529,3 +529,13 @@ def test_dashboard_selected_car_keeps_full_history_when_make_filter_is_present(
         "auction-new",
     }
     assert payload["pagination"]["total_lots"] == 2
+
+def test_dashboard_labels_unverified_highest_offer_as_api_value():
+    from exleasingcar_archive.dashboard import PAGE
+
+    assert "История значений API highest_offer" in PAGE
+    assert "Смысл этого поля пока не подтверждён" in PAGE
+    assert "API highest_offer" in PAGE
+    assert "История реальных ставок" not in PAGE
+    assert "Последняя ставка" not in PAGE
+    assert "Максимальная ставка" not in PAGE
