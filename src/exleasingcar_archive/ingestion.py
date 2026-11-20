@@ -130,6 +130,14 @@ def store_car_updates(
         )
         lots_upserted += 1
 
+        # This timestamp tracks API freshness independently from whether the
+        # returned price changed or was present in this response.
+        database.mark_api_checked(
+            car_id,
+            auction.exleasingcar_auction_id,
+            checked_at=timestamp,
+        )
+
         if car.highest_offer is not None:
             inserted = database.record_price_observation(
                 car_id,
