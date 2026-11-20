@@ -36,6 +36,8 @@ def _active_final_call_response():
             "test-car-001": {
                 "user_offer": 18400,
                 "highest_offer": "18300",
+                "text_minimali_kaina": "0",
+                "text_orientacine_kaina": "0",
                 "actual_user_offer": 0,
                 "actual_car_price": "0",
                 "car_id": "test-car-001",
@@ -69,7 +71,9 @@ def test_store_api_update_with_auction_and_lot_context(tmp_path):
     assert summary.prices_checked == 1
     assert summary.prices_inserted == 1
     assert summary.prices_unchanged == 0
-    assert summary.price_references_checked == 0
+    assert summary.price_references_checked == 1
+    assert summary.price_references_inserted == 1
+    assert summary.price_references_unchanged == 0
     assert summary.events_checked == 1
     assert summary.events_inserted == 1
     assert summary.events_unchanged == 0
@@ -132,6 +136,9 @@ def test_repeated_unchanged_response_does_not_duplicate_history(tmp_path):
     assert second.prices_checked == 1
     assert second.prices_inserted == 0
     assert second.prices_unchanged == 1
+    assert second.price_references_checked == 1
+    assert second.price_references_inserted == 0
+    assert second.price_references_unchanged == 1
     assert second.events_checked == 1
     assert second.events_inserted == 0
     assert second.events_unchanged == 1
