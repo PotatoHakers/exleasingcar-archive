@@ -1,6 +1,8 @@
+import sqlite3
 from pathlib import Path
 from urllib.parse import unquote
 
+from exleasingcar_archive.database import ArchiveDatabase
 from exleasingcar_archive.metadata_parser import (
     parse_auction_catalog_metadata,
     parse_auction_listings,
@@ -260,3 +262,66 @@ def test_catalog_make_uses_only_the_prefix_shared_with_the_displayed_title():
         """
     )
     assert unrelated_alt_page.lots[0].make_label is None
+
+
+
+def test_real_masked_chassis_markup_is_parsed_and_persisted(tmp_path):
+    html = """
+    <html>
+      <head>
+        <link rel="canonical"
+              href="https://www.exleasingcar.com/ru/auto-details/19810183">
+      </head>
+      <body>
+        <div class="module-body auto-body" car-id="19810183"
+             id="auto_body_19810183">
+          <h1>AUDI A4 Av. 35TFSI S Ed. Comp. Aut 2021</h1>
+          <table>
+            <tbody>
+              <tr class="border-bottom">
+                <td class="border-0">Номер кузова</td>
+                <td class="border-0">
+                  WAUZZZF48NA0
+                  <a href="/ru/завершение-регистрации/">*****</a>
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </body>
+    </html>
+    """
+
+    parsed = parse_vehicle_metadata(
+        html,
+        "https://www.exleasingcar.com/ru/auto-details/19810183",
+    )
+
+    assert parsed.source_car_id == "19810183"
+    assert parsed.chassis_number is None
+    assert parsed.chassis_number_fragment == "WAUZZZF48NA0"
+    assert parsed.chassis_number_masked is True
+
+    database = ArchiveDatabase(tmp_path / "masked-vin.sqlite3")
+    database.initialize()
+    database.upsert_vehicle(
+        parsed.source_car_id,
+        chassis_number=parsed.chassis_number,
+        chassis_number_fragment=parsed.chassis_number_fragment,
+        chassis_number_masked=parsed.chassis_number_masked,
+    )
+
+    # A later catalogue-only update must not erase the detail-page fragment.
+    database.upsert_vehicle(parsed.source_car_id, displayed_title="Audi A4")
+
+    with sqlite3.connect(database.path) as connection:
+        stored = connection.execute(
+            """
+            SELECT chassis_number, chassis_number_fragment, chassis_number_masked
+            FROM vehicles
+            WHERE source_car_id = ?
+            """,
+            (parsed.source_car_id,),
+        ).fetchone()
+
+    assert stored == (None, "WAUZZZF48NA0", 1)
