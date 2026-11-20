@@ -259,6 +259,67 @@ def test_transient_http_status_is_retried(tmp_path):
     client.close()
 
 
+def test_network_interruption_is_retried(tmp_path):
+    database = _database(
+        tmp_path,
+        [("photo", "https://data.exleasingcar.com/network-retry.jpg")],
+    )
+    attempts = 0
+
+    def handler(request):
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise httpx.ReadTimeout("synthetic interrupted response")
+        return _photo_response()
+
+    storage, r2_client = _storage()
+    client = _http_client(handler)
+    with MediaDownloader(
+        database,
+        storage,
+        settings=MediaDownloaderSettings(max_attempts=2, backoff_seconds=0),
+        client=client,
+        sleep=lambda _: None,
+    ) as downloader:
+        summary = downloader.download_batch()
+
+    assert attempts == 2
+    assert summary.uploaded == 1
+    assert summary.failed == 0
+    assert len(r2_client.put_calls) == 1
+    client.close()
+
+
+def test_pdf_signature_is_checked_within_the_first_kilobyte(tmp_path):
+    database = _database(
+        tmp_path,
+        [("report", "https://data.exleasingcar.com/late-header.pdf")],
+    )
+
+    def handler(request):
+        return httpx.Response(
+            200,
+            headers={"content-type": "application/pdf"},
+            content=(b" " * 200) + b"%PDF-1.7 synthetic report",
+        )
+
+    storage, r2_client = _storage()
+    client = _http_client(handler)
+    with MediaDownloader(
+        database,
+        storage,
+        client=client,
+        sleep=lambda _: None,
+    ) as downloader:
+        summary = downloader.download_batch()
+
+    assert summary.uploaded == 1
+    assert summary.failed == 0
+    assert len(r2_client.put_calls) == 1
+    client.close()
+
+
 def test_r2_failure_is_retried_without_losing_the_download(tmp_path):
     database = _database(
         tmp_path,
