@@ -8,11 +8,12 @@ import re
 import tempfile
 import time
 from dataclasses import dataclass
+from collections.abc import Callable
 from pathlib import PurePosixPath
-from typing import Callable
 from urllib.parse import unquote, urljoin, urlsplit
 
 import httpx
+from typing_extensions import Self
 
 from .database import ArchiveDatabase
 from .r2_storage import CloudflareR2Storage, R2Settings
@@ -181,7 +182,7 @@ class MediaDownloader:
         if self._owns_client:
             self._client.close()
 
-    def __enter__(self) -> MediaDownloader:
+    def __enter__(self) -> Self:
         return self
 
     def __exit__(self, exc_type: object, exc: object, traceback: object) -> None:
@@ -202,7 +203,7 @@ class MediaDownloader:
             self.database.mark_media_source_attempted(source_id)
             try:
                 result = self._download_one(source_id, media_type, source_url)
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 - isolate all failures for this media source
                 # Exception text can contain signed URLs or query parameters. Never persist it.
                 safe_error = (
                     str(exc)
@@ -394,7 +395,7 @@ class MediaDownloader:
                     expected_sha256=sha256,
                 )
                 return True
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 - boto3 clients expose varied SDK exceptions
                 last_error = exc
                 if attempt + 1 < self.settings.max_attempts:
                     self._sleep(self.settings.backoff_seconds * (2**attempt))
