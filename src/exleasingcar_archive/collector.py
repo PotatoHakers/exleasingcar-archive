@@ -302,12 +302,16 @@ class ExleasingcarCollector:
         raw_dir: Path,
         *,
         page_delay_seconds: float = 1.5,
+        save_html_snapshots: bool = True,
     ) -> None:
         if page_delay_seconds < 0:
             raise ValueError("page_delay_seconds cannot be negative")
+        if not isinstance(save_html_snapshots, bool):
+            raise TypeError("save_html_snapshots must be bool")
         self.database = database
         self.raw_dir = raw_dir
         self.page_delay_seconds = page_delay_seconds
+        self.save_html_snapshots = save_html_snapshots
         self.recorder = ApiResponseRecorder()
         self.api_cursor = 0
         self.api_responses_seen = 0
@@ -322,6 +326,8 @@ class ExleasingcarCollector:
         self._manual_reauth_prompted = False
 
     def _save_html(self, path: Path, html: str) -> None:
+        if not self.save_html_snapshots:
+            return
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(html, encoding="utf-8")
 
@@ -1143,6 +1149,11 @@ def build_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument("--database", type=Path, default=DEFAULT_DATABASE)
     parser.add_argument("--profile-dir", type=Path, default=DEFAULT_PROFILE_DIR)
     parser.add_argument("--raw-dir", type=Path, default=DEFAULT_RAW_DIR)
+    parser.add_argument(
+        "--no-html-snapshots",
+        action="store_true",
+        help="Do not save raw catalogue or vehicle-page HTML snapshots",
+    )
     parser.add_argument("--auction-list-url", default=AUCTION_LIST_URL)
     parser.add_argument("--auction-id", help="Process only this auction ID")
     parser.add_argument(
@@ -1179,6 +1190,7 @@ def main() -> None:
         ArchiveDatabase(args.database),
         args.raw_dir,
         page_delay_seconds=args.page_delay,
+        save_html_snapshots=not args.no_html_snapshots,
     )
     summary = collector.run(
         auction_list_url=args.auction_list_url,

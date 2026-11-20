@@ -1,9 +1,40 @@
 import pytest
 
 from exleasingcar_archive.collector import (
+    ExleasingcarCollector,
+    build_argument_parser,
     extract_vehicle_detail_urls,
     filter_updates_for_catalog,
 )
+
+
+def test_save_html_snapshots_can_be_disabled(tmp_path):
+    collector = ExleasingcarCollector(
+        database=None,
+        raw_dir=tmp_path,
+        save_html_snapshots=False,
+    )
+    snapshot = tmp_path / "auction" / "vehicle.html"
+
+    collector._save_html(snapshot, "<p>account-specific content</p>")
+
+    assert not snapshot.exists()
+    assert not snapshot.parent.exists()
+
+
+def test_save_html_snapshots_remain_enabled_by_default(tmp_path):
+    collector = ExleasingcarCollector(database=None, raw_dir=tmp_path)
+    snapshot = tmp_path / "auction" / "vehicle.html"
+
+    collector._save_html(snapshot, "<p>public vehicle content</p>")
+
+    assert snapshot.read_text(encoding="utf-8") == "<p>public vehicle content</p>"
+
+
+def test_collector_cli_can_disable_html_snapshots():
+    args = build_argument_parser().parse_args(["--no-html-snapshots"])
+
+    assert args.no_html_snapshots is True
 
 
 def test_filter_updates_for_catalog_rejects_other_auction_ids():
