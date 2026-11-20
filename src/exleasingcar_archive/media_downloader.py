@@ -234,7 +234,7 @@ class MediaDownloader:
         source_id: int,
         media_type: str,
         source_url: str,
-    ) -> _DownloadedMedia:
+    ) -> _DownloadedMediaResult:
         if media_type not in {"photo", "report"}:
             raise MediaDownloadError("unsupported media category")
         media = self._fetch_with_retries(source_id, media_type, source_url)
@@ -349,8 +349,8 @@ class MediaDownloader:
                             raise MediaDownloadError(
                                 "media file exceeds configured size limit"
                             )
-                        if len(prefix) < 64:
-                            prefix.extend(chunk[: 64 - len(prefix)])
+                        if len(prefix) < 1024:
+                            prefix.extend(chunk[: 1024 - len(prefix)])
                         digest.update(chunk)
                         buffer.write(chunk)
 
