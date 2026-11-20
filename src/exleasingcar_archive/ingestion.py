@@ -35,13 +35,19 @@ class LotMetadata:
 
 @dataclass(frozen=True, slots=True)
 class IngestionSummary:
-    """Counts of records written during one API response ingestion."""
+    """Counts of checked, inserted and unchanged values in one API response."""
 
     cars_processed: int
     lots_upserted: int
     prices_inserted: int
     events_inserted: int
     price_references_inserted: int = 0
+    prices_checked: int = 0
+    prices_unchanged: int = 0
+    price_references_checked: int = 0
+    price_references_unchanged: int = 0
+    events_checked: int = 0
+    events_unchanged: int = 0
 
 
 def store_car_updates(
@@ -105,6 +111,12 @@ def store_car_updates(
     prices_inserted = 0
     events_inserted = 0
     price_references_inserted = 0
+    prices_checked = 0
+    prices_unchanged = 0
+    price_references_checked = 0
+    price_references_unchanged = 0
+    events_checked = 0
+    events_unchanged = 0
     lots_upserted = 0
 
     for car_id, car, lot in validated_updates:
@@ -127,7 +139,9 @@ def store_car_updates(
                 displayed_lot_reference=lot.displayed_lot_reference,
                 listing_code_attribute=lot.listing_code_attribute,
             )
+            prices_checked += 1
             prices_inserted += int(inserted)
+            prices_unchanged += int(not inserted)
 
         if car.minimum_price is not None or car.indicative_price is not None:
             inserted = database.record_price_reference_observation(
@@ -139,7 +153,9 @@ def store_car_updates(
                 displayed_lot_reference=lot.displayed_lot_reference,
                 listing_code_attribute=lot.listing_code_attribute,
             )
+            price_references_checked += 1
             price_references_inserted += int(inserted)
+            price_references_unchanged += int(not inserted)
 
         # A False final_call_active value alone is not enough to create an
         # event: the API parser currently uses False when timer data is absent.
@@ -168,7 +184,9 @@ def store_car_updates(
                 displayed_lot_reference=lot.displayed_lot_reference,
                 listing_code_attribute=lot.listing_code_attribute,
             )
+            events_checked += 1
             events_inserted += int(inserted)
+            events_unchanged += int(not inserted)
 
     return IngestionSummary(
         cars_processed=len(updates),
@@ -176,4 +194,10 @@ def store_car_updates(
         prices_inserted=prices_inserted,
         events_inserted=events_inserted,
         price_references_inserted=price_references_inserted,
+        prices_checked=prices_checked,
+        prices_unchanged=prices_unchanged,
+        price_references_checked=price_references_checked,
+        price_references_unchanged=price_references_unchanged,
+        events_checked=events_checked,
+        events_unchanged=events_unchanged,
     )
