@@ -420,7 +420,9 @@ def test_api_response_recorder_reports_non_json_http_response():
         ok = True
         status = 200
         request = None
-        headers = {"content-type": "text/html; charset=UTF-8"}
+
+        def __init__(self):
+            self.headers = {"content-type": "text/html; charset=UTF-8"}
 
         def body(self):
             return b"<html><body>session expired</body></html>"
@@ -464,10 +466,10 @@ def test_api_response_recorder_does_not_duplicate_abort_after_response_error():
         url = "https://www.exleasingcar.com/ajax_update_car_form.v3.1.php"
         ok = True
         status = 200
-        headers = {"content-type": "text/html; charset=UTF-8"}
 
         def __init__(self, request):
             self.request = request
+            self.headers = {"content-type": "text/html; charset=UTF-8"}
 
         def body(self):
             return b"<html>session expired</html>"
