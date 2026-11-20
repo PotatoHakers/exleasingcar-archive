@@ -233,57 +233,24 @@ class ArchiveDatabase:
 
             if version == 0:
                 self._create_schema(connection)
-            elif version == 1:
-                self._migrate_v1_to_v2(connection)
-                self._migrate_v2_to_v3(connection)
-                self._migrate_v3_to_v4(connection)
-                self._migrate_v4_to_v5(connection)
-                self._migrate_v5_to_v6(connection)
-                self._migrate_v6_to_v7(connection)
-                self._migrate_v7_to_v8(connection)
-                self._create_indexes(connection)
-            elif version == 2:
-                self._migrate_v2_to_v3(connection)
-                self._migrate_v3_to_v4(connection)
-                self._migrate_v4_to_v5(connection)
-                self._migrate_v5_to_v6(connection)
-                self._migrate_v6_to_v7(connection)
-                self._migrate_v7_to_v8(connection)
-                self._create_indexes(connection)
-            elif version == 3:
-                self._migrate_v3_to_v4(connection)
-                self._migrate_v4_to_v5(connection)
-                self._migrate_v5_to_v6(connection)
-                self._migrate_v6_to_v7(connection)
-                self._migrate_v7_to_v8(connection)
-                self._create_indexes(connection)
-            elif version == 4:
-                self._migrate_v4_to_v5(connection)
-                self._migrate_v5_to_v6(connection)
-                self._migrate_v6_to_v7(connection)
-                self._migrate_v7_to_v8(connection)
-                self._create_indexes(connection)
-            elif version == 5:
-                self._migrate_v5_to_v6(connection)
-                self._migrate_v6_to_v7(connection)
-                self._migrate_v7_to_v8(connection)
-                self._create_indexes(connection)
-            elif version == 6:
-                self._migrate_v6_to_v7(connection)
-                self._migrate_v7_to_v8(connection)
-                self._create_indexes(connection)
-            elif version == 7:
-                self._migrate_v7_to_v8(connection)
-                self._create_indexes(connection)
-            elif version == 8:
-                self._migrate_v8_to_v9(connection)
-                self._migrate_v9_to_v10(connection)
-                self._create_indexes(connection)
-            elif version == 9:
-                self._migrate_v9_to_v10(connection)
-                self._create_indexes(connection)
             else:
-                # Idempotently ensure indexes exist for an already initialized DB.
+                # Apply every migration after the database's current schema.
+                # Keeping this as one ordered chain prevents older databases
+                # from skipping a later migration when a new schema is added.
+                migrations = (
+                    (1, self._migrate_v1_to_v2),
+                    (2, self._migrate_v2_to_v3),
+                    (3, self._migrate_v3_to_v4),
+                    (4, self._migrate_v4_to_v5),
+                    (5, self._migrate_v5_to_v6),
+                    (6, self._migrate_v6_to_v7),
+                    (7, self._migrate_v7_to_v8),
+                    (8, self._migrate_v8_to_v9),
+                    (9, self._migrate_v9_to_v10),
+                )
+                for from_version, migration in migrations:
+                    if version <= from_version:
+                        migration(connection)
                 self._create_indexes(connection)
 
             connection.execute(
