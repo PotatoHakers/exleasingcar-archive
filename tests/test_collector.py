@@ -162,18 +162,15 @@ def test_api_response_recorder_reports_invalid_json():
         ok = True
         status = 200
 
-        def finished(self):
-            return None
-
-        def json(self):
-            raise ValueError("response body is not JSON")
+        def body(self):
+            return b"not valid JSON"
 
     recorder = ApiResponseRecorder()
     recorder._on_response(FakeResponse())
 
     assert recorder.responses == []
     assert len(recorder.errors) == 1
-    assert "response body is not JSON" in recorder.errors[0]
+    assert "Could not read JSON" in recorder.errors[0]
 
 
 def test_manual_reauthentication_pauses_and_retries_same_detail_url(
