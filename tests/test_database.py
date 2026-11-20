@@ -553,7 +553,43 @@ def test_v6_database_migrates_to_v7_and_preserves_existing_lots(tmp_path):
         }
         lot_count = connection.execute("SELECT COUNT(*) FROM auction_lots").fetchone()[0]
 
-    assert version == 7
+    assert version == 8
     assert "last_detail_checked_at" in columns
     assert "last_detail_attempted_at" in columns
+    assert "last_api_checked_at" in columns
     assert lot_count == 1
+
+
+
+def test_v7_database_migrates_api_check_timestamp_without_losing_lot_history(tmp_path):
+    database = ArchiveDatabase(tmp_path / "legacy_v7.sqlite3")
+    database.initialize()
+    database.upsert_auction("auction-1", observed_at=UTC_FIRST)
+    database.upsert_vehicle("car-1", make="Ford", observed_at=UTC_FIRST)
+    database.upsert_auction_lot("car-1", "auction-1", observed_at=UTC_FIRST)
+    database.mark_detail_checked("car-1", "auction-1", checked_at=UTC_SECOND)
+
+    with sqlite3.connect(database.path) as connection:
+        connection.execute("ALTER TABLE auction_lots DROP COLUMN last_api_checked_at")
+        connection.execute("PRAGMA user_version = 7")
+
+    database.initialize()
+
+    with sqlite3.connect(database.path) as connection:
+        version = connection.execute("PRAGMA user_version").fetchone()[0]
+        columns = {
+            row[1] for row in connection.execute("PRAGMA table_info(auction_lots)")
+        }
+        lot = connection.execute(
+            """
+            SELECT last_detail_checked_at, last_api_checked_at
+            FROM auction_lots
+            """
+        ).fetchone()
+
+    assert version == 8
+    assert "last_api_checked_at" in columns
+    assert lot == (
+        UTC_SECOND.isoformat(timespec="microseconds").replace("+00:00", "Z"),
+        None,
+    )
