@@ -1,11 +1,11 @@
 import re
 import sqlite3
-from urllib.parse import urlsplit
 from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from .models import AuctionCardMarker, PriceType, SaleType
 from .parsers import PriceObservation
