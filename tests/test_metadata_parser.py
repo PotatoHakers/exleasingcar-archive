@@ -220,3 +220,43 @@ def test_parse_all_independent_auction_card_markers_and_keep_primary_type():
         "mail-b.svg",
         "euro-sign.svg",
     }
+
+
+
+def test_catalog_make_uses_only_the_prefix_shared_with_the_displayed_title():
+    saved_page = parse_auction_catalog_metadata(
+        _read_fixture("auction_catalog_make_alt_mismatch.html"),
+    )
+    saved_lot = saved_page.lots[0]
+
+    assert saved_lot.source_car_id == "19740683"
+    assert saved_lot.displayed_title.startswith("Seat Leon")
+    # The saved card's image alt says "SEAT XC40", while its title says
+    # "Seat Leon". Keep the confirmed manufacturer, not the stale model.
+    assert saved_lot.make_label == "SEAT"
+
+    # Regression values reported for vehicle 19764527 in the dashboard:
+    # the screenshot showed "FORD Movano" as Make and "Ford Focus..." as title.
+    ford_page = parse_auction_catalog_metadata(
+        """
+        <input type="hidden" name="aukciono_id" value="210854">
+        <div class="s-car-list auto-block" car-id="19764527">
+          <img class="card-img-top" alt="FORD Movano">
+          <h5>Ford Focus - 2021 Ford Focus Lim. ST-Line</h5>
+        </div>
+        """
+    )
+    assert ford_page.lots[0].make_label == "FORD"
+
+    # Do not infer a make when the leading words of the independent fields
+    # disagree.
+    unrelated_alt_page = parse_auction_catalog_metadata(
+        """
+        <input type="hidden" name="aukciono_id" value="210854">
+        <div class="s-car-list auto-block" car-id="car-unknown">
+          <img class="card-img-top" alt="VOLKSWAGEN Golf">
+          <h5>Ford Focus - 2021 Ford Focus Lim. ST-Line</h5>
+        </div>
+        """
+    )
+    assert unrelated_alt_page.lots[0].make_label is None
