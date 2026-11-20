@@ -10,6 +10,7 @@ from exleasingcar_archive.models import AuctionCardMarker
 UTC_FIRST = datetime(2026, 11, 12, 12, 0, tzinfo=timezone.utc)
 UTC_SECOND = datetime(2026, 11, 12, 12, 5, tzinfo=timezone.utc)
 UTC_THIRD = datetime(2026, 11, 12, 12, 10, tzinfo=timezone.utc)
+UTC_FOURTH = datetime(2026, 11, 12, 12, 15, tzinfo=timezone.utc)
 
 
 def test_database_initialization_creates_current_schema(tmp_path):
@@ -526,6 +527,12 @@ def test_detail_refresh_order_prioritizes_unchecked_and_oldest_lots(tmp_path):
     assert database.get_detail_check_order(
         "auction-1", {"car-a", "car-b", "car-c", "car-d", "car-e"}
     ) == ["car-e", "car-c", "car-b", "car-a", "car-d"]
+
+    # A newer failed attempt must take priority over an older successful check.
+    assert database.mark_detail_attempted("car-b", "auction-1", UTC_FOURTH)
+    assert database.get_detail_check_order(
+        "auction-1", {"car-a", "car-b", "car-c", "car-d", "car-e"}
+    ) == ["car-e", "car-c", "car-a", "car-d", "car-b"]
 
 
 def test_v6_database_migrates_to_v7_and_preserves_existing_lots(tmp_path):
