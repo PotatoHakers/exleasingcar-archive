@@ -645,7 +645,7 @@ def _onclick_url(value: str | None, function_name: str) -> str | None:
     if not value:
         return None
     pattern = re.compile(
-        rf""" {re.escape(function_name)}\s*\(\s*(['"])(.*?)\1""".strip(),
+        rf"""{re.escape(function_name)}\s*\(\s*(['"])(.*?)\1""",
         flags=re.IGNORECASE,
     )
     match = pattern.search(value)
