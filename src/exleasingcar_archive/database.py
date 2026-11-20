@@ -907,7 +907,7 @@ class ArchiveDatabase:
         exleasingcar_auction_id: str,
         source_car_ids: set[str],
     ) -> list[str]:
-        """Order known catalogue cars by oldest successful detail-page check."""
+        """Order known catalogue cars by oldest detail-page activity."""
         auction_id = self._validate_identifier(
             exleasingcar_auction_id, "exleasingcar_auction_id"
         )
@@ -927,10 +927,15 @@ class ArchiveDatabase:
                 WHERE a.exleasingcar_auction_id = ?
                   AND v.source_car_id IN ({placeholders})
                 ORDER BY
-                    CASE WHEN COALESCE(
-                        l.last_detail_checked_at, l.last_detail_attempted_at
-                    ) IS NULL THEN 0 ELSE 1 END,
-                    COALESCE(l.last_detail_checked_at, l.last_detail_attempted_at),
+                    CASE
+                        WHEN l.last_detail_checked_at IS NULL
+                         AND l.last_detail_attempted_at IS NULL THEN 0
+                        ELSE 1
+                    END,
+                    MAX(
+                        COALESCE(l.last_detail_checked_at, ''),
+                        COALESCE(l.last_detail_attempted_at, '')
+                    ),
                     l.id
                 """,
                 (auction_id, *car_ids),
