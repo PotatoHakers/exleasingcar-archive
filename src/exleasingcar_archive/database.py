@@ -57,6 +57,7 @@ CREATE TABLE IF NOT EXISTS auction_lots (
     mileage_km INTEGER,
     sale_type TEXT,
     last_detail_checked_at TEXT,
+    last_detail_attempted_at TEXT,
     first_seen_at TEXT NOT NULL,
     last_seen_at TEXT NOT NULL,
     FOREIGN KEY (vehicle_id) REFERENCES vehicles(id) ON DELETE RESTRICT,
@@ -435,6 +436,9 @@ class ArchiveDatabase:
         """Track successful detail-page checks independently from price changes."""
         cls._add_column_if_missing(
             connection, "auction_lots", "last_detail_checked_at", "TEXT"
+        )
+        cls._add_column_if_missing(
+            connection, "auction_lots", "last_detail_attempted_at", "TEXT"
         )
 
     @staticmethod
@@ -923,8 +927,10 @@ class ArchiveDatabase:
                 WHERE a.exleasingcar_auction_id = ?
                   AND v.source_car_id IN ({placeholders})
                 ORDER BY
-                    CASE WHEN l.last_detail_checked_at IS NULL THEN 0 ELSE 1 END,
-                    l.last_detail_checked_at,
+                    CASE WHEN COALESCE(
+                        l.last_detail_checked_at, l.last_detail_attempted_at
+                    ) IS NULL THEN 0 ELSE 1 END,
+                    COALESCE(l.last_detail_checked_at, l.last_detail_attempted_at),
                     l.id
                 """,
                 (auction_id, *car_ids),
@@ -932,6 +938,34 @@ class ArchiveDatabase:
         ordered = [str(row["source_car_id"]) for row in rows]
         missing = sorted(set(car_ids) - set(ordered))
         return ordered + missing
+
+    def mark_detail_attempted(
+        self,
+        source_car_id: str,
+        exleasingcar_auction_id: str,
+        attempted_at: datetime | None = None,
+    ) -> bool:
+        """Record a detail-page attempt, including failures, to prevent starvation."""
+        car_id = self._validate_identifier(source_car_id, "source_car_id")
+        auction_id = self._validate_identifier(
+            exleasingcar_auction_id, "exleasingcar_auction_id"
+        )
+        timestamp = self._serialize_datetime(attempted_at)
+        with self._connect() as connection:
+            cursor = connection.execute(
+                """
+                UPDATE auction_lots
+                SET last_detail_attempted_at = ?
+                WHERE vehicle_id = (
+                    SELECT id FROM vehicles WHERE source_car_id = ?
+                )
+                AND auction_id = (
+                    SELECT id FROM auctions WHERE exleasingcar_auction_id = ?
+                )
+                """,
+                (timestamp, car_id, auction_id),
+            )
+            return cursor.rowcount > 0
 
     def mark_detail_checked(
         self,
