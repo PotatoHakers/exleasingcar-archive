@@ -93,8 +93,8 @@ def test_api_response_recorder_accepts_only_target_endpoint_json():
         def finished(self):
             return None
 
-        def json(self):
-            return {"car-1": {"highest_offer": 123}}
+        def body(self):
+            return b'{"car-1": {"highest_offer": 123}}'
 
     recorder = ApiResponseRecorder()
     recorder._on_response(FakeResponse())
@@ -347,7 +347,7 @@ def test_collector_defaults_to_bounded_detail_batch_for_selected_auction():
     assert args.max_detail_pages == 30
 
 
-def test_api_response_recorder_captures_body_on_request_finished():
+def test_api_response_recorder_captures_body_on_response_before_navigation():
     from exleasingcar_archive.collector import ApiResponseRecorder
 
     class FakeContext:
@@ -357,38 +357,88 @@ def test_api_response_recorder_captures_body_on_request_finished():
         def on(self, event, callback):
             self.handlers[event] = callback
 
+    class FakeRequest:
+        url = "https://www.exleasingcar.com/ajax_update_car_form.v3.1.php"
+
+        def response(self):
+            return response
+
     class FakeResponse:
         url = "https://www.exleasingcar.com/ajax_update_car_form.v3.1.php"
         ok = True
         status = 200
-        def __init__(self):
+
+        def __init__(self, request):
+            self.request = request
             self.headers = {"content-type": "application/json"}
 
-        def json(self):
-            return {"car-1": {"highest_offer": "12500"}}
+        def body(self):
+            return b'{"car-1": {"highest_offer": "12500"}}'
+
+    request = FakeRequest()
+    response = FakeResponse(request)
+    context = FakeContext()
+    recorder = ApiResponseRecorder()
+    recorder.attach(context)
+
+    assert set(context.handlers) == {
+        "request", "response", "requestfinished", "requestfailed"
+    }
+
+    context.handlers["request"](request)
+    assert recorder.pending_requests
+
+    # The response body is consumed before requestfinished / next navigation.
+    context.handlers["response"](response)
+    assert len(recorder.responses) == 1
+    assert recorder.responses[0].payload["car-1"]["highest_offer"] == "12500"
+    assert recorder.errors == []
+
+    context.handlers["requestfinished"](request)
+    assert recorder.pending_requests == {}
+    assert len(recorder.responses) == 1
+
+
+def test_api_response_recorder_reports_non_json_http_response():
+    from exleasingcar_archive.collector import ApiResponseRecorder
+
+    class FakeContext:
+        def __init__(self):
+            self.handlers = {}
+
+        def on(self, event, callback):
+            self.handlers[event] = callback
 
     class FakeRequest:
         url = "https://www.exleasingcar.com/ajax_update_car_form.v3.1.php"
 
         def response(self):
-            return FakeResponse()
+            return response
 
+    class FakeResponse:
+        url = "https://www.exleasingcar.com/ajax_update_car_form.v3.1.php"
+        ok = True
+        status = 200
+        request = None
+        headers = {"content-type": "text/html; charset=UTF-8"}
+
+        def body(self):
+            return b"<html><body>session expired</body></html>"
+
+    request = FakeRequest()
+    response = FakeResponse()
+    response.request = request
     context = FakeContext()
     recorder = ApiResponseRecorder()
     recorder.attach(context)
 
-    assert set(context.handlers) == {"request", "requestfinished", "requestfailed"}
-
-    request = FakeRequest()
     context.handlers["request"](request)
-    assert recorder.pending_requests
-
+    context.handlers["response"](response)
     context.handlers["requestfinished"](request)
 
-    assert recorder.pending_requests == {}
-    assert len(recorder.responses) == 1
-    assert recorder.responses[0].payload["car-1"]["highest_offer"] == "12500"
-    assert recorder.errors == []
+    assert recorder.responses == []
+    assert len(recorder.errors) == 1
+    assert "content-type=text/html" in recorder.errors[0]
 
 
 def test_api_response_recorder_reports_failed_request():
@@ -420,8 +470,8 @@ def test_api_response_recorder_waits_for_pending_request_completion():
         def __init__(self):
             self.headers = {"content-type": "application/json"}
 
-        def json(self):
-            return {"car-1": {"highest_offer": 12500}}
+        def body(self):
+            return b'{"car-1": {"highest_offer": 12500}}'
 
     class FakeRequest:
         url = "https://www.exleasingcar.com/ajax_update_car_form.v3.1.php"
