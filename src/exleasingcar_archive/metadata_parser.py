@@ -644,11 +644,11 @@ def _trusted_media_url(value: str | None, page_url: str | None) -> str | None:
 def _onclick_url(value: str | None, function_name: str) -> str | None:
     if not value:
         return None
-    match = re.search(
-        rf""" {re.escape(function_name)}\\s*\\(\\s*(['"])(.*?)\\1""".strip(),
-        value,
+    pattern = re.compile(
+        rf""" {re.escape(function_name)}\s*\(\s*(['"])(.*?)\1""".strip(),
         flags=re.IGNORECASE,
     )
+    match = pattern.search(value)
     return match.group(2).strip() if match else None
 
 
