@@ -59,16 +59,17 @@ footer{color:#7b8795;font-size:12px;margin-top:20px}
 <main>
 <div class="status"><span><i class="dot"></i>Подключено к локальной базе</span><span id="dbpath" class="mono"></span><span id="updated"></span></div>
 <div id="metrics" class="cards"><div class="card">Загрузка…</div></div>
-<section><h2>Лоты автомобилей</h2><p class="hint">Каждая строка — автомобиль в конкретном аукционе. Повторный выход на торги отображается отдельным лотом. Маркеры относятся к карточке аукциона, а не к отдельной машине.</p><div class="search-controls"><label for="make-filter">Марка</label><select id="make-filter"><option value="">Все марки</option></select><label for="lot-search">Поиск по названию, ID или номеру кузова</label><input id="lot-search" type="search" autocomplete="off" placeholder="Например, Mercedes, 19702473 или VIN"><span id="search-status" class="muted" aria-live="polite"></span></div><section id="car-card" class="detail-card" hidden aria-live="polite"></section><div class="wrap"><table><thead><tr><th></th><th>Аукцион</th><th>ID автомобиля</th><th>Автомобиль</th><th>Тип продажи</th><th>Маркеры аукциона</th><th>Пробег, км</th><th>Номер кузова</th><th>API highest_offer</th><th>Мин. цена продавца</th><th>Ориентир</th><th>Первое наблюдение</th></tr></thead><tbody id="lots"></tbody></table></div><div id="lot-pagination" class="pagination-controls" hidden><button type="button" id="page-prev">← Назад</button><span id="page-info"></span><button type="button" id="page-next">Дальше →</button></div></section>
-<section><h2>История значений API highest_offer</h2><p class="hint">Здесь отображаются все полученные значения поля highest_offer, включая 0, если поле присутствовало в API-ответе. Отсутствующее поле не создаёт наблюдение. Смысл этого поля пока не подтверждён: не считайте каждое значение доказанной публичной ставкой.</p><div class="wrap"><table><thead><tr><th>Дата наблюдения</th><th>Аукцион</th><th>ID автомобиля</th><th>Значение highest_offer</th><th>Источник</th></tr></thead><tbody id="bids"></tbody></table></div></section>
-<section><h2>История цен продавца</h2><p class="hint">Минимальная и ориентировочная цены — отдельно от API highest_offer и отображаемых цен.</p><div class="wrap"><table><thead><tr><th>Дата наблюдения</th><th>Аукцион</th><th>ID автомобиля</th><th>Минимальная цена</th><th>Ориентировочная цена</th><th>Источник</th></tr></thead><tbody id="refs"></tbody></table></div></section>
-<section><h2>Отображаемые и фиксированные цены</h2><p class="hint">Начальная/текущая цена открытого аукциона и цена «Купить сейчас» хранятся отдельно от API highest_offer и справочных цен продавца.</p><div class="wrap"><table><thead><tr><th>Дата наблюдения</th><th>Аукцион</th><th>ID автомобиля</th><th>Тип цены</th><th>Сумма</th><th>Валюта</th><th>Поле источника</th></tr></thead><tbody id="lotprices"></tbody></table></div></section>
+<section><h2>Лоты автомобилей</h2><p class="hint">Каждая строка — автомобиль в конкретном аукционе. Повторный выход на торги отображается отдельным лотом. Маркеры относятся к карточке аукциона, а не к отдельной машине.</p><div class="search-controls"><label for="make-filter">Марка</label><select id="make-filter"><option value="">Все марки</option></select><label for="lot-search">Поиск по названию, ID или номеру кузова</label><input id="lot-search" type="search" autocomplete="off" placeholder="Например, Mercedes, 19702473 или VIN"><span id="search-status" class="muted" aria-live="polite"></span></div><section id="car-card" class="detail-card" hidden aria-live="polite"></section><div class="wrap"><table><thead><tr><th></th><th>Аукцион</th><th>ID автомобиля</th><th>Автомобиль</th><th>Тип продажи</th><th>Маркеры аукциона</th><th>Пробег, км</th><th>Номер кузова</th><th>API highest_offer (€)</th><th>Мин. цена продавца (€)</th><th>Ориентир (€)</th><th>Проверка API</th><th>Первое наблюдение</th></tr></thead><tbody id="lots"></tbody></table></div><div id="lot-pagination" class="pagination-controls" hidden><button type="button" id="page-prev">← Назад</button><span id="page-info"></span><button type="button" id="page-next">Дальше →</button></div></section>
+<section><h2>История значений API highest_offer</h2><p class="hint">Здесь отображаются все полученные значения поля highest_offer, включая 0, если поле присутствовало в API-ответе. Отсутствующее поле не создаёт наблюдение. Смысл этого поля пока не подтверждён: не считайте каждое значение доказанной публичной ставкой.</p><div class="wrap"><table><thead><tr><th>Дата наблюдения</th><th>Аукцион</th><th>ID автомобиля</th><th>Значение highest_offer (€)</th><th>Источник</th></tr></thead><tbody id="bids"></tbody></table></div></section>
+<section><h2>История цен продавца</h2><p class="hint">Минимальная и ориентировочная цены — отдельно от API highest_offer и отображаемых цен.</p><div class="wrap"><table><thead><tr><th>Дата наблюдения</th><th>Аукцион</th><th>ID автомобиля</th><th>Минимальная цена (€)</th><th>Ориентировочная цена (€)</th><th>Источник</th></tr></thead><tbody id="refs"></tbody></table></div></section>
+<section><h2>Отображаемые и фиксированные цены</h2><p class="hint">Начальная/текущая цена открытого аукциона и цена «Купить сейчас» хранятся отдельно от API highest_offer и справочных цен продавца.</p><div class="wrap"><table><thead><tr><th>Дата наблюдения</th><th>Аукцион</th><th>ID автомобиля</th><th>Тип цены</th><th>Сумма (€)</th><th>Валюта</th><th>Поле источника</th></tr></thead><tbody id="lotprices"></tbody></table></div></section>
 <section><h2>События аукционов</h2><div class="wrap"><table><thead><tr><th>Дата наблюдения</th><th>Аукцион</th><th>ID автомобиля</th><th>Фаза</th><th>Статус ставки</th><th>Конец аукциона</th><th>Осталось, сек.</th><th>FINAL CALL</th></tr></thead><tbody id="events"></tbody></table></div></section>
 <footer>Автообновление каждые 5 секунд. Панель работает в режиме чтения: импорт и изменение БД выполняются отдельными командами.</footer>
 </main>
 <script>
 const esc = v => String(v ?? "—").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 const cell = v => `<td>${esc(v)}</td>`;
+const moneyCell = v => `<td>${v == null ? '—' : '€ ' + esc(v)}</td>`;
 const markerGroupLabels = {
  auction_format:'Формат торгов',
  fixed_price_option:'Фиксированная цена',
@@ -152,10 +153,10 @@ async function refresh(){
    document.getElementById('page-next').disabled=!pagination.has_next;
    paginationPanel.hidden=pagination.total_pages<=1;
   }
-  rows('lots',d.lots.map(x=>`<tr><td><button type="button" class="open-car" data-car-id="${esc(x.car_id)}">Открыть</button></td>${cell(x.auction_id)}${cell(x.car_id)}${cell(x.title)}${cell(x.sale_type)}<td>${markerBadges(x.markers)}</td>${cell(x.mileage_km)}${cell(x.chassis)}${cell(x.highest_offer)}${cell(x.minimum_price)}${cell(x.indicative_price)}${cell(x.first_seen_at)}</tr>`),query?'По этому запросу ничего не найдено':'Лотов пока нет');
-  rows('bids',d.bids.map(x=>`<tr>${cell(x.observed_at)}${cell(x.auction_id)}${cell(x.car_id)}${cell(x.highest_offer)}${cell(x.source)}</tr>`),'Наблюдений API highest_offer пока нет');
-  rows('refs',d.references.map(x=>`<tr>${cell(x.observed_at)}${cell(x.auction_id)}${cell(x.car_id)}${cell(x.minimum_price)}${cell(x.indicative_price)}${cell(x.source)}</tr>`),'Наблюдений цен продавца пока нет');
-  rows('lotprices',d.lot_prices.map(x=>`<tr>${cell(x.observed_at)}${cell(x.auction_id)}${cell(x.car_id)}${cell(x.price_type)}${cell(x.amount)}${cell(x.currency)}${cell(x.source_field)}</tr>`),'Отображаемые и фиксированные цены пока не записаны');
+  rows('lots',d.lots.map(x=>`<tr><td><button type="button" class="open-car" data-car-id="${esc(x.car_id)}">Открыть</button></td>${cell(x.auction_id)}${cell(x.car_id)}${cell(x.title)}${cell(x.sale_type)}<td>${markerBadges(x.markers)}</td>${cell(x.mileage_km)}${cell(x.chassis)}${moneyCell(x.highest_offer)}${moneyCell(x.minimum_price)}${moneyCell(x.indicative_price)}${cell(x.last_api_checked_at)}${cell(x.first_seen_at)}</tr>`),query?'По этому запросу ничего не найдено':'Лотов пока нет');
+  rows('bids',d.bids.map(x=>`<tr>${cell(x.observed_at)}${cell(x.auction_id)}${cell(x.car_id)}${moneyCell(x.highest_offer)}${cell(x.source)}</tr>`),'Наблюдений API highest_offer пока нет');
+  rows('refs',d.references.map(x=>`<tr>${cell(x.observed_at)}${cell(x.auction_id)}${cell(x.car_id)}${moneyCell(x.minimum_price)}${moneyCell(x.indicative_price)}${cell(x.source)}</tr>`),'Наблюдений цен продавца пока нет');
+  rows('lotprices',d.lot_prices.map(x=>`<tr>${cell(x.observed_at)}${cell(x.auction_id)}${cell(x.car_id)}${cell(x.price_type)}${moneyCell(x.amount)}${cell(x.currency)}${cell(x.source_field)}</tr>`),'Отображаемые и фиксированные цены пока не записаны');
   rows('events',d.events.map(x=>`<tr>${cell(x.observed_at)}${cell(x.auction_id)}${cell(x.car_id)}${cell(x.auction_phase)}${cell(x.bid_status)}${cell(x.auction_end_at)}${cell(x.remaining_seconds)}<td>${x.final_call_active===1?'<span class="pill warn">Да</span>':x.final_call_active===0?'<span class="pill">Нет</span>':'—'}</td></tr>`),'Событий пока нет');
  }catch(e){document.getElementById('updated').textContent='Ошибка чтения базы: '+e.message;}
 }
@@ -295,6 +296,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
                        COALESCE(v.displayed_title, trim(COALESCE(v.make,'') || ' ' || COALESCE(v.model,''))) AS title,
                        al.sale_type,
                        al.mileage_km,
+                        al.last_api_checked_at,
                        CASE
                          WHEN v.chassis_number IS NOT NULL THEN v.chassis_number
                          WHEN v.chassis_number_fragment IS NOT NULL THEN v.chassis_number_fragment ||
@@ -303,9 +305,13 @@ class DashboardHandler(BaseHTTPRequestHandler):
                        END AS chassis,
                        (SELECT po.highest_offer FROM price_observations po
                         WHERE po.auction_lot_id=al.id ORDER BY po.observed_at DESC, po.id DESC LIMIT 1) AS highest_offer,
-                       (SELECT pr.minimum_price FROM price_reference_observations pr
+                       (SELECT po.currency FROM price_observations po
+                        WHERE po.auction_lot_id=al.id ORDER BY po.observed_at DESC, po.id DESC LIMIT 1) AS highest_offer_currency,
+                        (SELECT pr.minimum_price FROM price_reference_observations pr
                         WHERE pr.auction_lot_id=al.id ORDER BY pr.observed_at DESC, pr.id DESC LIMIT 1) AS minimum_price,
-                       (SELECT pr.indicative_price FROM price_reference_observations pr
+                       (SELECT pr.currency FROM price_reference_observations pr
+                        WHERE pr.auction_lot_id=al.id ORDER BY pr.observed_at DESC, pr.id DESC LIMIT 1) AS reference_currency,
+                        (SELECT pr.indicative_price FROM price_reference_observations pr
                         WHERE pr.auction_lot_id=al.id ORDER BY pr.observed_at DESC, pr.id DESC LIMIT 1) AS indicative_price,
                        al.first_seen_at,
                        al.last_seen_at,
@@ -435,7 +441,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
             bids = [dict(row) for row in connection.execute(
                 f"""
                 SELECT po.observed_at, a.exleasingcar_auction_id AS auction_id,
-                       v.source_car_id AS car_id, po.highest_offer, po.source
+                       v.source_car_id AS car_id, po.highest_offer, po.currency, po.source
                 FROM price_observations po
                 JOIN auction_lots al ON al.id=po.auction_lot_id
                 JOIN vehicles v ON v.id=al.vehicle_id
@@ -449,7 +455,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 f"""
                 SELECT pr.observed_at, a.exleasingcar_auction_id AS auction_id,
                        v.source_car_id AS car_id, pr.minimum_price,
-                       pr.indicative_price, pr.source
+                       pr.indicative_price, pr.currency, pr.source
                 FROM price_reference_observations pr
                 JOIN auction_lots al ON al.id=pr.auction_lot_id
                 JOIN vehicles v ON v.id=al.vehicle_id
