@@ -82,7 +82,7 @@ def test_v2_migration_adds_current_metadata_and_preserves_history(tmp_path):
             "SELECT highest_offer FROM price_observations"
         ).fetchone()[0]
 
-    assert version == SCHEMA_VERSION == 6
+    assert version == SCHEMA_VERSION == 7
     assert title is None
     assert price == "18300"
     assert connection.execute(
@@ -148,7 +148,7 @@ def test_v3_migration_adds_vehicle_identity_fields_and_reference_table(tmp_path)
     database.upsert_auction_lot("old-car", "auction-1", mileage_km=74002)
 
     with sqlite3.connect(database_path) as connection:
-        assert connection.execute("PRAGMA user_version").fetchone()[0] == 6
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 7
         identity = connection.execute(
             "SELECT chassis_number, chassis_number_fragment, chassis_number_masked "
             "FROM vehicles WHERE source_car_id = 'old-car'"

@@ -492,7 +492,62 @@ def test_v5_database_migrates_to_v6_without_losing_auction_rows(tmp_path):
             """
         ).fetchone()[0]
 
-    assert version == 6
+    assert version == 7
     assert auction == ("210547", "BCA DE 3.3")
     assert marker_table == 1
 
+
+
+def test_detail_refresh_order_prioritizes_unchecked_and_oldest_lots(tmp_path):
+    database = ArchiveDatabase(tmp_path / "detail-refresh.sqlite3")
+    database.initialize()
+    database.upsert_auction("auction-1", observed_at=UTC_FIRST)
+    for car_id in ("car-a", "car-b", "car-c", "car-d", "car-e"):
+        database.upsert_vehicle(car_id, observed_at=UTC_FIRST)
+        database.upsert_auction_lot(car_id, "auction-1", observed_at=UTC_FIRST)
+
+    assert database.get_detail_check_order(
+        "auction-1", {"car-a", "car-b", "car-c", "car-d", "car-e", "car-missing"}
+    ) == ["car-a", "car-b", "car-c", "car-d", "car-e", "car-missing"]
+
+    assert database.mark_detail_checked("car-b", "auction-1", UTC_SECOND)
+    assert database.mark_detail_checked("car-a", "auction-1", UTC_THIRD)
+    assert database.get_detail_check_order(
+        "auction-1", {"car-a", "car-b", "car-c", "car-d", "car-e"}
+    ) == ["car-c", "car-d", "car-e", "car-b", "car-a"]
+
+    assert database.mark_detail_checked("car-c", "auction-1", UTC_FIRST)
+    assert database.get_detail_check_order(
+        "auction-1", {"car-a", "car-b", "car-c", "car-d", "car-e"}
+    ) == ["car-d", "car-e", "car-c", "car-b", "car-a"]
+
+    # Failed attempts are remembered, so an unchecked car gets its turn next.
+    assert database.mark_detail_attempted("car-d", "auction-1", UTC_THIRD)
+    assert database.get_detail_check_order(
+        "auction-1", {"car-a", "car-b", "car-c", "car-d", "car-e"}
+    ) == ["car-e", "car-c", "car-b", "car-a", "car-d"]
+
+
+def test_v6_database_migrates_to_v7_and_preserves_existing_lots(tmp_path):
+    database = ArchiveDatabase(tmp_path / "legacy_v6.sqlite3")
+    database.initialize()
+    database.upsert_auction("auction-1", observed_at=UTC_FIRST)
+    database.upsert_vehicle("car-1", make="Ford", observed_at=UTC_FIRST)
+    database.upsert_auction_lot("car-1", "auction-1", observed_at=UTC_FIRST)
+
+    with sqlite3.connect(database.path) as connection:
+        connection.execute("PRAGMA user_version = 6")
+
+    database.initialize()
+
+    with sqlite3.connect(database.path) as connection:
+        version = connection.execute("PRAGMA user_version").fetchone()[0]
+        columns = {
+            row[1] for row in connection.execute("PRAGMA table_info(auction_lots)")
+        }
+        lot_count = connection.execute("SELECT COUNT(*) FROM auction_lots").fetchone()[0]
+
+    assert version == 7
+    assert "last_detail_checked_at" in columns
+    assert "last_detail_attempted_at" in columns
+    assert lot_count == 1

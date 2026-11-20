@@ -9,7 +9,7 @@ from pathlib import Path
 from .models import AuctionCardMarker, PriceType, SaleType
 from .parsers import PriceObservation
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 DEFAULT_SOURCE = "ajax_update_car_form.v3.1.php"
 
 
@@ -56,6 +56,8 @@ CREATE TABLE IF NOT EXISTS auction_lots (
     listing_code_attribute TEXT,
     mileage_km INTEGER,
     sale_type TEXT,
+    last_detail_checked_at TEXT,
+    last_detail_attempted_at TEXT,
     first_seen_at TEXT NOT NULL,
     last_seen_at TEXT NOT NULL,
     FOREIGN KEY (vehicle_id) REFERENCES vehicles(id) ON DELETE RESTRICT,
@@ -183,24 +185,32 @@ class ArchiveDatabase:
                 self._migrate_v3_to_v4(connection)
                 self._migrate_v4_to_v5(connection)
                 self._migrate_v5_to_v6(connection)
+                self._migrate_v6_to_v7(connection)
                 self._create_indexes(connection)
             elif version == 2:
                 self._migrate_v2_to_v3(connection)
                 self._migrate_v3_to_v4(connection)
                 self._migrate_v4_to_v5(connection)
                 self._migrate_v5_to_v6(connection)
+                self._migrate_v6_to_v7(connection)
                 self._create_indexes(connection)
             elif version == 3:
                 self._migrate_v3_to_v4(connection)
                 self._migrate_v4_to_v5(connection)
                 self._migrate_v5_to_v6(connection)
+                self._migrate_v6_to_v7(connection)
                 self._create_indexes(connection)
             elif version == 4:
                 self._migrate_v4_to_v5(connection)
                 self._migrate_v5_to_v6(connection)
+                self._migrate_v6_to_v7(connection)
                 self._create_indexes(connection)
             elif version == 5:
                 self._migrate_v5_to_v6(connection)
+                self._migrate_v6_to_v7(connection)
+                self._create_indexes(connection)
+            elif version == 6:
+                self._migrate_v6_to_v7(connection)
                 self._create_indexes(connection)
             else:
                 # Idempotently ensure indexes exist for an already initialized DB.
@@ -228,6 +238,10 @@ class ArchiveDatabase:
     @staticmethod
     def _create_indexes(connection: sqlite3.Connection) -> None:
         statements = (
+            """
+            CREATE INDEX IF NOT EXISTS idx_auction_lots_detail_check
+            ON auction_lots(auction_id, last_detail_checked_at, id)
+            """,
             """
             CREATE INDEX IF NOT EXISTS idx_auction_lots_auction_vehicle
             ON auction_lots(auction_id, vehicle_id)
@@ -416,6 +430,16 @@ class ArchiveDatabase:
     def _migrate_v5_to_v6(cls, connection: sqlite3.Connection) -> None:
         """Store the independent icons and labels shown on each auction card."""
         connection.execute(AUCTION_MARKERS_SQL)
+
+    @classmethod
+    def _migrate_v6_to_v7(cls, connection: sqlite3.Connection) -> None:
+        """Track successful detail-page checks independently from price changes."""
+        cls._add_column_if_missing(
+            connection, "auction_lots", "last_detail_checked_at", "TEXT"
+        )
+        cls._add_column_if_missing(
+            connection, "auction_lots", "last_detail_attempted_at", "TEXT"
+        )
 
     @staticmethod
     def _serialize_datetime(value: datetime | None) -> str:
@@ -877,6 +901,99 @@ class ArchiveDatabase:
                 last_registration_country_code=last_registration_country_code,
                 last_registration_country_name=last_registration_country_name,
             )
+
+    def get_detail_check_order(
+        self,
+        exleasingcar_auction_id: str,
+        source_car_ids: set[str],
+    ) -> list[str]:
+        """Order known catalogue cars by oldest successful detail-page check."""
+        auction_id = self._validate_identifier(
+            exleasingcar_auction_id, "exleasingcar_auction_id"
+        )
+        car_ids = sorted(
+            {self._validate_identifier(car_id, "source_car_id") for car_id in source_car_ids}
+        )
+        if not car_ids:
+            return []
+        placeholders = ", ".join("?" for _ in car_ids)
+        with self._connect() as connection:
+            rows = connection.execute(
+                f"""
+                SELECT v.source_car_id
+                FROM auction_lots AS l
+                JOIN vehicles AS v ON v.id = l.vehicle_id
+                JOIN auctions AS a ON a.id = l.auction_id
+                WHERE a.exleasingcar_auction_id = ?
+                  AND v.source_car_id IN ({placeholders})
+                ORDER BY
+                    CASE WHEN COALESCE(
+                        l.last_detail_checked_at, l.last_detail_attempted_at
+                    ) IS NULL THEN 0 ELSE 1 END,
+                    COALESCE(l.last_detail_checked_at, l.last_detail_attempted_at),
+                    l.id
+                """,
+                (auction_id, *car_ids),
+            ).fetchall()
+        ordered = [str(row["source_car_id"]) for row in rows]
+        missing = sorted(set(car_ids) - set(ordered))
+        return ordered + missing
+
+    def mark_detail_attempted(
+        self,
+        source_car_id: str,
+        exleasingcar_auction_id: str,
+        attempted_at: datetime | None = None,
+    ) -> bool:
+        """Record a detail-page attempt, including failures, to prevent starvation."""
+        car_id = self._validate_identifier(source_car_id, "source_car_id")
+        auction_id = self._validate_identifier(
+            exleasingcar_auction_id, "exleasingcar_auction_id"
+        )
+        timestamp = self._serialize_datetime(attempted_at)
+        with self._connect() as connection:
+            cursor = connection.execute(
+                """
+                UPDATE auction_lots
+                SET last_detail_attempted_at = ?
+                WHERE vehicle_id = (
+                    SELECT id FROM vehicles WHERE source_car_id = ?
+                )
+                AND auction_id = (
+                    SELECT id FROM auctions WHERE exleasingcar_auction_id = ?
+                )
+                """,
+                (timestamp, car_id, auction_id),
+            )
+            return cursor.rowcount > 0
+
+    def mark_detail_checked(
+        self,
+        source_car_id: str,
+        exleasingcar_auction_id: str,
+        checked_at: datetime | None = None,
+    ) -> bool:
+        """Record a successfully loaded detail page without creating price history."""
+        car_id = self._validate_identifier(source_car_id, "source_car_id")
+        auction_id = self._validate_identifier(
+            exleasingcar_auction_id, "exleasingcar_auction_id"
+        )
+        timestamp = self._serialize_datetime(checked_at)
+        with self._connect() as connection:
+            cursor = connection.execute(
+                """
+                UPDATE auction_lots
+                SET last_detail_checked_at = ?
+                WHERE vehicle_id = (
+                    SELECT id FROM vehicles WHERE source_car_id = ?
+                )
+                AND auction_id = (
+                    SELECT id FROM auctions WHERE exleasingcar_auction_id = ?
+                )
+                """,
+                (timestamp, car_id, auction_id),
+            )
+            return cursor.rowcount > 0
 
     def upsert_auction_lot(
         self,

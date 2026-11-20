@@ -308,12 +308,12 @@ def test_detail_enrichment_keeps_open_starting_price_out_of_bid_history(
     assert bids == 0
 
 
-def test_collector_defaults_to_all_detail_pages_for_selected_auction():
+def test_collector_defaults_to_bounded_detail_batch_for_selected_auction():
     from exleasingcar_archive.collector import build_argument_parser
 
     args = build_argument_parser().parse_args([])
     assert args.max_auctions == 1
-    assert args.max_detail_pages == -1
+    assert args.max_detail_pages == 30
 
 
 def test_api_response_recorder_captures_body_on_request_finished():
