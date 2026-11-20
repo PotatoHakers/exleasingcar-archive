@@ -372,12 +372,12 @@ def sanitize_html_snapshot(html: str) -> str:
     )
     sanitized = re.sub(
         r"""(?i)(__EMAIL__\s*=\s*)['"][^'"]*['"]""",
-        r'\\1""',
+        r'\1""',
         sanitized,
     )
     sanitized = re.sub(
         r"""(?i)(OneSignal\.sendTag\(\s*['"]ID['"]\s*,\s*)['"][^'"]*['"]""",
-        r'\\1""',
+        r'\1""',
         sanitized,
     )
     sanitized = re.sub(
