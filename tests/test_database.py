@@ -492,7 +492,7 @@ def test_v5_database_migrates_to_v6_without_losing_auction_rows(tmp_path):
             """
         ).fetchone()[0]
 
-    assert version == 6
+    assert version == 7
     assert auction == ("210547", "BCA DE 3.3")
     assert marker_table == 1
 
