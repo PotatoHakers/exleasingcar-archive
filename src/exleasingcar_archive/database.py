@@ -1238,6 +1238,54 @@ class ArchiveDatabase:
                 raise RuntimeError("Failed to register lot media source")
             return int(row["id"])
 
+    def get_pending_media_sources(
+        self,
+        limit: int = 20,
+        *,
+        include_downloaded: bool = False,
+    ) -> list[dict[str, object]]:
+        """Return a bounded list of lot-scoped media URLs awaiting download.
+
+        Downloaded sources are excluded by default. The refresh flag is
+        intended for an explicit pass that checks whether archived URLs changed.
+        """
+        if isinstance(limit, bool) or not isinstance(limit, int):
+            raise TypeError("limit must be an integer")
+        if not 1 <= limit <= 1000:
+            raise ValueError("limit must be between 1 and 1000")
+        if not isinstance(include_downloaded, bool):
+            raise TypeError("include_downloaded must be a boolean")
+
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT m.id AS media_source_id,
+                       m.media_type,
+                       m.source_url,
+                       m.preview_url,
+                       m.label,
+                       m.source_order,
+                       m.download_status,
+                       v.source_car_id,
+                       a.exleasingcar_auction_id AS auction_id
+                FROM lot_media_sources AS m
+                JOIN auction_lots AS al ON al.id = m.auction_lot_id
+                JOIN vehicles AS v ON v.id = al.vehicle_id
+                JOIN auctions AS a ON a.id = al.auction_id
+                WHERE (
+                    (
+                        m.current_asset_id IS NULL
+                        AND m.download_status IN ('discovered', 'failed')
+                    )
+                    OR (? = 1 AND m.current_asset_id IS NOT NULL)
+                )
+                ORDER BY m.id
+                LIMIT ?
+                """,
+                (int(include_downloaded), limit),
+            )
+            return [dict(row) for row in rows]
+
     def mark_media_source_attempted(
         self,
         media_source_id: int,
