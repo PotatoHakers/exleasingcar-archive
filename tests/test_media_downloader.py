@@ -13,6 +13,17 @@ from exleasingcar_archive.media_downloader import (
 from exleasingcar_archive.r2_storage import CloudflareR2Storage, R2Settings
 
 
+class _ChunkStream(httpx.SyncByteStream):
+    def __init__(self, chunks):
+        self.chunks = chunks
+
+    def __iter__(self):
+        yield from self.chunks
+
+    def close(self):
+        pass
+
+
 class FakeR2Client:
     def __init__(self):
         self.objects: dict[str, bytes] = {}
