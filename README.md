@@ -37,18 +37,7 @@ PYTHONPATH=src python -m exleasingcar_archive.snapshot_import \
 
 Команда импортирует сохранённые данные в локальную SQLite-базу и не выполняет сетевых запросов.
 
-## Архивация фотографий и PDF в Cloudflare R2
-
-Скопируй `.env.example` в локальный `.env` и заполни параметры приватного R2 bucket:
-
-- `EXLEASINGCAR_R2_ACCOUNT_ID`
-- `EXLEASINGCAR_R2_BUCKET`
-- `EXLEASINGCAR_R2_ACCESS_KEY_ID`
-- `EXLEASINGCAR_R2_SECRET_ACCESS_KEY`
-
-Файл `.env` не добавляй в Git. Загрузчик читает его автоматически.
-
-Для первого реального прогона выбери небольшую пачку из одного файла:
+Прогон R2:
 
 ```bash
 PYTHONPATH=src python -m exleasingcar_archive.media_downloader \
