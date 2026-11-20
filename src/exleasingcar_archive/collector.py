@@ -317,6 +317,78 @@ def _safe_component(value: str) -> str:
     return re.sub(r"[^A-Za-z0-9_.-]+", "_", value).strip("._") or "item"
 
 
+_PRIVATE_SNAPSHOT_FIELD = re.compile(
+    r"offer|bid|email|password|csrf|session|token|account|user_id|credit|"
+    r"note|comment|question|message",
+    re.IGNORECASE,
+)
+
+
+def sanitize_html_snapshot(html: str) -> str:
+    """Remove known account-identifying and private form values from saved HTML.
+
+    The live page is still parsed in memory before this function is used. This
+    sanitized copy is only an optional diagnostic/archive artifact.
+    """
+    if not isinstance(html, str):
+        raise TypeError("html must be a string")
+
+    soup = BeautifulSoup(html, "html.parser")
+
+    # The account dropdown contains the user's display name and account ID.
+    for element in soup.select(
+        ".module-user, #onesignal-slidedown-container, .onesignal-slidedown"
+    ):
+        element.decompose()
+
+    for element in soup.find_all(["input", "textarea"]):
+        identity = " ".join(
+            [
+                str(element.get("name", "")),
+                str(element.get("id", "")),
+                " ".join(str(item) for item in element.get("class", [])),
+            ]
+        )
+        if _PRIVATE_SNAPSHOT_FIELD.search(identity):
+            element.attrs.pop("value", None)
+            if element.name == "textarea":
+                element.clear()
+
+        for attribute in tuple(element.attrs):
+            if re.fullmatch(
+                r"data-(?:user|account|email|token|session|auth).*",
+                str(attribute),
+                re.IGNORECASE,
+            ):
+                element.attrs.pop(attribute, None)
+
+    sanitized = str(soup)
+    # These globals and the OneSignal ID tag are embedded in inline scripts,
+    # outside the account dropdown itself.
+    sanitized = re.sub(
+        r"""(?i)(__USER_ID__\\s*=\\s*)['"][^'"]*['"]""",
+        r'\\1""',
+        sanitized,
+    )
+    sanitized = re.sub(
+        r"""(?i)(__EMAIL__\\s*=\\s*)['"][^'"]*['"]""",
+        r'\\1""',
+        sanitized,
+    )
+    sanitized = re.sub(
+        r"""(?i)(OneSignal\\.sendTag\\(\\s*['"]ID['"]\\s*,\\s*)['"][^'"]*['"]""",
+        r'\\1""',
+        sanitized,
+    )
+    sanitized = re.sub(
+        r"[A-Z0-9._%+-]+@[A-Z0-9.-]+\\.[A-Z]{2,}",
+        "[redacted-email]",
+        sanitized,
+        flags=re.IGNORECASE,
+    )
+    return sanitized
+
+
 class ExleasingcarCollector:
     """Read auction/catalogue pages and persist their public data in SQLite."""
 
@@ -361,7 +433,7 @@ class ExleasingcarCollector:
         if not self.save_html_snapshots:
             return
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(html, encoding="utf-8")
+        path.write_text(sanitize_html_snapshot(html), encoding="utf-8")
 
     def _persist_api_updates(
         self,
@@ -1198,9 +1270,21 @@ def build_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument("--profile-dir", type=Path, default=DEFAULT_PROFILE_DIR)
     parser.add_argument("--raw-dir", type=Path, default=DEFAULT_RAW_DIR)
     parser.add_argument(
-        "--no-html-snapshots",
+        "--save-html-snapshots",
         action="store_true",
-        help="Do not save raw catalogue or vehicle-page HTML snapshots",
+        default=False,
+        help=(
+            "Save sanitized catalogue and vehicle-page HTML snapshots. "
+            "Disabled by default because authenticated pages may contain "
+            "account-specific information."
+        ),
+    )
+    # Keep the old opt-out flag accepted for existing commands.
+    parser.add_argument(
+        "--no-html-snapshots",
+        dest="save_html_snapshots",
+        action="store_false",
+        help=argparse.SUPPRESS,
     )
     parser.add_argument("--auction-list-url", default=AUCTION_LIST_URL)
     parser.add_argument("--auction-id", help="Process only this auction ID")
@@ -1238,7 +1322,7 @@ def main() -> None:
         ArchiveDatabase(args.database),
         args.raw_dir,
         page_delay_seconds=args.page_delay,
-        save_html_snapshots=not args.no_html_snapshots,
+        save_html_snapshots=args.save_html_snapshots,
     )
     summary = collector.run(
         auction_list_url=args.auction_list_url,
