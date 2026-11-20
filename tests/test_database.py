@@ -462,7 +462,7 @@ def test_auction_markers_are_stored_separately_and_current_set_is_updated(tmp_pa
     ]
 
 
-def test_v5_database_migrates_to_v6_without_losing_auction_rows(tmp_path):
+def test_v5_database_migrates_to_v8_without_losing_auction_rows(tmp_path):
     database = ArchiveDatabase(tmp_path / "legacy_v5.sqlite3")
     database.initialize()
     database.upsert_auction(
@@ -492,7 +492,7 @@ def test_v5_database_migrates_to_v6_without_losing_auction_rows(tmp_path):
             """
         ).fetchone()[0]
 
-    assert version == 7
+    assert version == 8
     assert auction == ("210547", "BCA DE 3.3")
     assert marker_table == 1
 
