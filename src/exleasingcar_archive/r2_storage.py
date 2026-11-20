@@ -145,8 +145,8 @@ class CloudflareR2Storage:
                 raise ValueError("expected_sha256 must be a lowercase SHA-256 digest")
             if digest != expected_sha256:
                 raise ValueError("Payload SHA-256 does not match expected_sha256")
-        if digest not in normalized_key.split("/"):
-            raise ValueError("object key must contain the payload SHA-256 digest")
+        if normalized_key.rsplit("/", 1)[-1] != digest:
+            raise ValueError("Payload SHA-256 does not match object key")
 
         self._client.put_object(
             Bucket=self.settings.bucket_name,
