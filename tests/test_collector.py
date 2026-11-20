@@ -441,6 +441,53 @@ def test_api_response_recorder_reports_non_json_http_response():
     assert "content-type=text/html" in recorder.errors[0]
 
 
+def test_api_response_recorder_does_not_duplicate_abort_after_response_error():
+    from exleasingcar_archive.collector import ApiResponseRecorder
+
+    class FakeContext:
+        def __init__(self):
+            self.handlers = {}
+
+        def on(self, event, callback):
+            self.handlers[event] = callback
+
+    class FakeRequest:
+        url = "https://www.exleasingcar.com/ajax_update_car_form.v3.1.php"
+
+        def response(self):
+            return response
+
+        def failure(self):
+            return "net::ERR_ABORTED"
+
+    class FakeResponse:
+        url = "https://www.exleasingcar.com/ajax_update_car_form.v3.1.php"
+        ok = True
+        status = 200
+        headers = {"content-type": "text/html; charset=UTF-8"}
+
+        def __init__(self, request):
+            self.request = request
+
+        def body(self):
+            return b"<html>session expired</html>"
+
+    request = FakeRequest()
+    response = FakeResponse(request)
+    context = FakeContext()
+    recorder = ApiResponseRecorder()
+    recorder.attach(context)
+
+    context.handlers["request"](request)
+    context.handlers["response"](response)
+    context.handlers["requestfailed"](request)
+
+    assert recorder.pending_requests == {}
+    assert recorder.responses == []
+    assert len(recorder.errors) == 1
+    assert "content-type=text/html" in recorder.errors[0]
+
+
 def test_api_response_recorder_reports_failed_request():
     from exleasingcar_archive.collector import ApiResponseRecorder
 
