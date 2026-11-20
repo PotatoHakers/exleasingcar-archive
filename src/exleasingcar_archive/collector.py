@@ -366,22 +366,22 @@ def sanitize_html_snapshot(html: str) -> str:
     # These globals and the OneSignal ID tag are embedded in inline scripts,
     # outside the account dropdown itself.
     sanitized = re.sub(
-        r"""(?i)(__USER_ID__\\s*=\\s*)['"][^'"]*['"]""",
+        r"""(?i)(__USER_ID__\s*=\s*)['"][^'"]*['"]""",
+        r'\1""',
+        sanitized,
+    )
+    sanitized = re.sub(
+        r"""(?i)(__EMAIL__\s*=\s*)['"][^'"]*['"]""",
         r'\\1""',
         sanitized,
     )
     sanitized = re.sub(
-        r"""(?i)(__EMAIL__\\s*=\\s*)['"][^'"]*['"]""",
+        r"""(?i)(OneSignal\.sendTag\(\s*['"]ID['"]\s*,\s*)['"][^'"]*['"]""",
         r'\\1""',
         sanitized,
     )
     sanitized = re.sub(
-        r"""(?i)(OneSignal\\.sendTag\\(\\s*['"]ID['"]\\s*,\\s*)['"][^'"]*['"]""",
-        r'\\1""',
-        sanitized,
-    )
-    sanitized = re.sub(
-        r"[A-Z0-9._%+-]+@[A-Z0-9.-]+\\.[A-Z]{2,}",
+        r"[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}",
         "[redacted-email]",
         sanitized,
         flags=re.IGNORECASE,
@@ -398,7 +398,7 @@ class ExleasingcarCollector:
         raw_dir: Path,
         *,
         page_delay_seconds: float = 1.5,
-        save_html_snapshots: bool = True,
+        save_html_snapshots: bool = False,
     ) -> None:
         if page_delay_seconds < 0:
             raise ValueError("page_delay_seconds cannot be negative")
@@ -1286,6 +1286,7 @@ def build_argument_parser() -> argparse.ArgumentParser:
         action="store_false",
         help=argparse.SUPPRESS,
     )
+    parser.set_defaults(save_html_snapshots=False)
     parser.add_argument("--auction-list-url", default=AUCTION_LIST_URL)
     parser.add_argument("--auction-id", help="Process only this auction ID")
     parser.add_argument(
