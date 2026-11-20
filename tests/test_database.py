@@ -495,7 +495,7 @@ def test_v5_database_migrates_to_v8_without_losing_auction_rows(tmp_path):
             """
         ).fetchone()[0]
 
-    assert version == 9
+    assert version == 10
     assert auction == ("210547", "BCA DE 3.3")
     assert marker_table == 1
 
@@ -556,7 +556,7 @@ def test_v6_database_migrates_to_v9_and_preserves_existing_lots(tmp_path):
         }
         lot_count = connection.execute("SELECT COUNT(*) FROM auction_lots").fetchone()[0]
 
-    assert version == 9
+    assert version == 10
     assert "last_detail_checked_at" in columns
     assert "last_detail_attempted_at" in columns
     assert "last_api_checked_at" in columns
@@ -590,7 +590,7 @@ def test_v7_database_migrates_api_check_timestamp_without_losing_lot_history(tmp
             """
         ).fetchone()
 
-    assert version == 9
+    assert version == 10
     assert "last_api_checked_at" in columns
     assert lot == (
         UTC_SECOND.isoformat(timespec="microseconds").replace("+00:00", "Z"),
@@ -657,7 +657,7 @@ def test_v8_migration_backfills_eur_on_all_price_observations(tmp_path):
             "SELECT currency FROM lot_price_observations"
         ).fetchone()[0]
 
-    assert version == 9
+    assert version == 10
     assert api_currency == "EUR"
     assert reference_currency == "EUR"
     assert lot_price_currency == "EUR"
