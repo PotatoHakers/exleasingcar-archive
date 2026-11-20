@@ -938,6 +938,11 @@ class ExleasingcarCollector:
         elif max_detail_pages > 0:
             detail_items = detail_items[:max_detail_pages]
         for car_id, detail_url in detail_items:
+            self.database.mark_detail_attempted(
+                car_id,
+                listing.exleasingcar_auction_id,
+                attempted_at=observed_at,
+            )
             details_attempted += 1
             attempted_detail_ids.add(car_id)
             if self._enrich_vehicle_detail(
