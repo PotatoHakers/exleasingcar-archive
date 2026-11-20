@@ -36,6 +36,8 @@ def _active_final_call_response():
             "test-car-001": {
                 "user_offer": 18400,
                 "highest_offer": "18300",
+                "text_minimali_kaina": "0",
+                "text_orientacine_kaina": "0",
                 "actual_user_offer": 0,
                 "actual_car_price": "0",
                 "car_id": "test-car-001",
@@ -66,8 +68,15 @@ def test_store_api_update_with_auction_and_lot_context(tmp_path):
 
     assert summary.cars_processed == 1
     assert summary.lots_upserted == 1
+    assert summary.prices_checked == 1
     assert summary.prices_inserted == 1
+    assert summary.prices_unchanged == 0
+    assert summary.price_references_checked == 1
+    assert summary.price_references_inserted == 1
+    assert summary.price_references_unchanged == 0
+    assert summary.events_checked == 1
     assert summary.events_inserted == 1
+    assert summary.events_unchanged == 0
 
     with sqlite3.connect(database.path) as connection:
         auction = connection.execute(
@@ -118,10 +127,21 @@ def test_repeated_unchanged_response_does_not_duplicate_history(tmp_path):
         observed_at=datetime(2026, 11, 12, 13, 19, 35, tzinfo=timezone.utc),
     )
 
+    assert first.prices_checked == 1
     assert first.prices_inserted == 1
+    assert first.prices_unchanged == 0
+    assert first.events_checked == 1
     assert first.events_inserted == 1
+    assert first.events_unchanged == 0
+    assert second.prices_checked == 1
     assert second.prices_inserted == 0
+    assert second.prices_unchanged == 1
+    assert second.price_references_checked == 1
+    assert second.price_references_inserted == 0
+    assert second.price_references_unchanged == 1
+    assert second.events_checked == 1
     assert second.events_inserted == 0
+    assert second.events_unchanged == 1
 
     with sqlite3.connect(database.path) as connection:
         price_count = connection.execute(
