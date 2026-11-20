@@ -86,7 +86,7 @@ const markerBadges = markers => {
   return `<span class="marker-pill" title="${esc(marker.marker_group)} · ${esc(marker.icon_filename)}"><span>${esc(label)}</span><small>${esc(group)}</small></span>`;
  }).join('')}</div>`;
 };
-function rows(id, values, empty) { const el=document.getElementById(id); el.innerHTML=values.length?values.join(""):`<tr><td class="empty" colspan="12">${esc(empty)}</td></tr>`; }
+function rows(id, values, empty) { const el=document.getElementById(id); el.innerHTML=values.length?values.join(""):`<tr><td class="empty" colspan="13">${esc(empty)}</td></tr>`; }
 let selectedCarId=null;
 let currentPage=1;
 function renderCarCard(vehicle,lots){
