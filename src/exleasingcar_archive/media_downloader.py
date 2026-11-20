@@ -7,8 +7,8 @@ import hashlib
 import re
 import tempfile
 import time
-from dataclasses import dataclass
 from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import PurePosixPath
 from urllib.parse import unquote, urljoin, urlsplit
 
