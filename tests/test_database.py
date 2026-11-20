@@ -534,7 +534,7 @@ def test_detail_refresh_order_prioritizes_unchecked_and_oldest_lots(tmp_path):
     ) == ["car-e", "car-c", "car-a", "car-b", "car-d"]
 
 
-def test_v6_database_migrates_to_v7_and_preserves_existing_lots(tmp_path):
+def test_v6_database_migrates_to_v8_and_preserves_existing_lots(tmp_path):
     database = ArchiveDatabase(tmp_path / "legacy_v6.sqlite3")
     database.initialize()
     database.upsert_auction("auction-1", observed_at=UTC_FIRST)
