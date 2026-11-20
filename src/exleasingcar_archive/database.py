@@ -927,10 +927,14 @@ class ArchiveDatabase:
                 WHERE a.exleasingcar_auction_id = ?
                   AND v.source_car_id IN ({placeholders})
                 ORDER BY
-                    CASE WHEN COALESCE(
-                        l.last_detail_checked_at, l.last_detail_attempted_at
-                    ) IS NULL THEN 0 ELSE 1 END,
-                    COALESCE(l.last_detail_checked_at, l.last_detail_attempted_at),
+                    CASE WHEN MAX(
+                        COALESCE(l.last_detail_checked_at, ''),
+                        COALESCE(l.last_detail_attempted_at, '')
+                    ) = '' THEN 0 ELSE 1 END,
+                    MAX(
+                        COALESCE(l.last_detail_checked_at, ''),
+                        COALESCE(l.last_detail_attempted_at, '')
+                    ),
                     l.id
                 """,
                 (auction_id, *car_ids),
