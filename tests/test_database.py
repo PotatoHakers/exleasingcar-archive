@@ -34,6 +34,9 @@ def test_database_initialization_creates_current_schema(tmp_path):
         "auction_events",
         "lot_price_observations",
         "auction_markers",
+        "media_assets",
+        "lot_media_sources",
+        "media_asset_versions",
     }.issubset(tables)
 
 
@@ -492,7 +495,7 @@ def test_v5_database_migrates_to_v8_without_losing_auction_rows(tmp_path):
             """
         ).fetchone()[0]
 
-    assert version == 9
+    assert version == 10
     assert auction == ("210547", "BCA DE 3.3")
     assert marker_table == 1
 
@@ -553,7 +556,7 @@ def test_v6_database_migrates_to_v9_and_preserves_existing_lots(tmp_path):
         }
         lot_count = connection.execute("SELECT COUNT(*) FROM auction_lots").fetchone()[0]
 
-    assert version == 9
+    assert version == 10
     assert "last_detail_checked_at" in columns
     assert "last_detail_attempted_at" in columns
     assert "last_api_checked_at" in columns
@@ -587,7 +590,7 @@ def test_v7_database_migrates_api_check_timestamp_without_losing_lot_history(tmp
             """
         ).fetchone()
 
-    assert version == 9
+    assert version == 10
     assert "last_api_checked_at" in columns
     assert lot == (
         UTC_SECOND.isoformat(timespec="microseconds").replace("+00:00", "Z"),
@@ -654,7 +657,179 @@ def test_v8_migration_backfills_eur_on_all_price_observations(tmp_path):
             "SELECT currency FROM lot_price_observations"
         ).fetchone()[0]
 
-    assert version == 9
+    assert version == 10
     assert api_currency == "EUR"
     assert reference_currency == "EUR"
     assert lot_price_currency == "EUR"
+
+
+
+def test_v9_database_migrates_lot_media_registry_without_losing_lots(tmp_path):
+    database = ArchiveDatabase(tmp_path / "legacy_v9.sqlite3")
+    database.initialize()
+    database.upsert_auction("auction-1", observed_at=UTC_FIRST)
+    database.upsert_vehicle("car-1", make="Ford", observed_at=UTC_FIRST)
+    database.upsert_auction_lot("car-1", "auction-1", observed_at=UTC_FIRST)
+
+    with sqlite3.connect(database.path) as connection:
+        connection.execute("DROP TABLE media_asset_versions")
+        connection.execute("DROP TABLE lot_media_sources")
+        connection.execute("DROP TABLE media_assets")
+        connection.execute("PRAGMA user_version = 9")
+
+    database.initialize()
+
+    with sqlite3.connect(database.path) as connection:
+        version = connection.execute("PRAGMA user_version").fetchone()[0]
+        lot_count = connection.execute("SELECT COUNT(*) FROM auction_lots").fetchone()[0]
+        media_tables = {
+            row[0]
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'"
+            )
+        }
+
+    assert version == 10
+    assert lot_count == 1
+    assert {
+        "media_assets",
+        "lot_media_sources",
+        "media_asset_versions",
+    }.issubset(media_tables)
+
+
+def test_lot_media_sources_are_scoped_deduplicated_and_keep_asset_versions(tmp_path):
+    database = ArchiveDatabase(tmp_path / "media-registry.sqlite3")
+    database.initialize()
+    database.upsert_auction("auction-a", observed_at=UTC_FIRST)
+    database.upsert_vehicle("car-a", displayed_title="Ford Focus", observed_at=UTC_FIRST)
+    database.upsert_auction_lot("car-a", "auction-a", observed_at=UTC_FIRST)
+    database.upsert_auction("auction-b", observed_at=UTC_FIRST)
+    database.upsert_vehicle("car-b", displayed_title="Ford Focus", observed_at=UTC_FIRST)
+    database.upsert_auction_lot("car-b", "auction-b", observed_at=UTC_FIRST)
+
+    photo_url = (
+        "https://data.exleasingcar.com//auction_images/auction-a/456/car-normal.jpg"
+    )
+    first_source = database.upsert_lot_media_source(
+        "car-a",
+        "auction-a",
+        "photo",
+        photo_url,
+        preview_url=(
+            "https://data.exleasingcar.com//auction_images/auction-a/456/car-small.jpg"
+        ),
+        source_order=0,
+        discovered_at=UTC_FIRST,
+    )
+    repeated_source = database.upsert_lot_media_source(
+        "car-a",
+        "auction-a",
+        "photo",
+        photo_url,
+        label="Main photo",
+        source_order=0,
+        discovered_at=UTC_SECOND,
+    )
+    second_lot_source = database.upsert_lot_media_source(
+        "car-b",
+        "auction-b",
+        "photo",
+        photo_url,
+        source_order=0,
+        discovered_at=UTC_FIRST,
+    )
+
+    assert first_source == repeated_source
+    assert second_lot_source != first_source
+
+    first_asset = database.register_media_asset_for_source(
+        first_source,
+        sha256="a" * 64,
+        object_key="media/sha256/aa/" + "a" * 64,
+        mime_type="image/jpeg",
+        byte_size=1200,
+        original_filename="car.jpg",
+        downloaded_at=UTC_SECOND,
+    )
+    shared_asset = database.register_media_asset_for_source(
+        second_lot_source,
+        sha256="a" * 64,
+        object_key="ignored/duplicate-key",
+        mime_type="image/jpeg",
+        byte_size=1200,
+        original_filename="car-copy.jpg",
+        downloaded_at=UTC_SECOND,
+    )
+    changed_asset = database.register_media_asset_for_source(
+        first_source,
+        sha256="b" * 64,
+        object_key="media/sha256/bb/" + "b" * 64,
+        mime_type="image/jpeg",
+        byte_size=1400,
+        original_filename="car.jpg",
+        downloaded_at=UTC_THIRD,
+    )
+
+    assert first_asset == shared_asset
+    assert changed_asset != first_asset
+    assert database.mark_media_source_failed(
+        first_source,
+        "Temporary network error",
+        attempted_at=UTC_THIRD,
+    )
+
+    car_a_media = database.get_lot_media_sources("car-a", "auction-a")
+    car_b_media = database.get_lot_media_sources("car-b", "auction-b")
+    assert len(car_a_media) == len(car_b_media) == 1
+    assert car_a_media[0]["download_status"] == "downloaded"
+    assert car_a_media[0]["sha256"] == "b" * 64
+    assert car_a_media[0]["last_error"] == "Temporary network error"
+    assert car_b_media[0]["sha256"] == "a" * 64
+
+    with sqlite3.connect(database.path) as connection:
+        asset_count = connection.execute(
+            "SELECT COUNT(*) FROM media_assets"
+        ).fetchone()[0]
+        version_count = connection.execute(
+            "SELECT COUNT(*) FROM media_asset_versions"
+        ).fetchone()[0]
+        old_asset_count = connection.execute(
+            "SELECT COUNT(*) FROM media_assets WHERE sha256 = ?",
+            ("a" * 64,),
+        ).fetchone()[0]
+
+    assert asset_count == 2
+    assert version_count == 3
+    assert old_asset_count == 1
+
+
+def test_media_registry_rejects_untrusted_urls_and_unsafe_object_keys(tmp_path):
+    database = ArchiveDatabase(tmp_path / "media-validation.sqlite3")
+    database.initialize()
+    database.upsert_auction("auction-1", observed_at=UTC_FIRST)
+    database.upsert_vehicle("car-1", observed_at=UTC_FIRST)
+    database.upsert_auction_lot("car-1", "auction-1", observed_at=UTC_FIRST)
+
+    with pytest.raises(ValueError, match="HTTPS Exleasingcar"):
+        database.upsert_lot_media_source(
+            "car-1",
+            "auction-1",
+            "report",
+            "https://evil.example/report.pdf",
+        )
+
+    source_id = database.upsert_lot_media_source(
+        "car-1",
+        "auction-1",
+        "report",
+        "https://data.exleasingcar.com/auction_files/1/2/report.pdf",
+    )
+    with pytest.raises(ValueError, match="safe relative object key"):
+        database.register_media_asset_for_source(
+            source_id,
+            sha256="c" * 64,
+            object_key="../escape.pdf",
+            mime_type="application/pdf",
+            byte_size=100,
+        )

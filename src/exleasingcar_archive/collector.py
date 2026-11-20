@@ -32,6 +32,7 @@ from .metadata_parser import (
     parse_auction_catalog_metadata,
     parse_auction_listings,
     parse_catalog_pagination,
+    parse_vehicle_media,
     parse_vehicle_metadata,
 )
 
@@ -881,6 +882,28 @@ class ExleasingcarCollector:
                 f"{vehicle.exleasingcar_auction_id} != {auction.exleasingcar_auction_id}"
             )
             return False
+
+        media_references = parse_vehicle_media(html, page.url)
+        for reference in media_references:
+            self.database.upsert_lot_media_source(
+                car_id,
+                auction.exleasingcar_auction_id,
+                reference.media_type,
+                reference.source_url,
+                preview_url=reference.preview_url,
+                label=reference.label,
+                source_order=reference.source_order,
+                discovered_at=observed_at,
+            )
+        if media_references:
+            photo_count = sum(
+                reference.media_type == "photo" for reference in media_references
+            )
+            report_count = len(media_references) - photo_count
+            print(
+                f"  Media references for {car_id}: "
+                f"{photo_count} photo(s), {report_count} report(s)"
+            )
 
         parsed_detail = parse_vehicle_detail(
             html,

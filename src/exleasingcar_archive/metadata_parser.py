@@ -6,7 +6,7 @@ import re
 from collections.abc import Iterable
 from dataclasses import dataclass
 from html import unescape
-from urllib.parse import unquote, urljoin
+from urllib.parse import unquote, urljoin, urlsplit
 
 from bs4 import BeautifulSoup, Tag
 
@@ -59,6 +59,20 @@ class ParsedCatalogPagination:
     current_page_number: int | None
     page_urls: tuple[str, ...]
     next_page_url: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class ParsedMediaReference:
+    """One photo or inspection report advertised by a vehicle detail page."""
+
+    media_type: str
+    source_url: str
+    preview_url: str | None = None
+    label: str | None = None
+    source_order: int = 0
+
+
+MEDIA_SOURCE_HOSTS = frozenset({"data.exleasingcar.com"})
 
 
 @dataclass(frozen=True, slots=True)
@@ -609,6 +623,113 @@ def _extract_auction_id_from_detail(soup: BeautifulSoup) -> str | None:
             if anchor_text and anchor_text.isdigit():
                 return anchor_text
     return None
+
+
+def _trusted_media_url(value: str | None, page_url: str | None) -> str | None:
+    if not value:
+        return None
+    candidate = urljoin(page_url or "https://www.exleasingcar.com/", value.strip())
+    parts = urlsplit(candidate)
+    if (
+        parts.scheme.casefold() != "https"
+        or (parts.hostname or "").casefold() not in MEDIA_SOURCE_HOSTS
+        or parts.username is not None
+        or parts.password is not None
+        or not parts.path
+    ):
+        return None
+    return candidate
+
+
+def _onclick_url(value: str | None, function_name: str) -> str | None:
+    if not value:
+        return None
+    pattern = re.compile(
+        rf"""{re.escape(function_name)}\s*\([^'"]*(['"])(.*?)\1""",
+        flags=re.IGNORECASE,
+    )
+    match = pattern.search(value)
+    return match.group(2).strip() if match else None
+
+
+def parse_vehicle_media(
+    html: str,
+    page_url: str | None = None,
+) -> tuple[ParsedMediaReference, ...]:
+    """Discover lot-specific gallery originals and inspection-report URLs.
+
+    Only HTTPS URLs on the Exleasingcar site/media hosts are accepted. Local
+    resources from browser-saved HTML (for example, *_files/image.jpg) are
+    deliberately ignored because they are not stable source URLs.
+    """
+    soup = BeautifulSoup(html, "html.parser")
+    references: list[ParsedMediaReference] = []
+    seen: set[tuple[str, str]] = set()
+
+    def add_reference(
+        media_type: str,
+        raw_url: str | None,
+        *,
+        preview_raw_url: str | None = None,
+        label: str | None = None,
+    ) -> None:
+        source_url = _trusted_media_url(raw_url, page_url)
+        if source_url is None:
+            return
+        key = (media_type, source_url)
+        if key in seen:
+            return
+        seen.add(key)
+        references.append(
+            ParsedMediaReference(
+                media_type=media_type,
+                source_url=source_url,
+                preview_url=_trusted_media_url(preview_raw_url, page_url),
+                label=label,
+                source_order=len(references),
+            )
+        )
+
+    # Current Exleasingcar detail pages expose each full-size original through
+    # change_thumb(this, 'https://data.exleasingcar.com/...-normal_*.jpg').
+    for anchor in soup.select("#gallery-area .gallery-thumbs a[onclick]"):
+        onclick = str(anchor.get("onclick") or "")
+        raw_url = _onclick_url(onclick, "change_thumb")
+        if raw_url is None:
+            title = anchor.get("title")
+            raw_url = str(title) if title else None
+        image = anchor.find("img")
+        preview_url = (
+            str(image.get("src"))
+            if isinstance(image, Tag) and image.get("src")
+            else None
+        )
+        add_reference("photo", raw_url, preview_raw_url=preview_url)
+
+    # Fallback for page variants that put full-size URLs directly in the
+    # Highslide gallery. Relative browser-save paths are intentionally skipped.
+    for anchor in soup.select("#gallery-area .highslide-gallery a.highslide[href]"):
+        image = anchor.find("img")
+        preview_url = (
+            str(image.get("src"))
+            if isinstance(image, Tag) and image.get("src")
+            else None
+        )
+        add_reference("photo", str(anchor.get("href")), preview_raw_url=preview_url)
+
+    # Inspection reports are opened by inline window.open(...) handlers inside
+    # the vehicle's damage/inspection block. The same URL can occur twice in a
+    # row, so URL-based de-duplication is required.
+    for element in soup.select(".damage-block [onclick]"):
+        onclick = str(element.get("onclick") or "")
+        raw_url = _onclick_url(onclick, "window.open")
+        if raw_url is None:
+            continue
+        label_tag = element.find("strong") if isinstance(element, Tag) else None
+        label = _text(label_tag) or _text(element)
+        add_reference("report", raw_url, label=label)
+
+    return tuple(references)
 
 
 def parse_vehicle_metadata(

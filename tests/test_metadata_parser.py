@@ -6,6 +6,7 @@ from exleasingcar_archive.database import ArchiveDatabase
 from exleasingcar_archive.metadata_parser import (
     parse_auction_catalog_metadata,
     parse_auction_listings,
+    parse_vehicle_media,
     parse_vehicle_metadata,
 )
 
@@ -325,3 +326,77 @@ def test_real_masked_chassis_markup_is_parsed_and_persisted(tmp_path):
         ).fetchone()
 
     assert stored == (None, "WAUZZZF48NA0", 1)
+
+
+
+def test_parse_vehicle_media_extracts_gallery_originals_and_unique_reports():
+    html = """
+    <html><body>
+      <div id="gallery-area">
+        <div class="highslide-gallery">
+          <a class="highslide" href="./saved_page_files/local-normal.jpg">
+            <img src="./saved_page_files/local-normal.jpg">
+          </a>
+        </div>
+        <div class="gallery-thumbs">
+          <div class="photo-page">
+            <a title="https://data.exleasingcar.com//auction_images/auction-123/456/car-normal_a.jpg"
+               onclick="change_thumb(this, 'https://data.exleasingcar.com//auction_images/auction-123/456/car-normal_a.jpg')">
+              <span class="photo">
+                <img src="https://data.exleasingcar.com//auction_images/auction-123/456/car-small_a.jpg">
+              </span>
+            </a>
+            <a onclick="change_thumb(this, 'https://data.exleasingcar.com//auction_images/auction-123/456/car-normal_b.jpg')">
+              <img src="https://data.exleasingcar.com//auction_images/auction-123/456/car-small_b.jpg">
+            </a>
+            <a onclick="change_thumb(this, 'https://evil.example/car-normal_c.jpg')">
+              <img src="https://evil.example/car-small_c.jpg">
+            </a>
+            <a onclick="change_thumb(this, 'http://data.exleasingcar.com/car-normal_d.jpg')">
+              <img src="http://data.exleasingcar.com/car-small_d.jpg">
+            </a>
+          </div>
+        </div>
+      </div>
+      <div class="damage-block">
+        <table><tbody>
+          <tr>
+            <td onclick="window.open('https://data.exleasingcar.com/auction_files/123/456/report-a.pdf','Damages','width=775')">
+              <strong>Inspection Report</strong>
+            </td>
+            <td onclick="window.open('https://data.exleasingcar.com/auction_files/123/456/report-a.pdf','Damages','width=775')">
+              Review
+            </td>
+          </tr>
+          <tr>
+            <td onclick="window.open('https://data.exleasingcar.com/auction_files/123/456/report-b.pdf','Damages','width=775')">
+              <strong>Inspection Report</strong>
+            </td>
+          </tr>
+          <tr>
+            <td onclick="window.open('https://evil.example/private.pdf','Damages')">
+              <strong>Inspection Report</strong>
+            </td>
+          </tr>
+        </tbody></table>
+      </div>
+    </body></html>
+    """
+
+    media = parse_vehicle_media(
+        html,
+        "https://www.exleasingcar.com/ru/auto-details/12345",
+    )
+
+    photos = [item for item in media if item.media_type == "photo"]
+    reports = [item for item in media if item.media_type == "report"]
+
+    assert len(photos) == 2
+    assert len(reports) == 2
+    assert photos[0].source_url.endswith("car-normal_a.jpg")
+    assert photos[0].preview_url.endswith("car-small_a.jpg")
+    assert photos[1].source_url.endswith("car-normal_b.jpg")
+    assert reports[0].source_url.endswith("report-a.pdf")
+    assert reports[0].label == "Inspection Report"
+    assert reports[1].source_url.endswith("report-b.pdf")
+    assert [item.source_order for item in media] == [0, 1, 2, 3]

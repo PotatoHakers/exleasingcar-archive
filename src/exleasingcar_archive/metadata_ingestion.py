@@ -16,6 +16,7 @@ from .metadata_parser import (
     parse_auction_catalog_metadata,
     parse_auction_listings,
     parse_catalog_pagination,
+    parse_vehicle_media,
     parse_vehicle_metadata,
 )
 
@@ -34,6 +35,7 @@ class MetadataImportSummary:
     api_ingestion: IngestionSummary | None = None
     sale_type_recognized: bool = False
     lot_price_observations_inserted: int = 0
+    media_sources_registered: int = 0
 
 
 def _auction_context(listing: ParsedAuctionListing) -> AuctionContext:
@@ -244,6 +246,22 @@ def import_html_snapshots(
         observed_at=timestamp,
     )
 
+    media_references = parse_vehicle_media(
+        vehicle_detail_html,
+        vehicle_detail_url,
+    )
+    for reference in media_references:
+        database.upsert_lot_media_source(
+            vehicle.source_car_id,
+            catalog.exleasingcar_auction_id,
+            reference.media_type,
+            reference.source_url,
+            preview_url=reference.preview_url,
+            label=reference.label,
+            source_order=reference.source_order,
+            discovered_at=timestamp,
+        )
+
     parsed_detail = parse_vehicle_detail(
         vehicle_detail_html,
         source_car_id=vehicle.source_car_id,
@@ -298,4 +316,5 @@ def import_html_snapshots(
         api_ingestion=api_summary,
         sale_type_recognized=parsed_detail.sale_type is not None,
         lot_price_observations_inserted=lot_prices_inserted,
+        media_sources_registered=len(media_references),
     )
