@@ -553,7 +553,7 @@ def test_v6_database_migrates_to_v9_and_preserves_existing_lots(tmp_path):
         }
         lot_count = connection.execute("SELECT COUNT(*) FROM auction_lots").fetchone()[0]
 
-    assert version == 8
+    assert version == 9
     assert "last_detail_checked_at" in columns
     assert "last_detail_attempted_at" in columns
     assert "last_api_checked_at" in columns
