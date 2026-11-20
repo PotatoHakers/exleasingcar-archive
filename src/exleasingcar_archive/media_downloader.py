@@ -13,6 +13,7 @@ from pathlib import PurePosixPath
 from urllib.parse import unquote, urljoin, urlsplit
 
 import httpx
+from dotenv import load_dotenv
 from typing_extensions import Self
 
 from .database import ArchiveDatabase
@@ -412,6 +413,7 @@ class _DownloadedMediaResult:
 
 
 def main(argv: list[str] | None = None) -> int:
+    load_dotenv()
     parser = argparse.ArgumentParser(
         description="Download a bounded batch of discovered lot photos and PDF reports into private R2."
     )
