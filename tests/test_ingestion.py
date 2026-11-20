@@ -120,11 +120,12 @@ def test_repeated_unchanged_response_does_not_duplicate_history(tmp_path):
     first = store_car_updates(
         database, updates, AUCTION, observed_at=OBSERVED_AT
     )
+    second_checked_at = datetime(2026, 11, 12, 13, 19, 35, tzinfo=timezone.utc)
     second = store_car_updates(
         database,
         updates,
         AUCTION,
-        observed_at=datetime(2026, 11, 12, 13, 19, 35, tzinfo=timezone.utc),
+        observed_at=second_checked_at,
     )
 
     assert first.prices_checked == 1
@@ -150,9 +151,15 @@ def test_repeated_unchanged_response_does_not_duplicate_history(tmp_path):
         event_count = connection.execute(
             "SELECT COUNT(*) FROM auction_events"
         ).fetchone()[0]
+        api_checked_at = connection.execute(
+            "SELECT last_api_checked_at FROM auction_lots"
+        ).fetchone()[0]
 
     assert price_count == 1
     assert event_count == 1
+    assert api_checked_at == second_checked_at.isoformat(timespec="microseconds").replace(
+        "+00:00", "Z"
+    )
 
 
 def test_missing_price_still_registers_lot_and_event(tmp_path):
@@ -187,6 +194,13 @@ def test_missing_price_still_registers_lot_and_event(tmp_path):
         assert connection.execute(
             "SELECT COUNT(*) FROM auction_events"
         ).fetchone()[0] == 1
+        api_checked_at = connection.execute(
+            "SELECT last_api_checked_at FROM auction_lots"
+        ).fetchone()[0]
+
+    assert api_checked_at == OBSERVED_AT.isoformat(timespec="microseconds").replace(
+        "+00:00", "Z"
+    )
 
 
 def test_missing_timer_does_not_create_false_only_event(tmp_path):

@@ -9,7 +9,7 @@ from pathlib import Path
 from .models import AuctionCardMarker, PriceType, SaleType
 from .parsers import PriceObservation
 
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 DEFAULT_SOURCE = "ajax_update_car_form.v3.1.php"
 
 
@@ -58,6 +58,7 @@ CREATE TABLE IF NOT EXISTS auction_lots (
     sale_type TEXT,
     last_detail_checked_at TEXT,
     last_detail_attempted_at TEXT,
+    last_api_checked_at TEXT,
     first_seen_at TEXT NOT NULL,
     last_seen_at TEXT NOT NULL,
     FOREIGN KEY (vehicle_id) REFERENCES vehicles(id) ON DELETE RESTRICT,
@@ -164,7 +165,7 @@ class ArchiveDatabase:
             connection.close()
 
     def initialize(self) -> None:
-        """Create schema v6 or safely migrate older database versions."""
+        """Create schema v8 or safely migrate older database versions."""
         self.path.parent.mkdir(parents=True, exist_ok=True)
 
         with self._connect() as connection:
@@ -186,6 +187,7 @@ class ArchiveDatabase:
                 self._migrate_v4_to_v5(connection)
                 self._migrate_v5_to_v6(connection)
                 self._migrate_v6_to_v7(connection)
+                self._migrate_v7_to_v8(connection)
                 self._create_indexes(connection)
             elif version == 2:
                 self._migrate_v2_to_v3(connection)
@@ -193,24 +195,32 @@ class ArchiveDatabase:
                 self._migrate_v4_to_v5(connection)
                 self._migrate_v5_to_v6(connection)
                 self._migrate_v6_to_v7(connection)
+                self._migrate_v7_to_v8(connection)
                 self._create_indexes(connection)
             elif version == 3:
                 self._migrate_v3_to_v4(connection)
                 self._migrate_v4_to_v5(connection)
                 self._migrate_v5_to_v6(connection)
                 self._migrate_v6_to_v7(connection)
+                self._migrate_v7_to_v8(connection)
                 self._create_indexes(connection)
             elif version == 4:
                 self._migrate_v4_to_v5(connection)
                 self._migrate_v5_to_v6(connection)
                 self._migrate_v6_to_v7(connection)
+                self._migrate_v7_to_v8(connection)
                 self._create_indexes(connection)
             elif version == 5:
                 self._migrate_v5_to_v6(connection)
                 self._migrate_v6_to_v7(connection)
+                self._migrate_v7_to_v8(connection)
                 self._create_indexes(connection)
             elif version == 6:
                 self._migrate_v6_to_v7(connection)
+                self._migrate_v7_to_v8(connection)
+                self._create_indexes(connection)
+            elif version == 7:
+                self._migrate_v7_to_v8(connection)
                 self._create_indexes(connection)
             else:
                 # Idempotently ensure indexes exist for an already initialized DB.
@@ -439,6 +449,13 @@ class ArchiveDatabase:
         )
         cls._add_column_if_missing(
             connection, "auction_lots", "last_detail_attempted_at", "TEXT"
+        )
+
+    @classmethod
+    def _migrate_v7_to_v8(cls, connection: sqlite3.Connection) -> None:
+        """Track the latest successful API response check for each auction lot."""
+        cls._add_column_if_missing(
+            connection, "auction_lots", "last_api_checked_at", "TEXT"
         )
 
     @staticmethod
@@ -996,6 +1013,38 @@ class ArchiveDatabase:
                 )
                 """,
                 (timestamp, car_id, auction_id),
+            )
+            return cursor.rowcount > 0
+
+    def mark_api_checked(
+        self,
+        source_car_id: str,
+        exleasingcar_auction_id: str,
+        checked_at: datetime | None = None,
+    ) -> bool:
+        """Record an API response check even when no price value was returned."""
+        car_id = self._validate_identifier(source_car_id, "source_car_id")
+        auction_id = self._validate_identifier(
+            exleasingcar_auction_id, "exleasingcar_auction_id"
+        )
+        timestamp = self._serialize_datetime(checked_at)
+        with self._connect() as connection:
+            cursor = connection.execute(
+                """
+                UPDATE auction_lots
+                SET last_api_checked_at = CASE
+                    WHEN last_api_checked_at IS NULL OR last_api_checked_at < ?
+                    THEN ?
+                    ELSE last_api_checked_at
+                END
+                WHERE vehicle_id = (
+                    SELECT id FROM vehicles WHERE source_car_id = ?
+                )
+                AND auction_id = (
+                    SELECT id FROM auctions WHERE exleasingcar_auction_id = ?
+                )
+                """,
+                (timestamp, timestamp, car_id, auction_id),
             )
             return cursor.rowcount > 0
 
