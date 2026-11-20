@@ -29,7 +29,7 @@ def test_dashboard_exposes_sale_type_and_fixed_price_without_bid_mixing(tmp_path
     handler.database_path = database.path
     payload = handler._load_data()
 
-    assert payload["schema_version"] == 8
+    assert payload["schema_version"] == 9
     assert payload["counts"]["lot_price_observations"] == 1
     assert payload["lots"][0]["sale_type"] == "fixed_price"
     assert payload["lot_prices"][0]["price_type"] == "fixed_price"
@@ -329,7 +329,7 @@ def test_dashboard_returns_current_markers_per_auction_without_crossing_relisted
     handler.database_path = database.path
 
     payload = handler._load_data(selected_car_id="car-shared")
-    assert payload["schema_version"] == 8
+    assert payload["schema_version"] == 9
     markers_by_auction = {
         lot["auction_id"]: lot["markers"] for lot in payload["lots"]
     }
@@ -539,3 +539,11 @@ def test_dashboard_labels_unverified_highest_offer_as_api_value():
     assert "История реальных ставок" not in PAGE
     assert "Последняя ставка" not in PAGE
     assert "Максимальная ставка" not in PAGE
+
+
+
+def test_dashboard_labels_price_columns_in_euros_and_exposes_api_freshness():
+    assert "API highest_offer (€)" in PAGE
+    assert "Мин. цена продавца (€)" in PAGE
+    assert "Проверка API" in PAGE
+    assert "const moneyCell" in PAGE
