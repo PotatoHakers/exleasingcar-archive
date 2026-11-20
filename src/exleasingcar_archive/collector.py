@@ -32,8 +32,8 @@ from .metadata_parser import (
     parse_auction_catalog_metadata,
     parse_auction_listings,
     parse_catalog_pagination,
-    parse_vehicle_metadata,
     parse_vehicle_media,
+    parse_vehicle_metadata,
 )
 
 try:
