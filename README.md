@@ -51,8 +51,8 @@ PYTHONPATH=src python -m exleasingcar_archive.snapshot_import \
 Для первого реального прогона выбери небольшую пачку из одного файла:
 
 ```bash
-PYTHONPATH=src python -m exleasingcar_archive.media_downloader \\
-  --database "data/fresh_api_test.sqlite3" \\
+PYTHONPATH=src python -m exleasingcar_archive.media_downloader \
+  --database "data/fresh_api_test.sqlite3" \
   --batch-size 1
 ```
 
