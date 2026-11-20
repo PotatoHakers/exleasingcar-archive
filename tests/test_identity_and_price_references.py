@@ -51,7 +51,7 @@ def test_masked_chassis_number_is_saved_only_as_fragment():
     assert vehicle.chassis_number_masked is True
 
 
-def test_real_response_zero_offer_and_seller_minimum_are_separate(tmp_path):
+def test_real_response_zero_highest_offer_and_seller_minimum_are_separate(tmp_path):
     response = {
         "19655238": {
             "car_id": "19655238",
@@ -79,7 +79,7 @@ def test_real_response_zero_offer_and_seller_minimum_are_separate(tmp_path):
         lot_metadata={"19655238": LotMetadata(mileage_km=74002)},
     )
 
-    assert summary.prices_inserted == 0
+    assert summary.prices_inserted == 1
     assert summary.price_references_inserted == 1
     assert summary.events_inserted == 1
     with sqlite3.connect(database.path) as connection:
@@ -97,7 +97,12 @@ def test_real_response_zero_offer_and_seller_minimum_are_separate(tmp_path):
             "SELECT auction_end_at, remaining_seconds FROM auction_events"
         ).fetchone()
 
-    assert bid_count == 0
+    assert bid_count == 1
+    with sqlite3.connect(database.path) as connection:
+        highest_offer = connection.execute(
+            "SELECT highest_offer FROM price_observations"
+        ).fetchone()[0]
+    assert highest_offer == "0"
     assert reference == ("7500", "7500")
     assert mileage == 74002
     assert event == ("2026-11-13 09:00", 775)
@@ -201,4 +206,7 @@ def test_reimporting_same_seller_reference_price_does_not_duplicate_it(tmp_path)
         ).fetchone()[0] == 1
         assert connection.execute(
             "SELECT COUNT(*) FROM price_observations"
-        ).fetchone()[0] == 0
+        ).fetchone()[0] == 1
+        assert connection.execute(
+            "SELECT highest_offer FROM price_observations"
+        ).fetchone()[0] == "0"

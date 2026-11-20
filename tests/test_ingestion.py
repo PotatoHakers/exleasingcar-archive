@@ -226,3 +226,45 @@ def test_update_key_must_match_car_id(tmp_path):
         ).fetchone()[0]
 
     assert auction_count == 0
+
+def test_zero_highest_offer_is_stored_and_deduplicated(tmp_path):
+    database = ArchiveDatabase(tmp_path / "archive.sqlite3")
+    database.initialize()
+    updates = parse_car_update_response(
+        {
+            "test-car-001": {
+                "highest_offer": "0",
+                "user_offer": "18400",
+                "actual_car_price": "18500",
+            }
+        }
+    )
+
+    first = store_car_updates(
+        database, updates, AUCTION, observed_at=OBSERVED_AT
+    )
+    second = store_car_updates(
+        database,
+        updates,
+        AUCTION,
+        observed_at=datetime(2026, 11, 12, 13, 19, 35, tzinfo=timezone.utc),
+    )
+
+    assert first.prices_checked == 1
+    assert first.prices_inserted == 1
+    assert first.prices_unchanged == 0
+    assert second.prices_checked == 1
+    assert second.prices_inserted == 0
+    assert second.prices_unchanged == 1
+
+    with sqlite3.connect(database.path) as connection:
+        observations = connection.execute(
+            "SELECT highest_offer FROM price_observations"
+        ).fetchall()
+        columns = {
+            row[1] for row in connection.execute("PRAGMA table_info(vehicles)")
+        }
+
+    assert observations == [("0",)]
+    assert "user_offer" not in columns
+    assert "actual_car_price" not in columns

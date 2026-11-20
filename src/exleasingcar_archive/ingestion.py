@@ -130,7 +130,7 @@ def store_car_updates(
         )
         lots_upserted += 1
 
-        if car.highest_offer is not None and car.highest_offer > 0:
+        if car.highest_offer is not None:
             inserted = database.record_price_observation(
                 car_id,
                 car.highest_offer,

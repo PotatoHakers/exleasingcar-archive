@@ -66,7 +66,7 @@ def test_api_response_time_and_zero_price_are_written_to_fresh_sqlite(tmp_path):
     )
 
     assert summary.api_ingestion is not None
-    assert summary.api_ingestion.prices_inserted == 0
+    assert summary.api_ingestion.prices_inserted == 1
     assert summary.api_ingestion.price_references_inserted == 1
     assert summary.api_ingestion.events_inserted == 1
     with sqlite3.connect(database.path) as connection:
@@ -80,7 +80,12 @@ def test_api_response_time_and_zero_price_are_written_to_fresh_sqlite(tmp_path):
         event = connection.execute(
             "SELECT auction_end_at, remaining_seconds FROM auction_events"
         ).fetchone()
-    assert price_count == 0
+    assert price_count == 1
+    with sqlite3.connect(database.path) as connection:
+        highest_offer = connection.execute(
+            "SELECT highest_offer FROM price_observations"
+        ).fetchone()[0]
+    assert highest_offer == "0"
     assert references == ("7500", "7500")
     assert event == ("2026-11-13 09:00", 775)
 
