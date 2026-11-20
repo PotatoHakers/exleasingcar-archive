@@ -175,7 +175,7 @@ def test_v4_migration_adds_sale_type_and_price_history_without_losing_existing_r
         }
         fk_errors = connection.execute("PRAGMA foreign_key_check").fetchall()
 
-    assert version == SCHEMA_VERSION == 7
+    assert version == SCHEMA_VERSION == 8
     assert existing_bid == "9000"
     assert sale_type is None
     assert "lot_price_observations" in tables
