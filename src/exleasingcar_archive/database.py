@@ -1,5 +1,6 @@
 import re
 import sqlite3
+from urllib.parse import urlsplit
 from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import datetime, timezone
@@ -9,7 +10,7 @@ from pathlib import Path
 from .models import AuctionCardMarker, PriceType, SaleType
 from .parsers import PriceObservation
 
-SCHEMA_VERSION = 9
+SCHEMA_VERSION = 10
 DEFAULT_SOURCE = "ajax_update_car_form.v3.1.php"
 
 
@@ -146,6 +147,56 @@ CREATE TABLE IF NOT EXISTS auction_markers (
 """
 
 
+MEDIA_ASSETS_SQL = """
+CREATE TABLE IF NOT EXISTS media_assets (
+    id INTEGER PRIMARY KEY,
+    sha256 TEXT NOT NULL UNIQUE,
+    object_key TEXT NOT NULL UNIQUE,
+    mime_type TEXT NOT NULL,
+    byte_size INTEGER NOT NULL CHECK (byte_size >= 0),
+    original_filename TEXT,
+    created_at TEXT NOT NULL
+)
+"""
+
+LOT_MEDIA_SOURCES_SQL = """
+CREATE TABLE IF NOT EXISTS lot_media_sources (
+    id INTEGER PRIMARY KEY,
+    auction_lot_id INTEGER NOT NULL,
+    media_type TEXT NOT NULL CHECK (media_type IN ('photo', 'report')),
+    source_url TEXT NOT NULL,
+    preview_url TEXT,
+    label TEXT,
+    source_order INTEGER NOT NULL DEFAULT 0 CHECK (source_order >= 0),
+    download_status TEXT NOT NULL DEFAULT 'discovered' CHECK (
+        download_status IN ('discovered', 'downloaded', 'failed')
+    ),
+    current_asset_id INTEGER,
+    first_seen_at TEXT NOT NULL,
+    last_seen_at TEXT NOT NULL,
+    last_attempted_at TEXT,
+    last_downloaded_at TEXT,
+    last_error TEXT,
+    FOREIGN KEY (auction_lot_id) REFERENCES auction_lots(id) ON DELETE RESTRICT,
+    FOREIGN KEY (current_asset_id) REFERENCES media_assets(id) ON DELETE RESTRICT,
+    UNIQUE (auction_lot_id, media_type, source_url)
+)
+"""
+
+MEDIA_ASSET_VERSIONS_SQL = """
+CREATE TABLE IF NOT EXISTS media_asset_versions (
+    id INTEGER PRIMARY KEY,
+    lot_media_source_id INTEGER NOT NULL,
+    media_asset_id INTEGER NOT NULL,
+    linked_at TEXT NOT NULL,
+    FOREIGN KEY (lot_media_source_id)
+        REFERENCES lot_media_sources(id) ON DELETE RESTRICT,
+    FOREIGN KEY (media_asset_id) REFERENCES media_assets(id) ON DELETE RESTRICT,
+    UNIQUE (lot_media_source_id, media_asset_id)
+)
+"""
+
+
 class ArchiveDatabase:
     """SQLite storage for Exleasingcar Archive."""
 
@@ -167,7 +218,7 @@ class ArchiveDatabase:
             connection.close()
 
     def initialize(self) -> None:
-        """Create schema v9 or safely migrate older database versions."""
+        """Create schema v10 or safely migrate older database versions."""
         self.path.parent.mkdir(parents=True, exist_ok=True)
 
         with self._connect() as connection:
@@ -226,6 +277,10 @@ class ArchiveDatabase:
                 self._create_indexes(connection)
             elif version == 8:
                 self._migrate_v8_to_v9(connection)
+                self._migrate_v9_to_v10(connection)
+                self._create_indexes(connection)
+            elif version == 9:
+                self._migrate_v9_to_v10(connection)
                 self._create_indexes(connection)
             else:
                 # Idempotently ensure indexes exist for an already initialized DB.
@@ -246,6 +301,9 @@ class ArchiveDatabase:
             PRICE_REFERENCE_OBSERVATIONS_SQL,
             LOT_PRICE_OBSERVATIONS_SQL,
             AUCTION_MARKERS_SQL,
+            MEDIA_ASSETS_SQL,
+            LOT_MEDIA_SOURCES_SQL,
+            MEDIA_ASSET_VERSIONS_SQL,
         ):
             connection.execute(statement)
         ArchiveDatabase._create_indexes(connection)
@@ -291,6 +349,14 @@ class ArchiveDatabase:
             """
             CREATE INDEX IF NOT EXISTS idx_auction_markers_auction_present
             ON auction_markers(auction_id, is_present, marker_group)
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_lot_media_sources_lot_order
+            ON lot_media_sources(auction_lot_id, media_type, source_order, id)
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_media_asset_versions_source
+            ON media_asset_versions(lot_media_source_id, linked_at)
             """,
         )
         for statement in statements:
@@ -485,6 +551,16 @@ class ArchiveDatabase:
             WHERE currency IS NULL OR TRIM(currency) = ''
             """
         )
+
+    @classmethod
+    def _migrate_v9_to_v10(cls, connection: sqlite3.Connection) -> None:
+        """Create lot-scoped media source and immutable asset registries."""
+        for statement in (
+            MEDIA_ASSETS_SQL,
+            LOT_MEDIA_SOURCES_SQL,
+            MEDIA_ASSET_VERSIONS_SQL,
+        ):
+            connection.execute(statement)
 
     @staticmethod
     def _serialize_datetime(value: datetime | None) -> str:
@@ -1075,6 +1151,298 @@ class ArchiveDatabase:
                 (timestamp, timestamp, car_id, auction_id),
             )
             return cursor.rowcount > 0
+
+    @staticmethod
+    def _validate_media_url(value: str | None, field_name: str) -> str | None:
+        if value is None:
+            return None
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError(f"{field_name} cannot be empty")
+        normalized = value.strip()
+        parts = urlsplit(normalized)
+        if (
+            parts.scheme.casefold() != "https"
+            or (parts.hostname or "").casefold()
+            not in {"data.exleasingcar.com", "www.exleasingcar.com"}
+            or parts.username is not None
+            or parts.password is not None
+            or not parts.path
+        ):
+            raise ValueError(f"{field_name} must be an HTTPS Exleasingcar media URL")
+        return normalized
+
+    def upsert_lot_media_source(
+        self,
+        source_car_id: str,
+        exleasingcar_auction_id: str,
+        media_type: str,
+        source_url: str,
+        *,
+        preview_url: str | None = None,
+        label: str | None = None,
+        source_order: int = 0,
+        discovered_at: datetime | None = None,
+    ) -> int:
+        """Register a photo/report URL against an existing auction lot."""
+        car_id = self._validate_identifier(source_car_id, "source_car_id")
+        auction_external_id = self._validate_identifier(
+            exleasingcar_auction_id, "exleasingcar_auction_id"
+        )
+        if media_type not in {"photo", "report"}:
+            raise ValueError("media_type must be 'photo' or 'report'")
+        normalized_url = self._validate_media_url(source_url, "source_url")
+        normalized_preview_url = self._validate_media_url(
+            preview_url, "preview_url"
+        )
+        if isinstance(source_order, bool) or not isinstance(source_order, int):
+            raise TypeError("source_order must be an integer")
+        if source_order < 0:
+            raise ValueError("source_order cannot be negative")
+        if label is not None:
+            if not isinstance(label, str):
+                raise TypeError("label must be str or None")
+            label = label.strip()[:250] or None
+        timestamp = self._serialize_datetime(discovered_at)
+
+        with self._connect() as connection:
+            lot = connection.execute(
+                """
+                SELECT al.id
+                FROM auction_lots al
+                JOIN vehicles v ON v.id = al.vehicle_id
+                JOIN auctions a ON a.id = al.auction_id
+                WHERE v.source_car_id = ?
+                  AND a.exleasingcar_auction_id = ?
+                """,
+                (car_id, auction_external_id),
+            ).fetchone()
+            if lot is None:
+                raise ValueError(
+                    "Cannot register media for a vehicle/auction pair "
+                    "that is not already stored as a lot"
+                )
+            lot_id = int(lot["id"])
+            connection.execute(
+                """
+                INSERT INTO lot_media_sources (
+                    auction_lot_id, media_type, source_url, preview_url,
+                    label, source_order, download_status,
+                    first_seen_at, last_seen_at
+                ) VALUES (?, ?, ?, ?, ?, ?, 'discovered', ?, ?)
+                ON CONFLICT(auction_lot_id, media_type, source_url) DO UPDATE SET
+                    preview_url = COALESCE(
+                        excluded.preview_url, lot_media_sources.preview_url
+                    ),
+                    label = COALESCE(excluded.label, lot_media_sources.label),
+                    source_order = excluded.source_order,
+                    last_seen_at = MAX(
+                        lot_media_sources.last_seen_at, excluded.last_seen_at
+                    ),
+                    download_status = CASE
+                        WHEN lot_media_sources.current_asset_id IS NULL
+                        THEN 'discovered'
+                        ELSE 'downloaded'
+                    END,
+                    last_error = CASE
+                        WHEN lot_media_sources.current_asset_id IS NULL
+                        THEN NULL
+                        ELSE lot_media_sources.last_error
+                    END
+                """,
+                (
+                    lot_id,
+                    media_type,
+                    normalized_url,
+                    normalized_preview_url,
+                    label,
+                    source_order,
+                    timestamp,
+                    timestamp,
+                ),
+            )
+            row = connection.execute(
+                """
+                SELECT id FROM lot_media_sources
+                WHERE auction_lot_id = ? AND media_type = ? AND source_url = ?
+                """,
+                (lot_id, media_type, normalized_url),
+            ).fetchone()
+            if row is None:
+                raise RuntimeError("Failed to register lot media source")
+            return int(row["id"])
+
+    def mark_media_source_attempted(
+        self,
+        media_source_id: int,
+        attempted_at: datetime | None = None,
+    ) -> bool:
+        if isinstance(media_source_id, bool) or not isinstance(media_source_id, int):
+            raise TypeError("media_source_id must be an integer")
+        timestamp = self._serialize_datetime(attempted_at)
+        with self._connect() as connection:
+            cursor = connection.execute(
+                """
+                UPDATE lot_media_sources
+                SET last_attempted_at = ?
+                WHERE id = ?
+                """,
+                (timestamp, media_source_id),
+            )
+            return cursor.rowcount > 0
+
+    def mark_media_source_failed(
+        self,
+        media_source_id: int,
+        error: str,
+        attempted_at: datetime | None = None,
+    ) -> bool:
+        if isinstance(media_source_id, bool) or not isinstance(media_source_id, int):
+            raise TypeError("media_source_id must be an integer")
+        if not isinstance(error, str) or not error.strip():
+            raise ValueError("error cannot be empty")
+        timestamp = self._serialize_datetime(attempted_at)
+        safe_error = error.strip()[:500]
+        with self._connect() as connection:
+            cursor = connection.execute(
+                """
+                UPDATE lot_media_sources
+                SET download_status = CASE
+                        WHEN current_asset_id IS NULL THEN 'failed'
+                        ELSE 'downloaded'
+                    END,
+                    last_attempted_at = ?,
+                    last_error = ?
+                WHERE id = ?
+                """,
+                (timestamp, safe_error, media_source_id),
+            )
+            return cursor.rowcount > 0
+
+    def register_media_asset_for_source(
+        self,
+        media_source_id: int,
+        *,
+        sha256: str,
+        object_key: str,
+        mime_type: str,
+        byte_size: int,
+        original_filename: str | None = None,
+        downloaded_at: datetime | None = None,
+    ) -> int:
+        """Attach an immutable, content-addressed object version to a lot source."""
+        if isinstance(media_source_id, bool) or not isinstance(media_source_id, int):
+            raise TypeError("media_source_id must be an integer")
+        if not isinstance(sha256, str) or not re.fullmatch(r"[0-9a-f]{64}", sha256):
+            raise ValueError("sha256 must be a lowercase 64-character hex digest")
+        if not isinstance(object_key, str) or not object_key.strip():
+            raise ValueError("object_key cannot be empty")
+        normalized_key = object_key.strip().replace("\\", "/")
+        if normalized_key.startswith("/") or any(
+            part in {".", ".."} for part in normalized_key.split("/")
+        ):
+            raise ValueError("object_key must be a safe relative object key")
+        if not isinstance(mime_type, str) or not mime_type.strip():
+            raise ValueError("mime_type cannot be empty")
+        if isinstance(byte_size, bool) or not isinstance(byte_size, int):
+            raise TypeError("byte_size must be an integer")
+        if byte_size < 0:
+            raise ValueError("byte_size cannot be negative")
+        if original_filename is not None and not isinstance(original_filename, str):
+            raise TypeError("original_filename must be str or None")
+        timestamp = self._serialize_datetime(downloaded_at)
+
+        with self._connect() as connection:
+            source = connection.execute(
+                "SELECT id FROM lot_media_sources WHERE id = ?",
+                (media_source_id,),
+            ).fetchone()
+            if source is None:
+                raise ValueError(f"Unknown media source ID: {media_source_id}")
+            connection.execute(
+                """
+                INSERT INTO media_assets (
+                    sha256, object_key, mime_type, byte_size,
+                    original_filename, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(sha256) DO NOTHING
+                """,
+                (
+                    sha256,
+                    normalized_key,
+                    mime_type.strip().lower(),
+                    byte_size,
+                    original_filename.strip()[:255] if original_filename else None,
+                    timestamp,
+                ),
+            )
+            asset = connection.execute(
+                "SELECT id, byte_size FROM media_assets WHERE sha256 = ?",
+                (sha256,),
+            ).fetchone()
+            if asset is None:
+                raise RuntimeError("Failed to register media asset")
+            if int(asset["byte_size"]) != byte_size:
+                raise ValueError("Existing SHA-256 asset has a conflicting byte size")
+            asset_id = int(asset["id"])
+            connection.execute(
+                """
+                INSERT INTO media_asset_versions (
+                    lot_media_source_id, media_asset_id, linked_at
+                ) VALUES (?, ?, ?)
+                ON CONFLICT(lot_media_source_id, media_asset_id) DO NOTHING
+                """,
+                (media_source_id, asset_id, timestamp),
+            )
+            connection.execute(
+                """
+                UPDATE lot_media_sources
+                SET current_asset_id = ?,
+                    download_status = 'downloaded',
+                    last_downloaded_at = ?,
+                    last_attempted_at = ?,
+                    last_error = NULL
+                WHERE id = ?
+                """,
+                (asset_id, timestamp, timestamp, media_source_id),
+            )
+            return asset_id
+
+    def get_lot_media_sources(
+        self,
+        source_car_id: str,
+        exleasingcar_auction_id: str | None = None,
+    ) -> list[dict[str, object]]:
+        car_id = self._validate_identifier(source_car_id, "source_car_id")
+        parameters: list[str] = [car_id]
+        auction_filter = ""
+        if exleasingcar_auction_id is not None:
+            auction_filter = " AND a.exleasingcar_auction_id = ?"
+            parameters.append(
+                self._validate_identifier(
+                    exleasingcar_auction_id, "exleasingcar_auction_id"
+                )
+            )
+        with self._connect() as connection:
+            rows = connection.execute(
+                f"""
+                SELECT a.exleasingcar_auction_id AS auction_id,
+                       m.id AS media_source_id, m.media_type, m.source_url,
+                       m.preview_url, m.label, m.source_order, m.download_status,
+                       m.first_seen_at, m.last_seen_at, m.last_downloaded_at,
+                       m.last_error, asset.sha256, asset.object_key,
+                       asset.mime_type, asset.byte_size, asset.original_filename
+                FROM lot_media_sources m
+                JOIN auction_lots al ON al.id = m.auction_lot_id
+                JOIN vehicles v ON v.id = al.vehicle_id
+                LEFT JOIN auctions a ON a.id = al.auction_id
+                LEFT JOIN media_assets asset ON asset.id = m.current_asset_id
+                WHERE v.source_car_id = ? {auction_filter}
+                ORDER BY a.exleasingcar_auction_id, m.media_type,
+                         m.source_order, m.id
+                """,
+                tuple(parameters),
+            )
+            return [dict(row) for row in rows]
 
     def upsert_auction_lot(
         self,
