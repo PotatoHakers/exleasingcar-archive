@@ -121,7 +121,7 @@ def test_put_bytes_requires_digest_inside_key_and_accepts_mime_parameters():
     storage = CloudflareR2Storage(_settings(), client=client)
     body = b"image"
     digest = hashlib.sha256(body).hexdigest()
-    with pytest.raises(ValueError, match="contain"):
+    with pytest.raises(ValueError, match="does not match"):
         storage.put_bytes(
             body,
             object_key="archive/photo/other-object",
