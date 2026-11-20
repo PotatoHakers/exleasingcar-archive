@@ -215,7 +215,7 @@ def test_streamed_body_size_is_limited_without_content_length(tmp_path):
         return httpx.Response(
             200,
             headers={"content-type": "image/jpeg"},
-            content=b"\xff\xd8\xff" + b"x" * 32,
+            stream=_ChunkStream([b"\xff\xd8\xff", b"x" * 32]),
         )
 
     storage, r2_client = _storage()
