@@ -96,8 +96,11 @@ def test_store_api_update_with_auction_and_lot_context(tmp_path):
             """
         ).fetchone()
         price = connection.execute(
-            "SELECT highest_offer FROM price_observations"
+            "SELECT highest_offer, currency FROM price_observations"
         ).fetchone()
+        reference_currency = connection.execute(
+            "SELECT currency FROM price_reference_observations"
+        ).fetchone()[0]
         event = connection.execute(
             """
             SELECT auction_phase, final_call_active, live_bidding,
@@ -108,7 +111,8 @@ def test_store_api_update_with_auction_and_lot_context(tmp_path):
 
     assert auction == ("test-auction-001", "Test source auction", "DE", "Germany")
     assert lot == ("test-car-001", "test-auction-001", "TEST-LOT-001", "TEST-CODE-001")
-    assert price == ("18300",)
+    assert price == ("18300", "EUR")
+    assert reference_currency == "EUR"
     assert event == ("final-call", 1, 0, 20)
 
 
