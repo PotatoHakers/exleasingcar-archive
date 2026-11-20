@@ -587,7 +587,7 @@ def test_v7_database_migrates_api_check_timestamp_without_losing_lot_history(tmp
             """
         ).fetchone()
 
-    assert version == 8
+    assert version == 9
     assert "last_api_checked_at" in columns
     assert lot == (
         UTC_SECOND.isoformat(timespec="microseconds").replace("+00:00", "Z"),
