@@ -12,8 +12,8 @@ from dataclasses import dataclass
 from pathlib import PurePosixPath
 from urllib.parse import unquote, urljoin, urlsplit
 
-from dotenv import load_dotenv
 import httpx
+from dotenv import load_dotenv
 from typing_extensions import Self
 
 from .database import ArchiveDatabase
