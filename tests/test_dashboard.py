@@ -1,7 +1,7 @@
 import sqlite3
 from decimal import Decimal
 
-from exleasingcar_archive.dashboard import DashboardHandler
+from exleasingcar_archive.dashboard import PAGE, DashboardHandler
 from exleasingcar_archive.database import ArchiveDatabase
 from exleasingcar_archive.models import AuctionCardMarker, PriceType, SaleType
 from exleasingcar_archive.parsers import PriceObservation
@@ -539,3 +539,10 @@ def test_dashboard_labels_unverified_highest_offer_as_api_value():
     assert "История реальных ставок" not in PAGE
     assert "Последняя ставка" not in PAGE
     assert "Максимальная ставка" not in PAGE
+
+
+
+def test_dashboard_copy_includes_zero_highest_offer_observations():
+    assert "включая 0" in PAGE
+    assert "только положительные значения" not in PAGE
+    assert "Наблюдений API highest_offer пока нет" in PAGE

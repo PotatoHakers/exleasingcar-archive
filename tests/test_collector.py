@@ -22,19 +22,61 @@ def test_save_html_snapshots_can_be_disabled(tmp_path):
     assert not snapshot.parent.exists()
 
 
-def test_save_html_snapshots_remain_enabled_by_default(tmp_path):
+def test_save_html_snapshots_are_disabled_by_default(tmp_path):
     collector = ExleasingcarCollector(database=None, raw_dir=tmp_path)
     snapshot = tmp_path / "auction" / "vehicle.html"
 
     collector._save_html(snapshot, "<p>public vehicle content</p>")
 
-    assert snapshot.read_text(encoding="utf-8") == "<p>public vehicle content</p>"
+    assert not snapshot.exists()
 
 
-def test_collector_cli_can_disable_html_snapshots():
-    args = build_argument_parser().parse_args(["--no-html-snapshots"])
+def test_save_html_snapshots_redact_account_and_private_form_values(tmp_path):
+    collector = ExleasingcarCollector(
+        database=None,
+        raw_dir=tmp_path,
+        save_html_snapshots=True,
+    )
+    snapshot = tmp_path / "auction" / "vehicle.html"
+    html = """
+    <div class="module-user">Alex Example · ID вашей учетной записи: 407930</div>
+    <script>
+      var __USER_ID__ = '407930';
+      var __EMAIL__ = 'owner@example.com';
+      OneSignal.sendTag("ID", "407930");
+    </script>
+    <div class="vehicle">
+      <p>Vehicle ID: 19810183</p>
+      <p>Chassis: WAUZZZF48NA0*****</p>
+      <input name="user_offer" value="12345">
+      <input id="bid_step_max" value="25000">
+      <textarea name="note">Private account note</textarea>
+      <input name="public_vehicle_price" value="18900">
+    </div>
+    """
 
-    assert args.no_html_snapshots is True
+    collector._save_html(snapshot, html)
+    saved = snapshot.read_text(encoding="utf-8")
+
+    assert "Alex Example" not in saved
+    assert "407930" not in saved
+    assert "owner@example.com" not in saved
+    assert "12345" not in saved
+    assert "25000" not in saved
+    assert "Private account note" not in saved
+    assert "19810183" in saved
+    assert "WAUZZZF48NA0*****" in saved
+    assert "18900" in saved
+
+
+def test_collector_cli_snapshot_retention_is_opt_in_and_legacy_opt_out_still_works():
+    default_args = build_argument_parser().parse_args([])
+    save_args = build_argument_parser().parse_args(["--save-html-snapshots"])
+    legacy_args = build_argument_parser().parse_args(["--no-html-snapshots"])
+
+    assert default_args.save_html_snapshots is False
+    assert save_args.save_html_snapshots is True
+    assert legacy_args.save_html_snapshots is False
 
 
 def test_filter_updates_for_catalog_rejects_other_auction_ids():
