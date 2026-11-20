@@ -4,7 +4,6 @@ import hashlib
 import sqlite3
 
 import httpx
-import pytest
 
 from exleasingcar_archive.database import ArchiveDatabase
 from exleasingcar_archive.media_downloader import (
