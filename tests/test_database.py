@@ -521,6 +521,12 @@ def test_detail_refresh_order_prioritizes_unchecked_and_oldest_lots(tmp_path):
         "auction-1", {"car-a", "car-b", "car-c", "car-d"}
     ) == ["car-d", "car-c", "car-b", "car-a"]
 
+    # A failed attempt is tracked separately and cannot starve later unchecked cars.
+    assert database.mark_detail_attempted("car-d", "auction-1", UTC_THIRD)
+    assert database.get_detail_check_order(
+        "auction-1", {"car-a", "car-b", "car-c", "car-d"}
+    ) == ["car-d", "car-c", "car-b", "car-a"]
+
 
 def test_v6_database_migrates_to_v7_and_preserves_existing_lots(tmp_path):
     database = ArchiveDatabase(tmp_path / "legacy_v6.sqlite3")
@@ -543,4 +549,5 @@ def test_v6_database_migrates_to_v7_and_preserves_existing_lots(tmp_path):
 
     assert version == 7
     assert "last_detail_checked_at" in columns
+    assert "last_detail_attempted_at" in columns
     assert lot_count == 1
