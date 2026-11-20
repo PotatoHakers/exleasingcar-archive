@@ -9,7 +9,7 @@ from pathlib import Path
 from .models import AuctionCardMarker, PriceType, SaleType
 from .parsers import PriceObservation
 
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 9
 DEFAULT_SOURCE = "ajax_update_car_form.v3.1.php"
 
 
@@ -72,6 +72,7 @@ CREATE TABLE IF NOT EXISTS price_observations (
     id INTEGER PRIMARY KEY,
     auction_lot_id INTEGER NOT NULL,
     highest_offer TEXT NOT NULL,
+    currency TEXT NOT NULL DEFAULT 'EUR',
     observed_at TEXT NOT NULL,
     source TEXT NOT NULL,
     FOREIGN KEY (auction_lot_id) REFERENCES auction_lots(id) ON DELETE RESTRICT
@@ -101,6 +102,7 @@ CREATE TABLE IF NOT EXISTS price_reference_observations (
     auction_lot_id INTEGER NOT NULL,
     minimum_price TEXT,
     indicative_price TEXT,
+    currency TEXT NOT NULL DEFAULT 'EUR',
     observed_at TEXT NOT NULL,
     source TEXT NOT NULL,
     CHECK (minimum_price IS NOT NULL OR indicative_price IS NOT NULL),
@@ -117,7 +119,7 @@ CREATE TABLE IF NOT EXISTS lot_price_observations (
         price_type IN ('displayed_auction_price', 'fixed_price')
     ),
     amount TEXT NOT NULL,
-    currency TEXT,
+    currency TEXT DEFAULT 'EUR',
     raw_text TEXT NOT NULL,
     source_field TEXT NOT NULL,
     observed_at TEXT NOT NULL,
@@ -165,7 +167,7 @@ class ArchiveDatabase:
             connection.close()
 
     def initialize(self) -> None:
-        """Create schema v8 or safely migrate older database versions."""
+        """Create schema v9 or safely migrate older database versions."""
         self.path.parent.mkdir(parents=True, exist_ok=True)
 
         with self._connect() as connection:
@@ -221,6 +223,9 @@ class ArchiveDatabase:
                 self._create_indexes(connection)
             elif version == 7:
                 self._migrate_v7_to_v8(connection)
+                self._create_indexes(connection)
+            elif version == 8:
+                self._migrate_v8_to_v9(connection)
                 self._create_indexes(connection)
             else:
                 # Idempotently ensure indexes exist for an already initialized DB.
@@ -456,6 +461,29 @@ class ArchiveDatabase:
         """Track the latest successful API response check for each auction lot."""
         cls._add_column_if_missing(
             connection, "auction_lots", "last_api_checked_at", "TEXT"
+        )
+
+    @classmethod
+    def _migrate_v8_to_v9(cls, connection: sqlite3.Connection) -> None:
+        """Record EUR explicitly on every monetary observation."""
+        cls._add_column_if_missing(
+            connection,
+            "price_observations",
+            "currency",
+            "TEXT NOT NULL DEFAULT 'EUR'",
+        )
+        cls._add_column_if_missing(
+            connection,
+            "price_reference_observations",
+            "currency",
+            "TEXT NOT NULL DEFAULT 'EUR'",
+        )
+        connection.execute(
+            """
+            UPDATE lot_price_observations
+            SET currency = 'EUR'
+            WHERE currency IS NULL OR TRIM(currency) = ''
+            """
         )
 
     @staticmethod
@@ -1147,8 +1175,8 @@ class ArchiveDatabase:
             connection.execute(
                 """
                 INSERT INTO price_observations (
-                    auction_lot_id, highest_offer, observed_at, source
-                ) VALUES (?, ?, ?, ?)
+                    auction_lot_id, highest_offer, currency, observed_at, source
+                ) VALUES (?, ?, 'EUR', ?, ?)
                 """,
                 (lot_id, price, timestamp, source),
             )
@@ -1202,21 +1230,21 @@ class ArchiveDatabase:
             )
             latest = connection.execute(
                 """
-                SELECT minimum_price, indicative_price
+                SELECT minimum_price, indicative_price, currency
                 FROM price_reference_observations
                 WHERE auction_lot_id = ? ORDER BY id DESC LIMIT 1
                 """,
                 (lot_id,),
             ).fetchone()
-            new_values = (minimum_value, indicative_value)
+            new_values = (minimum_value, indicative_value, "EUR")
             if latest is not None and tuple(latest) == new_values:
                 return False
             connection.execute(
                 """
                 INSERT INTO price_reference_observations (
-                    auction_lot_id, minimum_price, indicative_price,
+                    auction_lot_id, minimum_price, indicative_price, currency,
                     observed_at, source
-                ) VALUES (?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, 'EUR', ?, ?)
                 """,
                 (lot_id, minimum_value, indicative_value, timestamp, source),
             )
@@ -1251,6 +1279,12 @@ class ArchiveDatabase:
             raise ValueError("price.source_field cannot be empty")
         if price.currency is not None and not isinstance(price.currency, str):
             raise TypeError("price.currency must be str or None")
+        normalized_currency = (price.currency or "EUR").strip().upper()
+        if normalized_currency not in {"EUR", "€", "EURO"}:
+            raise ValueError(
+                f"Unsupported currency {price.currency!r}; Exleasingcar prices are EUR"
+            )
+        normalized_currency = "EUR"
         if not isinstance(source, str) or not source.strip():
             raise ValueError("source cannot be empty")
 
@@ -1300,7 +1334,7 @@ class ArchiveDatabase:
                 """,
                 (lot_id, price.price_type.value),
             ).fetchone()
-            new_values = (amount, price.currency, price.source_field)
+            new_values = (amount, normalized_currency, price.source_field)
             if latest is not None and tuple(latest) == new_values:
                 return False
 
@@ -1315,7 +1349,7 @@ class ArchiveDatabase:
                     lot_id,
                     price.price_type.value,
                     amount,
-                    price.currency,
+                    normalized_currency,
                     price.raw_text.strip(),
                     price.source_field.strip(),
                     timestamp,

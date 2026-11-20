@@ -492,7 +492,7 @@ def test_v5_database_migrates_to_v8_without_losing_auction_rows(tmp_path):
             """
         ).fetchone()[0]
 
-    assert version == 8
+    assert version == 9
     assert auction == ("210547", "BCA DE 3.3")
     assert marker_table == 1
 
@@ -534,7 +534,7 @@ def test_detail_refresh_order_prioritizes_unchecked_and_oldest_lots(tmp_path):
     ) == ["car-e", "car-c", "car-a", "car-b", "car-d"]
 
 
-def test_v6_database_migrates_to_v8_and_preserves_existing_lots(tmp_path):
+def test_v6_database_migrates_to_v9_and_preserves_existing_lots(tmp_path):
     database = ArchiveDatabase(tmp_path / "legacy_v6.sqlite3")
     database.initialize()
     database.upsert_auction("auction-1", observed_at=UTC_FIRST)
@@ -553,7 +553,7 @@ def test_v6_database_migrates_to_v8_and_preserves_existing_lots(tmp_path):
         }
         lot_count = connection.execute("SELECT COUNT(*) FROM auction_lots").fetchone()[0]
 
-    assert version == 8
+    assert version == 9
     assert "last_detail_checked_at" in columns
     assert "last_detail_attempted_at" in columns
     assert "last_api_checked_at" in columns
@@ -587,9 +587,74 @@ def test_v7_database_migrates_api_check_timestamp_without_losing_lot_history(tmp
             """
         ).fetchone()
 
-    assert version == 8
+    assert version == 9
     assert "last_api_checked_at" in columns
     assert lot == (
         UTC_SECOND.isoformat(timespec="microseconds").replace("+00:00", "Z"),
         None,
     )
+
+
+
+def test_v8_migration_backfills_eur_on_all_price_observations(tmp_path):
+    database = ArchiveDatabase(tmp_path / "legacy_v8.sqlite3")
+    database.initialize()
+    database.upsert_auction("auction-1", observed_at=UTC_FIRST)
+    database.upsert_vehicle("car-1", make="Volkswagen", observed_at=UTC_FIRST)
+    database.upsert_auction_lot("car-1", "auction-1", observed_at=UTC_FIRST)
+
+    with sqlite3.connect(database.path) as connection:
+        lot_id = connection.execute(
+            "SELECT id FROM auction_lots"
+        ).fetchone()[0]
+        connection.execute(
+            """
+            INSERT INTO price_observations (
+                auction_lot_id, highest_offer, currency, observed_at, source
+            ) VALUES (?, '18300', 'EUR', ?, 'test')
+            """,
+            (lot_id, UTC_FIRST.isoformat()),
+        )
+        connection.execute(
+            """
+            INSERT INTO price_reference_observations (
+                auction_lot_id, minimum_price, indicative_price, currency,
+                observed_at, source
+            ) VALUES (?, '17000', '18500', 'EUR', ?, 'test')
+            """,
+            (lot_id, UTC_FIRST.isoformat()),
+        )
+        connection.execute(
+            """
+            INSERT INTO lot_price_observations (
+                auction_lot_id, price_type, amount, currency, raw_text,
+                source_field, observed_at, source
+            ) VALUES (?, 'displayed_auction_price', '18000', NULL, '€ 18,000',
+                      'test', ?, 'test')
+            """,
+            (lot_id, UTC_FIRST.isoformat()),
+        )
+        connection.execute("ALTER TABLE price_observations DROP COLUMN currency")
+        connection.execute(
+            "ALTER TABLE price_reference_observations DROP COLUMN currency"
+        )
+        connection.execute("PRAGMA user_version = 8")
+
+    database.initialize()
+
+    with sqlite3.connect(database.path) as connection:
+        version = connection.execute("PRAGMA user_version").fetchone()[0]
+        api_currency = connection.execute(
+            "SELECT currency FROM price_observations"
+        ).fetchone()[0]
+        reference_currency = connection.execute(
+            "SELECT currency FROM price_reference_observations"
+        ).fetchone()[0]
+        lot_price_currency = connection.execute(
+            "SELECT currency FROM lot_price_observations"
+        ).fetchone()[0]
+
+    assert version == 9
+    assert api_currency == "EUR"
+    assert reference_currency == "EUR"
+    assert lot_price_currency == "EUR"
