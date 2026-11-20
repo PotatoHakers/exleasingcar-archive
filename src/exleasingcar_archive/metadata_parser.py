@@ -72,7 +72,7 @@ class ParsedMediaReference:
     source_order: int = 0
 
 
-MEDIA_SOURCE_HOSTS = frozenset({"data.exleasingcar.com", "www.exleasingcar.com"})
+MEDIA_SOURCE_HOSTS = frozenset({"data.exleasingcar.com"})
 
 
 @dataclass(frozen=True, slots=True)
@@ -645,11 +645,11 @@ def _onclick_url(value: str | None, function_name: str) -> str | None:
     if not value:
         return None
     match = re.search(
-        rf"{re.escape(function_name)}\\s*\\(\\s*['\\\"]([^'\\\"]+)['\\\"]",
+        rf""" {re.escape(function_name)}\\s*\\(\\s*(['"])(.*?)\\1""".strip(),
         value,
         flags=re.IGNORECASE,
     )
-    return match.group(1).strip() if match else None
+    return match.group(2).strip() if match else None
 
 
 def parse_vehicle_media(
@@ -699,14 +699,22 @@ def parse_vehicle_media(
             title = anchor.get("title")
             raw_url = str(title) if title else None
         image = anchor.find("img")
-        preview_url = str(image.get("src")) if isinstance(image, Tag) and image.get("src") else None
+        preview_url = (
+            str(image.get("src"))
+            if isinstance(image, Tag) and image.get("src")
+            else None
+        )
         add_reference("photo", raw_url, preview_raw_url=preview_url)
 
     # Fallback for page variants that put full-size URLs directly in the
     # Highslide gallery. Relative browser-save paths are intentionally skipped.
     for anchor in soup.select("#gallery-area .highslide-gallery a.highslide[href]"):
         image = anchor.find("img")
-        preview_url = str(image.get("src")) if isinstance(image, Tag) and image.get("src") else None
+        preview_url = (
+            str(image.get("src"))
+            if isinstance(image, Tag) and image.get("src")
+            else None
+        )
         add_reference("photo", str(anchor.get("href")), preview_raw_url=preview_url)
 
     # Inspection reports are opened by inline window.open(...) handlers inside
