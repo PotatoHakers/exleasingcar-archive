@@ -816,7 +816,7 @@ class ExleasingcarCollector:
         self.database.mark_detail_checked(
             car_id,
             auction.exleasingcar_auction_id,
-            checked_at=observed_at,
+            checked_at=datetime.now(timezone.utc),
         )
         return True
 
@@ -941,7 +941,7 @@ class ExleasingcarCollector:
             self.database.mark_detail_attempted(
                 car_id,
                 listing.exleasingcar_auction_id,
-                attempted_at=observed_at,
+                attempted_at=datetime.now(timezone.utc),
             )
             details_attempted += 1
             attempted_detail_ids.add(car_id)
