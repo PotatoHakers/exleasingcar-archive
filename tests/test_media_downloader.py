@@ -360,6 +360,10 @@ def test_r2_failure_is_retried_without_losing_the_download(tmp_path):
     assert summary.uploaded == 1
     assert summary.failed == 0
     assert len(r2_client.put_calls) == 1
+    retry_budget = storage._budget.report()
+    assert retry_budget["class_a_used"] == 2
+    assert retry_budget["class_b_used"] == 2
+    assert retry_budget["storage_used_bytes"] == len(b"\\xff\\xd8\\xffsynthetic-jpeg")
     client.close()
 
 
