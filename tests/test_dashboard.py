@@ -779,7 +779,7 @@ def test_dashboard_selected_lot_isolates_prices_reports_and_relistings(tmp_path)
 
     assert len(payload["bids"]) == 2
     assert {row["auction_id"] for row in payload["bids"]} == {"auction-current"}
-    assert len(payload["references"]) == 1
+    assert len(payload["references"]) == 2
     assert len(payload["lot_prices"]) == 2
     assert len(payload["other_lots"]) == 1
     assert payload["other_lots"][0]["lot_id"] == old_lot
