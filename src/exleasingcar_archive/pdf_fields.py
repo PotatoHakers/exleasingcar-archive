@@ -9,12 +9,12 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 from datetime import datetime
-from enum import StrEnum
+from enum import Enum
 
 from .pdf_extractor import PDFTextExtraction
 
 
-class PDFFieldState(StrEnum):
+class PDFFieldState(str, Enum):
     """Source state retained without collapsing distinct report meanings."""
 
     VALUE = "value"
