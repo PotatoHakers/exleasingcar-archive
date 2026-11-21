@@ -9,8 +9,9 @@ from urllib.parse import urlsplit
 
 from .models import AuctionCardMarker, PriceType, SaleType
 from .parsers import PriceObservation
+from .pdf_fields import PDFExtractedField, PDFFieldProvenance, PDFFieldState
 
-SCHEMA_VERSION = 10
+SCHEMA_VERSION = 11
 DEFAULT_SOURCE = "ajax_update_car_form.v3.1.php"
 
 
@@ -197,6 +198,32 @@ CREATE TABLE IF NOT EXISTS media_asset_versions (
 """
 
 
+PDF_FIELD_OBSERVATIONS_SQL = """
+CREATE TABLE IF NOT EXISTS pdf_field_observations (
+    id INTEGER PRIMARY KEY,
+    report_sha256 TEXT NOT NULL CHECK (
+        length(report_sha256) = 64 AND report_sha256 NOT GLOB '*[^0-9a-f]*'
+    ),
+    source_lot_id TEXT,
+    auction_lot_id INTEGER,
+    page_number INTEGER NOT NULL CHECK (page_number > 0),
+    field_key TEXT NOT NULL CHECK (length(trim(field_key)) > 0),
+    source_label TEXT NOT NULL CHECK (length(trim(source_label)) > 0),
+    raw_text TEXT NOT NULL,
+    normalized_text TEXT,
+    state TEXT NOT NULL CHECK (
+        state IN (
+            'value', 'blank', 'explicit_no', 'not_applicable', 'not_tested', 'unknown'
+        )
+    ),
+    parser_name TEXT NOT NULL CHECK (length(trim(parser_name)) > 0),
+    parser_version TEXT NOT NULL CHECK (length(trim(parser_version)) > 0),
+    extracted_at TEXT NOT NULL,
+    FOREIGN KEY (auction_lot_id) REFERENCES auction_lots(id) ON DELETE RESTRICT
+)
+"""
+
+
 class ArchiveDatabase:
     """SQLite storage for Exleasingcar Archive."""
 
@@ -218,7 +245,7 @@ class ArchiveDatabase:
             connection.close()
 
     def initialize(self) -> None:
-        """Create schema v10 or safely migrate older database versions."""
+        """Create schema v11 or safely migrate older database versions."""
         self.path.parent.mkdir(parents=True, exist_ok=True)
 
         with self._connect() as connection:
@@ -247,6 +274,7 @@ class ArchiveDatabase:
                     (7, self._migrate_v7_to_v8),
                     (8, self._migrate_v8_to_v9),
                     (9, self._migrate_v9_to_v10),
+                    (10, self._migrate_v10_to_v11),
                 )
                 for from_version, migration in migrations:
                     if version <= from_version:
@@ -271,6 +299,7 @@ class ArchiveDatabase:
             MEDIA_ASSETS_SQL,
             LOT_MEDIA_SOURCES_SQL,
             MEDIA_ASSET_VERSIONS_SQL,
+            PDF_FIELD_OBSERVATIONS_SQL,
         ):
             connection.execute(statement)
         ArchiveDatabase._create_indexes(connection)
@@ -324,6 +353,14 @@ class ArchiveDatabase:
             """
             CREATE INDEX IF NOT EXISTS idx_media_asset_versions_source
             ON media_asset_versions(lot_media_source_id, linked_at)
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_pdf_field_observations_report_page
+            ON pdf_field_observations(report_sha256, page_number, id)
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_pdf_field_observations_lot
+            ON pdf_field_observations(auction_lot_id, id)
             """,
         )
         for statement in statements:
@@ -528,6 +565,11 @@ class ArchiveDatabase:
             MEDIA_ASSET_VERSIONS_SQL,
         ):
             connection.execute(statement)
+
+    @classmethod
+    def _migrate_v10_to_v11(cls, connection: sqlite3.Connection) -> None:
+        """Add durable storage for extracted PDF field observations."""
+        connection.execute(PDF_FIELD_OBSERVATIONS_SQL)
 
     @staticmethod
     def _serialize_datetime(value: datetime | None) -> str:
@@ -1832,3 +1874,175 @@ class ArchiveDatabase:
                 ),
             )
         return True
+
+    def save_pdf_field_observations(
+        self,
+        fields: tuple[PDFExtractedField, ...],
+        *,
+        auction_lot_id: int | None = None,
+    ) -> tuple[int, ...]:
+        """Save one report's extracted fields without replacing earlier observations.
+
+        PDFFieldProvenance.lot_id is retained as the source's opaque lot
+        identifier. The optional auction_lot_id is a separate, local database
+        relationship and must refer to an already existing auction lot. It is
+        never inferred from the source identifier.
+        """
+        if not isinstance(fields, tuple) or any(
+            not isinstance(field, PDFExtractedField) for field in fields
+        ):
+            raise TypeError("fields must be a tuple of PDFExtractedField values")
+
+        if auction_lot_id is not None:
+            if isinstance(auction_lot_id, bool) or not isinstance(auction_lot_id, int):
+                raise TypeError("auction_lot_id must be an integer or None")
+            if auction_lot_id <= 0:
+                raise ValueError("auction_lot_id must be a positive integer")
+
+        if not fields:
+            return ()
+
+        rows: list[tuple[object, ...]] = []
+        report_hashes: set[str] = set()
+        for field in fields:
+            provenance = field.provenance
+            if not isinstance(provenance, PDFFieldProvenance):
+                raise TypeError("field provenance must be a PDFFieldProvenance")
+            if not isinstance(field.state, PDFFieldState):
+                raise TypeError("field state must be a PDFFieldState")
+
+            report_sha256 = provenance.report_sha256
+            if not isinstance(report_sha256, str):
+                raise TypeError("report_sha256 must be a string")
+            if re.fullmatch(r"[0-9a-fA-F]{64}", report_sha256) is None:
+                raise ValueError(
+                    "report_sha256 must contain exactly 64 hexadecimal characters"
+                )
+            report_sha256 = report_sha256.lower()
+            report_hashes.add(report_sha256)
+
+            for value, name in (
+                (field.key, "field key"),
+                (provenance.source_label, "source label"),
+                (provenance.parser_name, "parser name"),
+                (provenance.parser_version, "parser version"),
+            ):
+                if not isinstance(value, str):
+                    raise TypeError(f"{name} must be a string")
+                if not value.strip():
+                    raise ValueError(f"{name} cannot be empty")
+
+            if provenance.lot_id is not None:
+                if not isinstance(provenance.lot_id, str):
+                    raise TypeError("source lot_id must be a string or None")
+                if not provenance.lot_id.strip():
+                    raise ValueError("source lot_id cannot be empty")
+
+            if (
+                isinstance(provenance.page_number, bool)
+                or not isinstance(provenance.page_number, int)
+            ):
+                raise TypeError("page_number must be an integer")
+            if provenance.page_number <= 0:
+                raise ValueError("page_number must be positive")
+            if not isinstance(field.raw_text, str):
+                raise TypeError("raw_text must be a string")
+            if field.normalized_text is not None and not isinstance(
+                field.normalized_text, str
+            ):
+                raise TypeError("normalized_text must be a string or None")
+            if not isinstance(provenance.extracted_at, datetime):
+                raise TypeError("extracted_at must be a datetime")
+            timestamp = self._serialize_datetime(provenance.extracted_at)
+
+            rows.append(
+                (
+                    report_sha256,
+                    provenance.lot_id,
+                    auction_lot_id,
+                    provenance.page_number,
+                    field.key,
+                    provenance.source_label,
+                    field.raw_text,
+                    field.normalized_text,
+                    field.state.value,
+                    provenance.parser_name,
+                    provenance.parser_version,
+                    timestamp,
+                )
+            )
+
+        if len(report_hashes) != 1:
+            raise ValueError("all fields in a batch must belong to the same report")
+
+        inserted_ids: list[int] = []
+        with self._connect() as connection:
+            if auction_lot_id is not None:
+                lot = connection.execute(
+                    "SELECT id FROM auction_lots WHERE id = ?", (auction_lot_id,)
+                ).fetchone()
+                if lot is None:
+                    raise ValueError(
+                        f"auction_lot_id {auction_lot_id} does not refer to an existing lot"
+                    )
+
+            for row in rows:
+                cursor = connection.execute(
+                    """
+                    INSERT INTO pdf_field_observations (
+                        report_sha256, source_lot_id, auction_lot_id, page_number,
+                        field_key, source_label, raw_text, normalized_text, state,
+                        parser_name, parser_version, extracted_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    row,
+                )
+                inserted_ids.append(int(cursor.lastrowid))
+
+        return tuple(inserted_ids)
+
+    def get_pdf_field_observations(
+        self,
+        *,
+        report_sha256: str | None = None,
+        auction_lot_id: int | None = None,
+    ) -> list[dict[str, object]]:
+        """Read observations for a report, a confirmed lot, or their intersection."""
+        conditions: list[str] = []
+        parameters: list[str | int] = []
+
+        if report_sha256 is not None:
+            if not isinstance(report_sha256, str):
+                raise TypeError("report_sha256 must be a string or None")
+            if re.fullmatch(r"[0-9a-fA-F]{64}", report_sha256) is None:
+                raise ValueError(
+                    "report_sha256 must contain exactly 64 hexadecimal characters"
+                )
+            conditions.append("report_sha256 = ?")
+            parameters.append(report_sha256.lower())
+
+        if auction_lot_id is not None:
+            if isinstance(auction_lot_id, bool) or not isinstance(auction_lot_id, int):
+                raise TypeError("auction_lot_id must be an integer or None")
+            if auction_lot_id <= 0:
+                raise ValueError("auction_lot_id must be a positive integer")
+            conditions.append("auction_lot_id = ?")
+            parameters.append(auction_lot_id)
+
+        if not conditions:
+            raise ValueError("provide report_sha256, auction_lot_id, or both")
+
+        with self._connect() as connection:
+            observations = connection.execute(
+                f"""
+                SELECT id, report_sha256, source_lot_id, auction_lot_id,
+                       page_number, field_key, source_label, raw_text,
+                       normalized_text, state, parser_name, parser_version,
+                       extracted_at
+                FROM pdf_field_observations
+                WHERE {" AND ".join(conditions)}
+                ORDER BY id
+                """,
+                tuple(parameters),
+            ).fetchall()
+        return [dict(row) for row in observations]
