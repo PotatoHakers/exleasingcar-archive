@@ -679,7 +679,14 @@ class DashboardHandler(BaseHTTPRequestHandler):
                     ),
                     None,
                 )
-                latest_reference = references[0] if references else None
+                latest_minimum = next(
+                    (row for row in references if row["minimum_price"] is not None),
+                    None,
+                )
+                latest_indicative = next(
+                    (row for row in references if row["indicative_price"] is not None),
+                    None,
+                )
 
                 def _price_summary(
                     amount: object,
@@ -718,16 +725,16 @@ class DashboardHandler(BaseHTTPRequestHandler):
                         latest_fixed["source_field"] if latest_fixed else None,
                     ),
                     "minimum_price": _price_summary(
-                        latest_reference["minimum_price"] if latest_reference else None,
-                        latest_reference["currency"] if latest_reference else None,
-                        latest_reference["source"] if latest_reference else None,
-                        latest_reference["observed_at"] if latest_reference else None,
+                        latest_minimum["minimum_price"] if latest_minimum else None,
+                        latest_minimum["currency"] if latest_minimum else None,
+                        latest_minimum["source"] if latest_minimum else None,
+                        latest_minimum["observed_at"] if latest_minimum else None,
                     ),
                     "indicative_price": _price_summary(
-                        latest_reference["indicative_price"] if latest_reference else None,
-                        latest_reference["currency"] if latest_reference else None,
-                        latest_reference["source"] if latest_reference else None,
-                        latest_reference["observed_at"] if latest_reference else None,
+                        latest_indicative["indicative_price"] if latest_indicative else None,
+                        latest_indicative["currency"] if latest_indicative else None,
+                        latest_indicative["source"] if latest_indicative else None,
+                        latest_indicative["observed_at"] if latest_indicative else None,
                     ),
                 }
 
