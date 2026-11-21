@@ -600,32 +600,32 @@ def test_dashboard_selected_lot_isolates_prices_reports_and_relistings(tmp_path)
     last_check = datetime(2026, 1, 3, 10, 5, tzinfo=timezone.utc)
     database.record_price_observation(
         "car-detail",
-        Decimal("9000"),
+        Decimal(9000),
         first_seen,
         exleasingcar_auction_id="auction-current",
     )
     database.record_price_observation(
         "car-detail",
-        Decimal("0"),
+        Decimal(0),
         last_change,
         exleasingcar_auction_id="auction-current",
     )
     database.record_price_observation(
         "car-detail",
-        Decimal("7500"),
+        Decimal(7500),
         first_seen,
         exleasingcar_auction_id="auction-old",
     )
     database.record_price_observation(
         "other-car",
-        Decimal("18000"),
+        Decimal(18000),
         last_change,
         exleasingcar_auction_id="auction-other",
     )
     database.record_price_reference_observation(
         "car-detail",
-        minimum_price=Decimal("6000"),
-        indicative_price=Decimal("7000"),
+        minimum_price=Decimal(6000),
+        indicative_price=Decimal(7000),
         observed_at=last_change,
         exleasingcar_auction_id="auction-current",
     )
@@ -633,7 +633,7 @@ def test_dashboard_selected_lot_isolates_prices_reports_and_relistings(tmp_path)
         "car-detail",
         PriceObservation(
             price_type=PriceType.DISPLAYED_AUCTION_PRICE,
-            amount=Decimal("5000"),
+            amount=Decimal(5000),
             currency="EUR",
             raw_text="€ 5,000",
             source_field=".auction-price",
@@ -646,7 +646,7 @@ def test_dashboard_selected_lot_isolates_prices_reports_and_relistings(tmp_path)
         "car-detail",
         PriceObservation(
             price_type=PriceType.FIXED_PRICE,
-            amount=Decimal("8500"),
+            amount=Decimal(8500),
             currency="EUR",
             raw_text="Buy now € 8,500",
             source_field=".buy-offer",
