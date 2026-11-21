@@ -50,7 +50,7 @@ _CLASS_B_ACTIONS = frozenset(
 _FREE_ACTIONS = frozenset({"DeleteObject", "DeleteBucket", "AbortMultipartUpload"})
 
 _QUERY = """
-query R2BudgetUsage($accountTag: String!, $startDate: Time!, $endDate: Time!) {
+query R2BudgetUsage($accountTag: string!, $startDate: Time, $endDate: Time) {
   viewer {
     accounts(filter: {accountTag: $accountTag}) {
       r2OperationsAdaptiveGroups(
@@ -164,6 +164,10 @@ class CloudflareR2Analytics:
             storage_rows = account["r2StorageAdaptiveGroups"]
             if len(operation_rows) >= 10000 or len(storage_rows) >= 10000:
                 raise ValueError("analytics result reached the query row limit")
+            if not storage_rows:
+                raise R2AnalyticsError(
+                    "Cloudflare returned no R2 storage metrics; R2 activity is blocked"
+                )
 
             class_a = class_b = 0
             for row in operation_rows:
@@ -206,10 +210,11 @@ class CloudflareR2Analytics:
                     payload_size + metadata_size,
                 )
 
-            if (
-                latest_storage_metric is not None
-                and now - latest_storage_metric > _MAX_STORAGE_METRIC_AGE
-            ):
+            if latest_storage_metric is None:
+                raise R2AnalyticsError(
+                    "Cloudflare returned storage metrics without timestamps; R2 activity is blocked"
+                )
+            if now - latest_storage_metric > _MAX_STORAGE_METRIC_AGE:
                 raise R2AnalyticsError(
                     "R2 storage analytics is older than 72 hours; R2 activity is blocked"
                 )
