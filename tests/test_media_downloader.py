@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import hashlib
 import sqlite3
+from io import BytesIO
 
 import httpx
 import pytest
+from PIL import Image
 
 from exleasingcar_archive.database import ArchiveDatabase
 from exleasingcar_archive.media_downloader import (
@@ -334,6 +336,9 @@ def test_pdf_signature_is_checked_within_the_first_kilobyte(tmp_path):
 
     assert summary.uploaded == 1
     assert summary.failed == 0
+    assert summary.preview_uploaded == 0
+    assert summary.preview_reused == 0
+    assert summary.preview_failed == 0
     assert len(r2_client.put_calls) == 1
     client.close()
 
@@ -435,6 +440,117 @@ def test_invalid_http_status_is_recorded_without_exposing_source_url(tmp_path):
     assert r2_client.put_calls == []
     client.close()
 
+
+def _valid_jpeg(width=1600, height=900):
+    output = BytesIO()
+    image = Image.new("RGB", (width, height), (35, 105, 175))
+    image.save(output, format="JPEG", quality=90)
+    image.close()
+    return output.getvalue()
+
+
+def test_photo_download_generates_and_reuses_card_and_gallery_previews(tmp_path):
+    database = _database(
+        tmp_path,
+        [("photo", "https://data.exleasingcar.com/car.jpg")],
+    )
+    original_body = _valid_jpeg()
+    storage, r2_client = _storage()
+    client = _http_client(lambda request: _photo_response(original_body))
+
+    with MediaDownloader(
+        database,
+        storage,
+        settings=MediaDownloaderSettings(backoff_seconds=0),
+        client=client,
+        sleep=lambda _: None,
+    ) as downloader:
+        first = downloader.download_batch()
+        second = downloader.download_batch(include_downloaded=True)
+
+    assert first.uploaded == 1
+    assert first.preview_uploaded == 2
+    assert first.preview_reused == 0
+    assert first.preview_failed == 0
+    assert second.reused == 1
+    assert second.preview_uploaded == 0
+    assert second.preview_reused == 2
+    assert second.preview_failed == 0
+    assert len(r2_client.put_calls) == 3
+    assert len(r2_client.objects) == 3
+
+    original_sha = hashlib.sha256(original_body).hexdigest()
+    original_asset = database.get_media_asset_by_sha256(original_sha)
+    assert original_asset is not None
+    source_asset_id = int(original_asset["id"])
+
+    source_rows = database.get_lot_media_sources("19702473", "209633")
+    assert len(source_rows) == 1
+    assert source_rows[0]["sha256"] == original_sha
+    assert source_rows[0]["mime_type"] == "image/jpeg"
+
+    with sqlite3.connect(database.path) as connection:
+        derivatives = connection.execute(
+            """
+            SELECT d.variant, d.status, d.width, d.height, asset.sha256
+            FROM media_derivatives AS d
+            JOIN media_assets AS asset ON asset.id = d.derived_asset_id
+            WHERE d.source_asset_id = ?
+            ORDER BY d.variant
+            """,
+            (source_asset_id,),
+        ).fetchall()
+
+    assert {row[0] for row in derivatives} == {"card", "gallery"}
+    assert all(row[1] == "ready" for row in derivatives)
+    assert all(row[2] <= 1280 and row[3] <= 960 for row in derivatives)
+    assert all(len(row[4]) == 64 for row in derivatives)
+    assert r2_client.objects[storage.object_key_for(original_sha, "photo")] == original_body
+    client.close()
+
+
+def test_invalid_photo_keeps_original_and_records_preview_failure(tmp_path):
+    database = _database(
+        tmp_path,
+        [("photo", "https://data.exleasingcar.com/invalid.jpg")],
+    )
+    invalid_body = b"\xff\xd8\xffsynthetic-not-an-image"
+    storage, r2_client = _storage()
+    client = _http_client(lambda request: _photo_response(invalid_body))
+
+    with MediaDownloader(
+        database,
+        storage,
+        settings=MediaDownloaderSettings(backoff_seconds=0),
+        client=client,
+        sleep=lambda _: None,
+    ) as downloader:
+        summary = downloader.download_batch()
+
+    assert summary.uploaded == 1
+    assert summary.failed == 0
+    assert summary.preview_uploaded == 0
+    assert summary.preview_failed == 2
+    assert len(r2_client.put_calls) == 1
+
+    original = database.get_media_asset_by_sha256(
+        hashlib.sha256(invalid_body).hexdigest()
+    )
+    assert original is not None
+    with sqlite3.connect(database.path) as connection:
+        states = connection.execute(
+            """
+            SELECT status, COUNT(*)
+            FROM media_derivatives
+            WHERE source_asset_id = ?
+            GROUP BY status
+            """,
+            (int(original["id"]),),
+        ).fetchall()
+    assert len(states) == 1
+    assert states[0][0] in {"unsupported", "failed"}
+    assert states[0][1] == 2
+    client.close()
 
 
 def test_direct_presigned_get_is_blocked_by_the_budget_guard():

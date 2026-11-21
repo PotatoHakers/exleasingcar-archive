@@ -13,7 +13,7 @@ from .parsers import PriceObservation
 from .pdf_damage import PDFDamageObservation, PDFDamagePhotoReference
 from .pdf_fields import PDFExtractedField, PDFFieldProvenance, PDFFieldState
 
-SCHEMA_VERSION = 12
+SCHEMA_VERSION = 13
 DEFAULT_SOURCE = "ajax_update_car_form.v3.1.php"
 
 
@@ -199,6 +199,33 @@ CREATE TABLE IF NOT EXISTS media_asset_versions (
 )
 """
 
+MEDIA_DERIVATIVES_SQL = """
+CREATE TABLE IF NOT EXISTS media_derivatives (
+    id INTEGER PRIMARY KEY,
+    source_asset_id INTEGER NOT NULL,
+    variant TEXT NOT NULL CHECK (variant IN ('card', 'gallery')),
+    transform_version TEXT NOT NULL,
+    settings_json TEXT NOT NULL,
+    status TEXT NOT NULL CHECK (status IN ('ready', 'unsupported', 'failed')),
+    derived_asset_id INTEGER,
+    width INTEGER,
+    height INTEGER,
+    last_attempted_at TEXT NOT NULL,
+    last_error TEXT,
+    FOREIGN KEY (source_asset_id) REFERENCES media_assets(id) ON DELETE RESTRICT,
+    FOREIGN KEY (derived_asset_id) REFERENCES media_assets(id) ON DELETE RESTRICT,
+    UNIQUE (source_asset_id, variant, transform_version, settings_json),
+    CHECK (
+        (status = 'ready' AND derived_asset_id IS NOT NULL
+         AND width > 0 AND height > 0 AND last_error IS NULL)
+        OR
+        (status IN ('unsupported', 'failed') AND derived_asset_id IS NULL
+         AND width IS NULL AND height IS NULL AND last_error IS NOT NULL)
+    )
+)
+"""
+
+
 
 PDF_FIELD_OBSERVATIONS_SQL = """
 CREATE TABLE IF NOT EXISTS pdf_field_observations (
@@ -285,7 +312,7 @@ class ArchiveDatabase:
             connection.close()
 
     def initialize(self) -> None:
-        """Create schema v12 or safely migrate older database versions."""
+        """Create schema v13 or safely migrate older database versions."""
         self.path.parent.mkdir(parents=True, exist_ok=True)
 
         with self._connect() as connection:
@@ -316,6 +343,7 @@ class ArchiveDatabase:
                     (9, self._migrate_v9_to_v10),
                     (10, self._migrate_v10_to_v11),
                     (11, self._migrate_v11_to_v12),
+                    (12, self._migrate_v12_to_v13),
                 )
                 for from_version, migration in migrations:
                     if version <= from_version:
@@ -342,6 +370,7 @@ class ArchiveDatabase:
             MEDIA_ASSET_VERSIONS_SQL,
             PDF_FIELD_OBSERVATIONS_SQL,
             PDF_DAMAGE_OBSERVATIONS_SQL,
+            MEDIA_DERIVATIVES_SQL,
         ):
             connection.execute(statement)
         ArchiveDatabase._create_indexes(connection)
@@ -395,6 +424,10 @@ class ArchiveDatabase:
             """
             CREATE INDEX IF NOT EXISTS idx_media_asset_versions_source
             ON media_asset_versions(lot_media_source_id, linked_at)
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_media_derivatives_source_variant
+            ON media_derivatives(source_asset_id, variant, transform_version)
             """,
             """
             CREATE INDEX IF NOT EXISTS idx_pdf_field_observations_report_page
@@ -625,6 +658,11 @@ class ArchiveDatabase:
     def _migrate_v11_to_v12(cls, connection: sqlite3.Connection) -> None:
         """Add separate storage for numbered PDF damage observations."""
         connection.execute(PDF_DAMAGE_OBSERVATIONS_SQL)
+
+    @classmethod
+    def _migrate_v12_to_v13(cls, connection: sqlite3.Connection) -> None:
+        """Add source-linked image preview derivatives."""
+        connection.execute(MEDIA_DERIVATIVES_SQL)
 
     @staticmethod
     def _serialize_datetime(value: datetime | None) -> str:
@@ -1518,6 +1556,237 @@ class ArchiveDatabase:
                 (asset_id, timestamp, timestamp, media_source_id),
             )
             return asset_id
+
+
+    def get_media_asset_by_sha256(self, sha256: str) -> dict[str, object] | None:
+        """Return an already registered content-addressed media asset, if present."""
+        if (
+            not isinstance(sha256, str)
+            or len(sha256) != 64
+            or any(character not in "0123456789abcdef" for character in sha256)
+        ):
+            raise ValueError("sha256 must be a lowercase 64-character digest")
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT id, sha256, object_key, mime_type, byte_size, original_filename
+                FROM media_assets
+                WHERE sha256 = ?
+                """,
+                (sha256,),
+            ).fetchone()
+            return dict(row) if row is not None else None
+
+    def get_media_derivative(
+        self,
+        source_asset_id: int,
+        variant: str,
+        transform_version: str,
+        settings_json: str,
+    ) -> dict[str, object] | None:
+        """Return one derivative record for an original asset and exact transform."""
+        if (
+            isinstance(source_asset_id, bool)
+            or not isinstance(source_asset_id, int)
+            or source_asset_id <= 0
+        ):
+            raise ValueError("source_asset_id must be a positive integer")
+        if variant not in {"card", "gallery"}:
+            raise ValueError("variant must be 'card' or 'gallery'")
+        if not isinstance(transform_version, str) or not transform_version.strip():
+            raise ValueError("transform_version cannot be empty")
+        if not isinstance(settings_json, str) or not settings_json.strip():
+            raise ValueError("settings_json cannot be empty")
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT d.id, d.source_asset_id, d.variant, d.transform_version,
+                       d.settings_json, d.status, d.derived_asset_id,
+                       d.width, d.height, d.last_attempted_at, d.last_error,
+                       asset.sha256 AS derived_sha256,
+                       asset.object_key AS derived_object_key,
+                       asset.mime_type AS derived_mime_type,
+                       asset.byte_size AS derived_byte_size
+                FROM media_derivatives d
+                LEFT JOIN media_assets asset ON asset.id = d.derived_asset_id
+                WHERE d.source_asset_id = ?
+                  AND d.variant = ?
+                  AND d.transform_version = ?
+                  AND d.settings_json = ?
+                """,
+                (source_asset_id, variant, transform_version, settings_json),
+            ).fetchone()
+            return dict(row) if row is not None else None
+
+    def register_media_derivative(
+        self,
+        source_asset_id: int,
+        variant: str,
+        transform_version: str,
+        settings_json: str,
+        *,
+        status: str,
+        derived_sha256: str | None = None,
+        object_key: str | None = None,
+        mime_type: str | None = None,
+        byte_size: int | None = None,
+        width: int | None = None,
+        height: int | None = None,
+        error: str | None = None,
+        attempted_at: datetime | None = None,
+    ) -> int:
+        """Register a ready derivative or an isolated per-asset processing result."""
+        if (
+            isinstance(source_asset_id, bool)
+            or not isinstance(source_asset_id, int)
+            or source_asset_id <= 0
+        ):
+            raise ValueError("source_asset_id must be a positive integer")
+        if variant not in {"card", "gallery"}:
+            raise ValueError("variant must be 'card' or 'gallery'")
+        if not isinstance(transform_version, str) or not transform_version.strip():
+            raise ValueError("transform_version cannot be empty")
+        if len(transform_version) > 64:
+            raise ValueError("transform_version is too long")
+        if (
+            not isinstance(settings_json, str)
+            or not settings_json.strip()
+            or len(settings_json) > 1000
+        ):
+            raise ValueError("settings_json must be a non-empty string of at most 1000 characters")
+        if status not in {"ready", "unsupported", "failed"}:
+            raise ValueError("status must be 'ready', 'unsupported' or 'failed'")
+
+        normalized_key: str | None = None
+        normalized_mime: str | None = None
+        safe_error: str | None = None
+        if status == "ready":
+            if (
+                not isinstance(derived_sha256, str)
+                or len(derived_sha256) != 64
+                or any(character not in "0123456789abcdef" for character in derived_sha256)
+            ):
+                raise ValueError("derived_sha256 must be a lowercase 64-character digest")
+            if not isinstance(object_key, str) or not object_key.strip():
+                raise ValueError("object_key is required for a ready derivative")
+            normalized_key = object_key.strip().replace("\\\\", "/")
+            if normalized_key != (
+                f"archive/photo/{derived_sha256[:2]}/{derived_sha256}"
+            ):
+                raise ValueError("object_key must be a safe content-addressed photo key")
+            if not isinstance(mime_type, str) or mime_type.strip().lower() != "image/jpeg":
+                raise ValueError("derivative mime_type must be image/jpeg")
+            normalized_mime = "image/jpeg"
+            for name, value in (("byte_size", byte_size), ("width", width), ("height", height)):
+                if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+                    raise ValueError(f"{name} must be a positive integer")
+            if error is not None:
+                raise ValueError("error must be None for a ready derivative")
+        else:
+            if any(
+                value is not None
+                for value in (
+                    derived_sha256,
+                    object_key,
+                    mime_type,
+                    byte_size,
+                    width,
+                    height,
+                )
+            ):
+                raise ValueError("asset details must be omitted for a failed derivative")
+            if not isinstance(error, str) or not error.strip():
+                raise ValueError("error is required for an unsupported or failed derivative")
+            safe_error = error.strip()[:250]
+
+        timestamp = self._serialize_datetime(attempted_at)
+        with self._connect() as connection:
+            source = connection.execute(
+                "SELECT mime_type FROM media_assets WHERE id = ?",
+                (source_asset_id,),
+            ).fetchone()
+            if source is None:
+                raise ValueError("source media asset does not exist")
+            if not str(source["mime_type"]).lower().startswith("image/"):
+                raise ValueError("source media asset must be an image")
+
+            derived_asset_id: int | None = None
+            if status == "ready":
+                connection.execute(
+                    """
+                    INSERT INTO media_assets (
+                        sha256, object_key, mime_type, byte_size,
+                        original_filename, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(sha256) DO NOTHING
+                    """,
+                    (
+                        derived_sha256,
+                        normalized_key,
+                        normalized_mime,
+                        byte_size,
+                        f"{variant}.jpg",
+                        timestamp,
+                    ),
+                )
+                asset = connection.execute(
+                    """
+                    SELECT id, object_key, mime_type, byte_size
+                    FROM media_assets
+                    WHERE sha256 = ?
+                    """,
+                    (derived_sha256,),
+                ).fetchone()
+                if asset is None:
+                    raise RuntimeError("Failed to register derivative media asset")
+                if (
+                    str(asset["object_key"]) != normalized_key
+                    or str(asset["mime_type"]).lower() != normalized_mime
+                    or int(asset["byte_size"]) != byte_size
+                ):
+                    raise ValueError("Existing derivative asset metadata conflicts with its digest")
+                derived_asset_id = int(asset["id"])
+
+            connection.execute(
+                """
+                INSERT INTO media_derivatives (
+                    source_asset_id, variant, transform_version, settings_json,
+                    status, derived_asset_id, width, height,
+                    last_attempted_at, last_error
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(source_asset_id, variant, transform_version, settings_json)
+                DO UPDATE SET
+                    status = excluded.status,
+                    derived_asset_id = excluded.derived_asset_id,
+                    width = excluded.width,
+                    height = excluded.height,
+                    last_attempted_at = excluded.last_attempted_at,
+                    last_error = excluded.last_error
+                """,
+                (
+                    source_asset_id,
+                    variant,
+                    transform_version,
+                    settings_json,
+                    status,
+                    derived_asset_id,
+                    width if status == "ready" else None,
+                    height if status == "ready" else None,
+                    timestamp,
+                    safe_error,
+                ),
+            )
+            row = connection.execute(
+                """
+                SELECT id FROM media_derivatives
+                WHERE source_asset_id = ? AND variant = ?
+                  AND transform_version = ? AND settings_json = ?
+                """,
+                (source_asset_id, variant, transform_version, settings_json),
+            ).fetchone()
+            if row is None:
+                raise RuntimeError("Failed to register media derivative")
+            return int(row["id"])
 
     def get_lot_media_sources(
         self,

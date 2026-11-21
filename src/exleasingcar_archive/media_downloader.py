@@ -17,6 +17,11 @@ from dotenv import load_dotenv
 from typing_extensions import Self
 
 from .database import ArchiveDatabase
+from .media_previews import (
+    MediaPreviewError,
+    MediaPreviewSettings,
+    generate_photo_previews,
+)
 from .r2_analytics import CloudflareR2Analytics, R2AnalyticsError
 from .r2_budget import R2BudgetExceeded, R2UsageBudget
 from .r2_storage import CloudflareR2Storage, R2Settings
@@ -81,6 +86,9 @@ class MediaDownloadSummary:
     reused: int
     failed: int
     bytes_downloaded: int
+    preview_uploaded: int
+    preview_reused: int
+    preview_failed: int
 
 
 class MediaDownloadError(RuntimeError):
@@ -169,6 +177,7 @@ class MediaDownloader:
         settings: MediaDownloaderSettings | None = None,
         client: httpx.Client | None = None,
         sleep: Callable[[float], None] = time.sleep,
+        preview_settings: MediaPreviewSettings | None = None,
     ) -> None:
         self.database = database
         self.storage = storage
@@ -180,6 +189,7 @@ class MediaDownloader:
         )
         self._owns_client = client is None
         self._sleep = sleep
+        self.preview_settings = preview_settings or MediaPreviewSettings()
 
     def close(self) -> None:
         if self._owns_client:
@@ -198,6 +208,7 @@ class MediaDownloader:
             include_downloaded=include_downloaded,
         )
         downloaded = uploaded = reused = failed = bytes_downloaded = 0
+        preview_uploaded = preview_reused = preview_failed = 0
 
         for source in sources:
             source_id = int(source["media_source_id"])
@@ -222,6 +233,9 @@ class MediaDownloader:
 
             downloaded += 1
             bytes_downloaded += result.byte_size
+            preview_uploaded += result.preview_uploaded
+            preview_reused += result.preview_reused
+            preview_failed += result.preview_failed
             if result.uploaded:
                 uploaded += 1
             else:
@@ -234,6 +248,9 @@ class MediaDownloader:
             reused=reused,
             failed=failed,
             bytes_downloaded=bytes_downloaded,
+            preview_uploaded=preview_uploaded,
+            preview_reused=preview_reused,
+            preview_failed=preview_failed,
         )
 
     def _download_one(
@@ -252,7 +269,7 @@ class MediaDownloader:
             content_type=media.content_type,
             sha256=media.sha256,
         )
-        self.database.register_media_asset_for_source(
+        source_asset_id = self.database.register_media_asset_for_source(
             source_id,
             sha256=media.sha256,
             object_key=object_key,
@@ -260,9 +277,148 @@ class MediaDownloader:
             byte_size=media.byte_size,
             original_filename=media.filename,
         )
+        preview_uploaded = preview_reused = preview_failed = 0
+        if media_type == "photo":
+            (
+                preview_uploaded,
+                preview_reused,
+                preview_failed,
+            ) = self._create_photo_previews(source_asset_id, media.body)
         return _DownloadedMediaResult(
             byte_size=media.byte_size,
             uploaded=uploaded,
+            preview_uploaded=preview_uploaded,
+            preview_reused=preview_reused,
+            preview_failed=preview_failed,
+        )
+
+    def _create_photo_previews(
+        self,
+        source_asset_id: int,
+        original_body: bytes,
+    ) -> tuple[int, int, int]:
+        specs = self.preview_settings.specs()
+        pending_specs = []
+        cached_ready = 0
+        for spec in specs:
+            existing = self.database.get_media_derivative(
+                source_asset_id,
+                spec.variant,
+                spec.transform_version,
+                spec.settings_json,
+            )
+            if existing is None or existing["status"] == "failed":
+                pending_specs.append(spec)
+            elif existing["status"] == "ready":
+                cached_ready += 1
+
+        if not pending_specs:
+            return (0, cached_ready, 0)
+
+        try:
+            generated = generate_photo_previews(
+                original_body,
+                settings=self.preview_settings,
+            )
+        except MediaPreviewError as exc:
+            for spec in pending_specs:
+                self.database.register_media_derivative(
+                    source_asset_id,
+                    spec.variant,
+                    spec.transform_version,
+                    spec.settings_json,
+                    status=exc.kind,
+                    error=str(exc),
+                )
+            return (0, 0, len(pending_specs))
+
+        pending_variants = {spec.variant for spec in pending_specs}
+        uploaded = failed = 0
+        reused = cached_ready
+        for preview in generated:
+            if preview.spec.variant not in pending_variants:
+                continue
+            existing_asset = self.database.get_media_asset_by_sha256(preview.sha256)
+            if existing_asset is not None:
+                expected_key = self.storage.object_key_for(preview.sha256, "photo")
+                if (
+                    int(existing_asset["byte_size"]) != len(preview.body)
+                    or str(existing_asset["mime_type"]).lower() != preview.mime_type
+                    or str(existing_asset["object_key"]) != expected_key
+                ):
+                    raise MediaDownloadError(
+                        "existing preview asset metadata conflicts with its digest"
+                    )
+                object_key = expected_key
+                reused += 1
+            else:
+                object_key = self.storage.object_key_for(preview.sha256, "photo")
+                try:
+                    self._store_preview_with_retries(
+                        preview.body,
+                        object_key=object_key,
+                        sha256=preview.sha256,
+                    )
+                except R2BudgetExceeded:
+                    raise
+                except Exception as exc:  # noqa: BLE001 - isolate derivative failures
+                    self.database.register_media_derivative(
+                        source_asset_id,
+                        preview.spec.variant,
+                        preview.spec.transform_version,
+                        preview.spec.settings_json,
+                        status="failed",
+                        error=f"preview storage failed ({type(exc).__name__})",
+                    )
+                    failed += 1
+                    continue
+                uploaded += 1
+
+            self.database.register_media_derivative(
+                source_asset_id,
+                preview.spec.variant,
+                preview.spec.transform_version,
+                preview.spec.settings_json,
+                status="ready",
+                derived_sha256=preview.sha256,
+                object_key=object_key,
+                mime_type=preview.mime_type,
+                byte_size=len(preview.body),
+                width=preview.width,
+                height=preview.height,
+            )
+
+        return (uploaded, reused, failed)
+
+    def _store_preview_with_retries(
+        self,
+        body: bytes,
+        *,
+        object_key: str,
+        sha256: str,
+    ) -> None:
+        last_error: Exception | None = None
+        for attempt in range(self.settings.max_attempts):
+            try:
+                # The database is the reuse index for derivative hashes. Avoid
+                # a separate R2 HEAD request for every generated preview.
+                self.storage.put_bytes(
+                    body,
+                    object_key=object_key,
+                    content_type="image/jpeg",
+                    expected_sha256=sha256,
+                )
+                return
+            except R2BudgetExceeded:
+                raise
+            except Exception as exc:  # noqa: BLE001 - SDK clients expose varied errors
+                last_error = exc
+                if attempt + 1 < self.settings.max_attempts:
+                    self._sleep(self.settings.backoff_seconds * (2**attempt))
+        raise MediaDownloadError(
+            "preview storage failed after "
+            f"{self.settings.max_attempts} attempts "
+            f"({type(last_error).__name__ if last_error else 'storage error'})"
         )
 
     def _fetch_with_retries(
@@ -417,12 +573,18 @@ class MediaDownloader:
 class _DownloadedMediaResult:
     byte_size: int
     uploaded: bool
+    preview_uploaded: int
+    preview_reused: int
+    preview_failed: int
 
 
 def main(argv: list[str] | None = None) -> int:
     load_dotenv()
     parser = argparse.ArgumentParser(
-        description="Download a bounded batch of discovered lot photos and PDF reports into private R2."
+        description=(
+            "Download a bounded batch of discovered lot photos and PDF reports "
+            "into private R2."
+        )
     )
     parser.add_argument("--database", default="data/fresh_api_test.sqlite3")
     parser.add_argument("--batch-size", type=int, default=20)
@@ -460,7 +622,10 @@ def main(argv: list[str] | None = None) -> int:
                 "Media batch: "
                 f"selected={summary.selected}, downloaded={summary.downloaded}, "
                 f"uploaded={summary.uploaded}, reused={summary.reused}, "
-                f"failed={summary.failed}, bytes={summary.bytes_downloaded}"
+                f"failed={summary.failed}, bytes={summary.bytes_downloaded}, "
+                f"previews_uploaded={summary.preview_uploaded}, "
+                f"previews_reused={summary.preview_reused}, "
+                f"previews_failed={summary.preview_failed}"
             )
             report = budget.report()
             print(
@@ -474,7 +639,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"R2 safety guard: {exc}")
         return 2
 
-    return 1 if summary.failed else 0
+    return 1 if summary.failed or summary.preview_failed else 0
 
 if __name__ == "__main__":
     raise SystemExit(main())

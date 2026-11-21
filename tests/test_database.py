@@ -39,6 +39,7 @@ def test_database_initialization_creates_current_schema(tmp_path):
         "media_asset_versions",
         "pdf_field_observations",
         "pdf_damage_observations",
+        "media_derivatives",
     }.issubset(tables)
 
 
@@ -897,6 +898,43 @@ def test_v11_database_migrates_pdf_damage_observations(tmp_path):
     assert lot_count == 1
     assert any(
         row[2] == "auction_lots" and row[3] == "auction_lot_id"
+        for row in foreign_keys
+    )
+    assert integrity_errors == []
+
+
+def test_v12_database_migrates_media_derivatives(tmp_path):
+    database = ArchiveDatabase(tmp_path / "legacy_v12.sqlite3")
+    database.initialize()
+    database.upsert_auction_lot("synthetic-car", "synthetic-auction", observed_at=UTC_FIRST)
+
+    with sqlite3.connect(database.path) as connection:
+        connection.execute("DROP TABLE media_derivatives")
+        connection.execute("PRAGMA user_version = 12")
+
+    database.initialize()
+
+    with sqlite3.connect(database.path) as connection:
+        version = connection.execute("PRAGMA user_version").fetchone()[0]
+        tables = {
+            row[0]
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'"
+            )
+        }
+        foreign_keys = connection.execute(
+            "PRAGMA foreign_key_list(media_derivatives)"
+        ).fetchall()
+        integrity_errors = connection.execute("PRAGMA foreign_key_check").fetchall()
+
+    assert version == SCHEMA_VERSION
+    assert "media_derivatives" in tables
+    assert any(
+        row[2] == "media_assets" and row[3] == "source_asset_id"
+        for row in foreign_keys
+    )
+    assert any(
+        row[2] == "media_assets" and row[3] == "derived_asset_id"
         for row in foreign_keys
     )
     assert integrity_errors == []
