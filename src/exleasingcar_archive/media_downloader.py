@@ -17,9 +17,9 @@ from dotenv import load_dotenv
 from typing_extensions import Self
 
 from .database import ArchiveDatabase
-from .r2_storage import CloudflareR2Storage, R2Settings
 from .r2_analytics import CloudflareR2Analytics, R2AnalyticsError
 from .r2_budget import R2BudgetExceeded, R2UsageBudget
+from .r2_storage import CloudflareR2Storage, R2Settings
 
 TRUSTED_MEDIA_HOSTS = frozenset({"data.exleasingcar.com"})
 _REDIRECT_STATUSES = frozenset({301, 302, 303, 307, 308})
@@ -401,6 +401,8 @@ class MediaDownloader:
                     expected_sha256=sha256,
                 )
                 return True
+            except R2BudgetExceeded:
+                raise
             except Exception as exc:  # noqa: BLE001 - boto3 clients expose varied SDK exceptions
                 last_error = exc
                 if attempt + 1 < self.settings.max_attempts:
