@@ -12,7 +12,6 @@ from exleasingcar_archive.pdf_fields import (
     extract_labelled_fields,
 )
 
-
 EXTRACTED_AT = datetime(2026, 11, 21, 12, 0, tzinfo=timezone.utc)
 
 
