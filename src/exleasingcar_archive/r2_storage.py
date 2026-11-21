@@ -12,6 +12,8 @@ import re
 from dataclasses import dataclass, field
 from typing import Any
 
+from .r2_budget import R2BudgetExceeded, R2UsageBudget
+
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _BUCKET_RE = re.compile(r"^[a-z0-9][a-z0-9-]{1,61}[a-z0-9]$")
 _ALLOWED_MEDIA_TYPES = frozenset(
@@ -76,8 +78,17 @@ class R2Settings:
 class CloudflareR2Storage:
     """Small S3-compatible adapter; it deliberately has no public-ACL methods."""
 
-    def __init__(self, settings: R2Settings, client: Any | None = None) -> None:
+    def __init__(
+        self,
+        settings: R2Settings,
+        client: Any | None = None,
+        *,
+        budget: R2UsageBudget,
+    ) -> None:
+        if not isinstance(budget, R2UsageBudget):
+            raise TypeError("budget must be an R2UsageBudget instance")
         self.settings = settings
+        self._budget = budget
         if client is None:
             try:
                 import boto3
@@ -148,6 +159,7 @@ class CloudflareR2Storage:
         if normalized_key.rsplit("/", 1)[-1] != digest:
             raise ValueError("Payload SHA-256 does not match object key")
 
+        self._budget.reserve_put(normalized_key, len(body))
         self._client.put_object(
             Bucket=self.settings.bucket_name,
             Key=normalized_key,
@@ -161,6 +173,7 @@ class CloudflareR2Storage:
     def object_exists(self, object_key: str) -> bool:
         """Check whether an object exists without downloading its contents."""
         normalized_key = self.validate_object_key(object_key)
+        self._budget.reserve_operation("class_b")
         try:
             self._client.head_object(
                 Bucket=self.settings.bucket_name,
@@ -186,7 +199,15 @@ class CloudflareR2Storage:
         *,
         expires_in_seconds: int = 300,
     ) -> str:
-        """Create an object-specific temporary URL; never persist the result."""
+        """Direct presigned reads are disabled until reads can be metered.
+
+        A browser can reuse a presigned URL without passing through this
+        process, so counting URL creation would not safely count R2 GETs.
+        Media must be served through a guarded application-side read path.
+        """
+        raise R2BudgetExceeded(
+            "Direct presigned R2 reads are disabled by the free-tier guard"
+        )
         normalized_key = self.validate_object_key(object_key)
         if (
             isinstance(expires_in_seconds, bool)
