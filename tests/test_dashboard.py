@@ -1,4 +1,5 @@
 import sqlite3
+from datetime import datetime, timezone
 from decimal import Decimal
 
 from exleasingcar_archive.dashboard import PAGE, DashboardHandler
@@ -554,3 +555,308 @@ def test_dashboard_displays_eur_and_api_check_freshness():
     assert "Мин. цена продавца (€)" in PAGE
     assert "Проверка API" in PAGE
     assert "const moneyCell" in PAGE
+
+
+
+def test_dashboard_selected_lot_isolates_prices_reports_and_relistings(tmp_path):
+    database = ArchiveDatabase(tmp_path / "dashboard-lot-detail.sqlite3")
+    database.initialize()
+    database.upsert_vehicle(
+        "car-detail",
+        make="Audi",
+        model="A6",
+        displayed_title="Audi A6 3.0 TDI",
+        chassis_number_fragment="WAUZZZ",
+        chassis_number_masked=True,
+        location_text="DE-04509, Germany",
+    )
+    database.upsert_auction(
+        "auction-old",
+        source_auction_name="Old auction",
+        source_auction_country_name="Germany",
+    )
+    database.upsert_auction(
+        "auction-current",
+        source_auction_name="Current auction",
+        source_auction_country_name="Belgium",
+    )
+    old_lot = database.upsert_auction_lot(
+        "car-detail",
+        "auction-old",
+        mileage_km=118000,
+        displayed_lot_reference="OLD-LOT",
+    )
+    current_lot = database.upsert_auction_lot(
+        "car-detail",
+        "auction-current",
+        mileage_km=132000,
+        displayed_lot_reference="CURRENT-LOT",
+    )
+    database.upsert_vehicle("other-car", displayed_title="BMW 530d")
+    database.upsert_auction_lot("other-car", "auction-other")
+
+    first_seen = datetime(2026, 1, 1, 10, 0, tzinfo=timezone.utc)
+    last_change = datetime(2026, 1, 3, 10, 0, tzinfo=timezone.utc)
+    last_check = datetime(2026, 1, 3, 10, 5, tzinfo=timezone.utc)
+    database.record_price_observation(
+        "car-detail",
+        Decimal(9000),
+        first_seen,
+        exleasingcar_auction_id="auction-current",
+    )
+    database.record_price_observation(
+        "car-detail",
+        Decimal(0),
+        last_change,
+        exleasingcar_auction_id="auction-current",
+    )
+    database.record_price_observation(
+        "car-detail",
+        Decimal(7500),
+        first_seen,
+        exleasingcar_auction_id="auction-old",
+    )
+    database.record_price_observation(
+        "other-car",
+        Decimal(18000),
+        last_change,
+        exleasingcar_auction_id="auction-other",
+    )
+    database.record_price_reference_observation(
+        "car-detail",
+        minimum_price=Decimal(6000),
+        observed_at=first_seen,
+        source="seller_minimum",
+        exleasingcar_auction_id="auction-current",
+    )
+    database.record_price_reference_observation(
+        "car-detail",
+        indicative_price=Decimal(7000),
+        observed_at=last_change,
+        source="seller_indicative",
+        exleasingcar_auction_id="auction-current",
+    )
+    database.record_lot_price_observation(
+        "car-detail",
+        PriceObservation(
+            price_type=PriceType.DISPLAYED_AUCTION_PRICE,
+            amount=Decimal(5000),
+            currency="EUR",
+            raw_text="€ 5,000",
+            source_field=".auction-price",
+        ),
+        observed_at=last_change,
+        exleasingcar_auction_id="auction-current",
+        sale_type=SaleType.OPEN_AUCTION,
+    )
+    database.record_lot_price_observation(
+        "car-detail",
+        PriceObservation(
+            price_type=PriceType.FIXED_PRICE,
+            amount=Decimal(8500),
+            currency="EUR",
+            raw_text="Buy now € 8,500",
+            source_field=".buy-offer",
+        ),
+        observed_at=last_change,
+        exleasingcar_auction_id="auction-current",
+        sale_type=SaleType.OPEN_AUCTION,
+    )
+    with sqlite3.connect(database.path) as connection:
+        connection.execute(
+            "UPDATE auction_lots SET last_api_checked_at = ? WHERE id = ?",
+            (last_check.isoformat(), current_lot),
+        )
+        connection.execute(
+            "UPDATE auction_lots SET last_api_checked_at = ? WHERE id = ?",
+            (first_seen.isoformat(), old_lot),
+        )
+
+    database.upsert_lot_media_source(
+        "car-detail",
+        "auction-current",
+        "photo",
+        "https://data.exleasingcar.com/photos/car-detail-1.jpg",
+        preview_url="https://data.exleasingcar.com/photos/car-detail-1-small.jpg",
+        source_order=0,
+    )
+    database.upsert_lot_media_source(
+        "car-detail",
+        "auction-current",
+        "report",
+        "https://data.exleasingcar.com/reports/inspection-a.pdf",
+        label="Inspection report",
+        source_order=0,
+    )
+    database.upsert_lot_media_source(
+        "car-detail",
+        "auction-current",
+        "report",
+        "https://data.exleasingcar.com/reports/damage-b.pdf",
+        label="Damage report",
+        source_order=1,
+    )
+    database.upsert_lot_media_source(
+        "car-detail",
+        "auction-old",
+        "report",
+        "https://data.exleasingcar.com/reports/old-lot.pdf",
+        label="Old lot report",
+    )
+
+    with sqlite3.connect(database.path) as connection:
+        connection.execute(
+            """
+            INSERT INTO pdf_field_observations (
+                report_sha256, source_lot_id, auction_lot_id, page_number,
+                field_key, source_label, raw_text, normalized_text, state,
+                parser_name, parser_version, extracted_at
+            ) VALUES (?, ?, ?, 2, ?, ?, ?, ?, 'value', ?, ?, ?)
+            """,
+            (
+                "a" * 64,
+                "source-lot-current",
+                current_lot,
+                "paint_colour",
+                "Colour",
+                "Grey metallic",
+                "Grey metallic",
+                "synthetic-parser",
+                "1.0",
+                last_change.isoformat(),
+            ),
+        )
+        connection.execute(
+            """
+            INSERT INTO pdf_damage_observations (
+                report_sha256, source_lot_id, auction_lot_id, item_number,
+                category, component, damage_description, page_number,
+                parser_name, parser_version, extracted_at
+            ) VALUES (?, ?, ?, 1, ?, ?, ?, 4, ?, ?, ?)
+            """,
+            (
+                "a" * 64,
+                "source-lot-current",
+                current_lot,
+                "Body",
+                "Front bumper",
+                "Scratch",
+                "synthetic-parser",
+                "1.0",
+                last_change.isoformat(),
+            ),
+        )
+
+    handler = object.__new__(DashboardHandler)
+    handler.database_path = database.path
+    before = database.path.stat().st_size
+    payload = handler._load_data(selected_lot_id=current_lot)
+
+    assert payload["selected_lot"]["lot_id"] == current_lot
+    assert payload["selected_lot"]["auction_id"] == "auction-current"
+    assert payload["selected_lot"]["displayed_lot_reference"] == "CURRENT-LOT"
+    assert payload["selected_vehicle"]["chassis_number"] is None
+    assert payload["selected_vehicle"]["chassis_number_fragment"] == "WAUZZZ"
+
+    # An explicit zero remains a value and is not replaced by a missing-value marker.
+    assert payload["lot_prices_summary"]["highest_offer"]["amount"] == "0"
+    assert payload["lot_prices_summary"]["highest_offer"]["observed_at"] == (
+        "2026-01-03T10:00:00.000000Z"
+    )
+    assert payload["selected_lot"]["last_api_checked_at"] == last_check.isoformat()
+    assert payload["lot_prices_summary"]["minimum_price"]["amount"] == "6000"
+    assert payload["lot_prices_summary"]["minimum_price"]["source"] == "seller_minimum"
+    assert payload["lot_prices_summary"]["minimum_price"]["observed_at"] == (
+        "2026-01-01T10:00:00.000000Z"
+    )
+    assert payload["lot_prices_summary"]["indicative_price"]["amount"] == "7000"
+    assert payload["lot_prices_summary"]["indicative_price"]["source"] == "seller_indicative"
+    assert payload["lot_prices_summary"]["indicative_price"]["observed_at"] == (
+        "2026-01-03T10:00:00.000000Z"
+    )
+    assert payload["lot_prices_summary"]["displayed_auction_price"]["amount"] == "5000"
+    assert payload["lot_prices_summary"]["fixed_price"]["amount"] == "8500"
+
+    assert len(payload["bids"]) == 2
+    assert {row["auction_id"] for row in payload["bids"]} == {"auction-current"}
+    assert len(payload["references"]) == 2
+    assert len(payload["lot_prices"]) == 2
+    assert len(payload["other_lots"]) == 1
+    assert payload["other_lots"][0]["lot_id"] == old_lot
+    assert payload["other_lots"][0]["auction_id"] == "auction-old"
+
+    assert len(payload["media"]) == 3
+    photo = next(item for item in payload["media"] if item["media_type"] == "photo")
+    reports = [item for item in payload["media"] if item["media_type"] == "report"]
+    assert photo["preview_source_url"].endswith("-small.jpg")
+    assert len(reports) == 2
+    assert {item["label"] for item in reports} == {"Inspection report", "Damage report"}
+    assert len(payload["pdf_fields"]) == 1
+    assert payload["pdf_fields"][0]["field_key"] == "paint_colour"
+    assert len(payload["pdf_damages"]) == 1
+    assert payload["pdf_damages"][0]["component"] == "Front bumper"
+
+    # The browser payload never contains private storage keys or signed URLs.
+    payload_text = str(payload)
+    assert "object_key" not in payload_text
+    assert "presigned" not in payload_text.lower()
+    assert database.path.stat().st_size == before
+
+
+def test_dashboard_selected_lot_keeps_missing_price_distinct_from_zero(tmp_path):
+    database = ArchiveDatabase(tmp_path / "dashboard-lot-missing-price.sqlite3")
+    database.initialize()
+    no_price_lot = database.upsert_auction_lot("car-no-price", "auction-no-price")
+    database.upsert_vehicle("car-zero-price", displayed_title="Audi A4")
+    zero_lot = database.upsert_auction_lot("car-zero-price", "auction-zero-price")
+    database.record_price_observation(
+        "car-zero-price",
+        Decimal(0),
+        datetime(2026, 2, 1, tzinfo=timezone.utc),
+        exleasingcar_auction_id="auction-zero-price",
+    )
+
+    handler = object.__new__(DashboardHandler)
+    handler.database_path = database.path
+    missing = handler._load_data(selected_lot_id=no_price_lot)
+    zero = handler._load_data(selected_lot_id=zero_lot)
+
+    assert missing["lot_prices_summary"]["highest_offer"]["amount"] is None
+    assert zero["lot_prices_summary"]["highest_offer"]["amount"] == "0"
+    assert missing["bids"] == []
+    assert len(zero["bids"]) == 1
+
+
+def test_dashboard_selected_lot_handles_empty_media_and_invalid_external_links(tmp_path):
+    database = ArchiveDatabase(tmp_path / "dashboard-lot-empty-media.sqlite3")
+    database.initialize()
+    lot_id = database.upsert_auction_lot("car-empty", "auction-empty")
+    database.upsert_lot_media_source(
+        "car-empty",
+        "auction-empty",
+        "photo",
+        "https://data.exleasingcar.com/photos/photo.jpg?token=do-not-expose",
+        preview_url="https://data.exleasingcar.com/photos/preview.jpg?token=do-not-expose",
+    )
+
+    handler = object.__new__(DashboardHandler)
+    handler.database_path = database.path
+    payload = handler._load_data(selected_lot_id=lot_id)
+
+    assert len(payload["media"]) == 1
+    assert payload["media"][0]["source_link_url"] is None
+    assert payload["media"][0]["preview_source_url"] is None
+    assert payload["pdf_fields"] == []
+    assert payload["pdf_damages"] == []
+
+
+def test_dashboard_page_includes_release_version_and_lot_detail_sections():
+    from exleasingcar_archive.dashboard import PAGE
+    from exleasingcar_archive.version import APP_VERSION
+
+    assert APP_VERSION == "0.3.0"
+    assert "__APP_VERSION__" in PAGE
+    assert "function renderLotCard(" in PAGE
+    assert "Фотографии" in PAGE
+    assert "PDF-отчёты" in PAGE
+    assert "Другие аукционные лоты этой машины" in PAGE
