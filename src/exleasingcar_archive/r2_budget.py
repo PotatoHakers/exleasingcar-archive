@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import os
 import sqlite3
+from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
-from collections.abc import Iterator
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Literal
@@ -85,7 +85,20 @@ class R2UsageBudget:
         self.database_path = str(database_path)
         self.snapshot = snapshot
         self.limits = limits or R2BudgetLimits()
-        if self.database_path != ":memory:":
+        self._database_target = self.database_path
+        self._use_uri = False
+        self._memory_anchor: sqlite3.Connection | None = None
+        if self.database_path == ":memory:":
+            self._database_target = (
+                f"file:r2_budget_{id(self)}?mode=memory&cache=shared"
+            )
+            self._use_uri = True
+            self._memory_anchor = sqlite3.connect(
+                self._database_target,
+                uri=True,
+                timeout=30,
+            )
+        else:
             Path(self.database_path).parent.mkdir(parents=True, exist_ok=True)
         self._initialize()
 
@@ -128,7 +141,11 @@ class R2UsageBudget:
 
     @contextmanager
     def _connection(self) -> Iterator[sqlite3.Connection]:
-        connection = sqlite3.connect(self.database_path, timeout=30)
+        connection = sqlite3.connect(
+            self._database_target,
+            uri=self._use_uri,
+            timeout=30,
+        )
         connection.row_factory = sqlite3.Row
         try:
             yield connection
