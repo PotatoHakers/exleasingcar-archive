@@ -208,8 +208,20 @@ class R2UsageBudget:
                 (increment_a, increment_b, hour),
             )
             local_a, local_b = self._counts(connection, start)
+            local_storage_row = connection.execute(
+                "SELECT COALESCE(SUM(byte_size), 0) AS total FROM r2_object_reservations"
+            ).fetchone()
+            effective_storage = max(
+                int(local_storage_row["total"]),
+                self.snapshot.storage_peak_bytes,
+            )
             effective_a = max(local_a, self.snapshot.class_a_requests)
             effective_b = max(local_b, self.snapshot.class_b_requests)
+            if effective_storage >= self.limits.storage_bytes:
+                connection.rollback()
+                raise R2BudgetExceeded(
+                    "R2 storage safety budget reached; no R2 request was sent"
+                )
             if effective_a > self.limits.class_a_requests:
                 connection.rollback()
                 raise R2BudgetExceeded(
@@ -276,23 +288,26 @@ class R2UsageBudget:
                     "R2 Class B safety budget reached; upload was not sent"
                 )
 
-            if existing is None:
-                row = connection.execute(
-                    """
-                    SELECT COALESCE(SUM(byte_size), 0) AS reserved_bytes
-                    FROM r2_object_reservations
-                    """
-                ).fetchone()
-                local_storage = int(row["reserved_bytes"])
-                effective_storage = max(
-                    local_storage,
-                    self.snapshot.storage_peak_bytes,
+            row = connection.execute(
+                """
+                SELECT COALESCE(SUM(byte_size), 0) AS reserved_bytes
+                FROM r2_object_reservations
+                """
+            ).fetchone()
+            local_storage = int(row["reserved_bytes"])
+            effective_storage = max(
+                local_storage,
+                self.snapshot.storage_peak_bytes,
+            )
+            proposed_storage = effective_storage + (
+                byte_size if existing is None else 0
+            )
+            if proposed_storage > self.limits.storage_bytes:
+                connection.rollback()
+                raise R2BudgetExceeded(
+                    "R2 storage safety budget reached; upload was not sent"
                 )
-                if effective_storage + byte_size > self.limits.storage_bytes:
-                    connection.rollback()
-                    raise R2BudgetExceeded(
-                        "R2 storage safety budget reached; upload was not sent"
-                    )
+            if existing is None:
                 connection.execute(
                     """
                     INSERT INTO r2_object_reservations (
@@ -303,6 +318,18 @@ class R2UsageBudget:
                 )
             connection.commit()
 
+    def ensure_available(self) -> None:
+        """Fail before a batch starts when any safety threshold is exhausted."""
+        report = self.report()
+        exhausted = (
+            report["class_a_used"] >= self.limits.class_a_requests
+            or report["class_b_used"] >= self.limits.class_b_requests
+            or report["storage_used_bytes"] >= self.limits.storage_bytes
+        )
+        if exhausted:
+            raise R2BudgetExceeded(
+                "An R2 safety threshold is already exhausted; no batch was started"
+            )
     def report(self) -> dict[str, int]:
         """Return conservative effective usage without exposing credentials."""
         now = self._now()
