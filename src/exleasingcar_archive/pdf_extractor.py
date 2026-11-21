@@ -6,10 +6,11 @@ This module deliberately does not download, persist, render, or OCR PDF files.
 from __future__ import annotations
 
 import hashlib
-import pypdf
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from io import BytesIO
+
+import pypdf
 
 
 DEFAULT_MAX_PDF_BYTES = 100 * 1024 * 1024
