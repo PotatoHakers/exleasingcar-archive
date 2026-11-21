@@ -61,6 +61,7 @@ PYTHONPATH=src python -m exleasingcar_archive.r2_budget_report
 Команда только читает Cloudflare Analytics и локальный журнал; она не делает запросов к R2 bucket. Она должна завершиться статусом `READY`. Если аналитика недоступна или устарела, загрузчик блокируется.
 
 Только после успешного отчёта можно запускать ограниченный прогон:
+Прогон R2:
 
 ```bash
 PYTHONPATH=src python -m exleasingcar_archive.media_downloader \
