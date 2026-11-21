@@ -363,7 +363,7 @@ def test_r2_failure_is_retried_without_losing_the_download(tmp_path):
     retry_budget = storage._budget.report()
     assert retry_budget["class_a_used"] == 2
     assert retry_budget["class_b_used"] == 2
-    assert retry_budget["storage_used_bytes"] == len(b"\\xff\\xd8\\xffsynthetic-jpeg")
+    assert retry_budget["storage_used_bytes"] == len(_photo_response().content)
     client.close()
 
 
