@@ -11,6 +11,7 @@ from exleasingcar_archive.media_downloader import (
     MediaDownloaderSettings,
 )
 from exleasingcar_archive.r2_storage import CloudflareR2Storage, R2Settings
+from exleasingcar_archive.r2_budget import R2UsageBudget, R2UsageSnapshot
 
 
 class _ChunkStream(httpx.SyncByteStream):
@@ -75,6 +76,9 @@ def _storage(client=None):
             secret_access_key="test-secret",
         ),
         client=r2_client,
+        budget=R2UsageBudget(
+            ":memory:", snapshot=R2UsageSnapshot(0, 0, 0)
+        ),
     )
     return storage, r2_client
 
