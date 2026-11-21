@@ -265,19 +265,24 @@ def test_real_budget_configuration_rejects_an_in_memory_ledger():
 
 
 def test_account_snapshot_and_local_reservations_are_added_conservatively(tmp_path):
-    budget = _budget(
-        tmp_path,
-        class_a=5,
+    operation_budget = _budget(
+        tmp_path / "operations",
+        class_a=3,
         class_b=10,
         storage=10,
-        snapshot=R2UsageSnapshot(2, 0, 4),
+        snapshot=R2UsageSnapshot(2, 0, 0),
     )
-
-    budget.reserve_operation("class_a")
-    assert budget.report()["class_a_used"] == 3
-
+    operation_budget.reserve_operation("class_a")
+    assert operation_budget.report()["class_a_used"] == 3
     with pytest.raises(R2BudgetExceeded, match="Class A"):
-        budget.reserve_operation("class_a")
+        operation_budget.reserve_operation("class_a")
 
+    storage_budget = _budget(
+        tmp_path / "storage",
+        class_a=10,
+        class_b=10,
+        storage=10,
+        snapshot=R2UsageSnapshot(0, 0, 4),
+    )
     with pytest.raises(R2BudgetExceeded, match="storage"):
-        budget.reserve_put("archive/new-object", 7)
+        storage_budget.reserve_put("archive/new-object", 7)
