@@ -244,12 +244,14 @@ class R2UsageBudget:
             local_storage_row = connection.execute(
                 "SELECT COALESCE(SUM(byte_size), 0) AS total FROM r2_object_reservations"
             ).fetchone()
-            effective_storage = max(
-                int(local_storage_row["total"]),
-                self.snapshot.storage_peak_bytes,
+            # Add local reservations to account analytics rather than taking
+            # the maximum: the analytics snapshot may lag recent operations.
+            # This can overcount, but it cannot create artificial headroom.
+            effective_storage = (
+                int(local_storage_row["total"]) + self.snapshot.storage_peak_bytes
             )
-            effective_a = max(local_a, self.snapshot.class_a_requests)
-            effective_b = max(local_b, self.snapshot.class_b_requests)
+            effective_a = local_a + self.snapshot.class_a_requests
+            effective_b = local_b + self.snapshot.class_b_requests
             if effective_storage >= self.limits.storage_bytes:
                 connection.rollback()
                 raise R2BudgetExceeded(
@@ -310,12 +312,12 @@ class R2UsageBudget:
                 (hour,),
             )
             local_a, local_b = self._counts(connection, start)
-            if max(local_a, self.snapshot.class_a_requests) > self.limits.class_a_requests:
+            if local_a + self.snapshot.class_a_requests > self.limits.class_a_requests:
                 connection.rollback()
                 raise R2BudgetExceeded(
                     "R2 Class A safety budget reached; upload was not sent"
                 )
-            if max(local_b, self.snapshot.class_b_requests) > self.limits.class_b_requests:
+            if local_b + self.snapshot.class_b_requests > self.limits.class_b_requests:
                 connection.rollback()
                 raise R2BudgetExceeded(
                     "R2 Class B safety budget reached; upload was not sent"
@@ -328,10 +330,7 @@ class R2UsageBudget:
                 """
             ).fetchone()
             local_storage = int(row["reserved_bytes"])
-            effective_storage = max(
-                local_storage,
-                self.snapshot.storage_peak_bytes,
-            )
+            effective_storage = local_storage + self.snapshot.storage_peak_bytes
             proposed_storage = effective_storage + (
                 byte_size if existing is None else 0
             )
@@ -376,11 +375,10 @@ class R2UsageBudget:
                 FROM r2_object_reservations
                 """
             ).fetchone()
-        effective_a = max(local_a, self.snapshot.class_a_requests)
-        effective_b = max(local_b, self.snapshot.class_b_requests)
-        effective_storage = max(
-            int(row["reserved_bytes"]),
-            self.snapshot.storage_peak_bytes,
+        effective_a = local_a + self.snapshot.class_a_requests
+        effective_b = local_b + self.snapshot.class_b_requests
+        effective_storage = (
+            int(row["reserved_bytes"]) + self.snapshot.storage_peak_bytes
         )
         return {
             "class_a_used": effective_a,
