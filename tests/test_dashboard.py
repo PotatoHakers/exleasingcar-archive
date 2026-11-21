@@ -811,7 +811,7 @@ def test_dashboard_selected_lot_keeps_missing_price_distinct_from_zero(tmp_path)
     zero_lot = database.upsert_auction_lot("car-zero-price", "auction-zero-price")
     database.record_price_observation(
         "car-zero-price",
-        Decimal("0"),
+        Decimal(0),
         datetime(2026, 2, 1, tzinfo=timezone.utc),
         exleasingcar_auction_id="auction-zero-price",
     )
