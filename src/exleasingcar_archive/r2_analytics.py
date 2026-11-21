@@ -187,19 +187,24 @@ class CloudflareR2Analytics:
                     class_b += requests
 
             bucket_peaks: dict[str, int] = {}
-            latest_storage_metric: datetime | None = None
-            for index, row in enumerate(storage_rows):
+            bucket_latest_metrics: dict[str, datetime] = {}
+            for row in storage_rows:
                 dimensions = row.get("dimensions") or {}
-                bucket_name = str(dimensions.get("bucketName") or f"unknown-{index}")
+                bucket_name = dimensions.get("bucketName")
                 metric_time = dimensions.get("datetime")
-                if metric_time:
-                    parsed_time = datetime.fromisoformat(
-                        str(metric_time).replace("Z", "+00:00")
-                    )
-                    if parsed_time.tzinfo is None:
-                        parsed_time = parsed_time.replace(tzinfo=timezone.utc)
-                    if latest_storage_metric is None or parsed_time > latest_storage_metric:
-                        latest_storage_metric = parsed_time
+                if not isinstance(bucket_name, str) or not bucket_name:
+                    raise ValueError("storage analytics row has no bucket name")
+                if not isinstance(metric_time, str) or not metric_time:
+                    raise ValueError("storage analytics row has no timestamp")
+                parsed_time = datetime.fromisoformat(
+                    metric_time.replace("Z", "+00:00")
+                )
+                if parsed_time.tzinfo is None:
+                    parsed_time = parsed_time.replace(tzinfo=timezone.utc)
+                previous_time = bucket_latest_metrics.get(bucket_name)
+                if previous_time is None or parsed_time > previous_time:
+                    bucket_latest_metrics[bucket_name] = parsed_time
+
                 maximum = row.get("max") or {}
                 payload_size = int(maximum.get("payloadSize") or 0)
                 metadata_size = int(maximum.get("metadataSize") or 0)
@@ -210,14 +215,12 @@ class CloudflareR2Analytics:
                     payload_size + metadata_size,
                 )
 
-            if latest_storage_metric is None:
-                raise R2AnalyticsError(
-                    "Cloudflare returned storage metrics without timestamps; R2 activity is blocked"
-                )
-            if now - latest_storage_metric > _MAX_STORAGE_METRIC_AGE:
-                raise R2AnalyticsError(
-                    "R2 storage analytics is older than 72 hours; R2 activity is blocked"
-                )
+            for bucket_name, latest_metric in bucket_latest_metrics.items():
+                if now - latest_metric > _MAX_STORAGE_METRIC_AGE:
+                    raise R2AnalyticsError(
+                        f"R2 storage analytics for bucket {bucket_name!r} is "
+                        "older than 72 hours; R2 activity is blocked"
+                    )
             return R2UsageSnapshot(
                 class_a_requests=class_a,
                 class_b_requests=class_b,
