@@ -137,9 +137,11 @@ def test_analytics_failure_is_not_treated_as_zero_usage():
             lambda request: httpx.Response(403, json={"errors": ["forbidden"]})
         )
     )
-    with CloudflareR2Analytics("a" * 32, "read-only-token", client=client) as analytics:
-        with pytest.raises(R2AnalyticsError, match="unavailable"):
-            analytics.fetch_usage()
+    with (
+        CloudflareR2Analytics("a" * 32, "read-only-token", client=client) as analytics,
+        pytest.raises(R2AnalyticsError, match="unavailable"),
+    ):
+        analytics.fetch_usage()
     client.close()
 
 
@@ -204,9 +206,11 @@ def test_account_analytics_with_no_storage_metrics_fails_closed():
             lambda request: httpx.Response(200, json=payload)
         )
     )
-    with CloudflareR2Analytics("a" * 32, "read-only-token", client=client) as analytics:
-        with pytest.raises(R2AnalyticsError, match="no R2 storage metrics"):
-            analytics.fetch_usage()
+    with (
+        CloudflareR2Analytics("a" * 32, "read-only-token", client=client) as analytics,
+        pytest.raises(R2AnalyticsError, match="no R2 storage metrics"),
+    ):
+        analytics.fetch_usage()
     client.close()
 
 
@@ -241,9 +245,11 @@ def test_stale_storage_analytics_fails_closed():
             lambda request: httpx.Response(200, json=payload)
         )
     )
-    with CloudflareR2Analytics("a" * 32, "read-only-token", client=client) as analytics:
-        with pytest.raises(R2AnalyticsError, match="older than 72 hours"):
-            analytics.fetch_usage()
+    with (
+        CloudflareR2Analytics("a" * 32, "read-only-token", client=client) as analytics,
+        pytest.raises(R2AnalyticsError, match="older than 72 hours"),
+    ):
+        analytics.fetch_usage()
     client.close()
 
 
