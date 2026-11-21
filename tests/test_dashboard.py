@@ -761,18 +761,18 @@ def test_dashboard_selected_lot_isolates_prices_reports_and_relistings(tmp_path)
     # An explicit zero remains a value and is not replaced by a missing-value marker.
     assert payload["lot_prices_summary"]["highest_offer"]["amount"] == "0"
     assert payload["lot_prices_summary"]["highest_offer"]["observed_at"] == (
-        "2026-01-03T10:00:00Z"
+        "2026-01-03T10:00:00.000000Z"
     )
     assert payload["selected_lot"]["last_api_checked_at"] == last_check.isoformat()
     assert payload["lot_prices_summary"]["minimum_price"]["amount"] == "6000"
     assert payload["lot_prices_summary"]["minimum_price"]["source"] == "seller_minimum"
     assert payload["lot_prices_summary"]["minimum_price"]["observed_at"] == (
-        "2026-01-01T10:00:00Z"
+        "2026-01-01T10:00:00.000000Z"
     )
     assert payload["lot_prices_summary"]["indicative_price"]["amount"] == "7000"
     assert payload["lot_prices_summary"]["indicative_price"]["source"] == "seller_indicative"
     assert payload["lot_prices_summary"]["indicative_price"]["observed_at"] == (
-        "2026-01-03T10:00:00Z"
+        "2026-01-03T10:00:00.000000Z"
     )
     assert payload["lot_prices_summary"]["displayed_auction_price"]["amount"] == "5000"
     assert payload["lot_prices_summary"]["fixed_price"]["amount"] == "8500"
