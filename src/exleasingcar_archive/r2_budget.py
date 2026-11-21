@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import os
 import sqlite3
+from contextlib import contextmanager
 from dataclasses import dataclass
+from collections.abc import Iterator
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Literal
@@ -124,13 +126,21 @@ class R2UsageBudget:
         )
         return cls(path, snapshot=snapshot, limits=limits)
 
-    def _connect(self) -> sqlite3.Connection:
+    @contextmanager
+    def _connection(self) -> Iterator[sqlite3.Connection]:
         connection = sqlite3.connect(self.database_path, timeout=30)
         connection.row_factory = sqlite3.Row
-        return connection
+        try:
+            yield connection
+            connection.commit()
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
 
     def _initialize(self) -> None:
-        with self._connect() as connection:
+        with self._connection() as connection:
             connection.execute(
                 """
                 CREATE TABLE IF NOT EXISTS r2_usage_hourly (
@@ -185,10 +195,12 @@ class R2UsageBudget:
         now = self._now()
         hour = self._hour_key(now)
         start = self._window_start(now)
+        if operation_class not in {"class_a", "class_b", "unknown"}:
+            operation_class = "unknown"
         increment_a = int(operation_class in {"class_a", "unknown"})
         increment_b = int(operation_class in {"class_b", "unknown"})
 
-        with self._connect() as connection:
+        with self._connection() as connection:
             connection.execute("BEGIN IMMEDIATE")
             connection.execute(
                 """
@@ -246,7 +258,7 @@ class R2UsageBudget:
         start = self._window_start(now)
         reserved_at = now.isoformat()
 
-        with self._connect() as connection:
+        with self._connection() as connection:
             connection.execute("BEGIN IMMEDIATE")
             existing = connection.execute(
                 """
@@ -330,11 +342,12 @@ class R2UsageBudget:
             raise R2BudgetExceeded(
                 "An R2 safety threshold is already exhausted; no batch was started"
             )
+
     def report(self) -> dict[str, int]:
         """Return conservative effective usage without exposing credentials."""
         now = self._now()
         start = self._window_start(now)
-        with self._connect() as connection:
+        with self._connection() as connection:
             local_a, local_b = self._counts(connection, start)
             row = connection.execute(
                 """
