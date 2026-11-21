@@ -8,6 +8,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import httpx
+from typing_extensions import Self
 
 from .r2_budget import R2UsageSnapshot
 
@@ -118,7 +119,7 @@ class CloudflareR2Analytics:
         if self._owns_client:
             self._client.close()
 
-    def __enter__(self) -> CloudflareR2Analytics:
+    def __enter__(self) -> Self:
         return self
 
     def __exit__(self, exc_type: object, exc: object, traceback: object) -> None:
