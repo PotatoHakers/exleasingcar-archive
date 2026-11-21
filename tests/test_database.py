@@ -37,6 +37,7 @@ def test_database_initialization_creates_current_schema(tmp_path):
         "media_assets",
         "lot_media_sources",
         "media_asset_versions",
+        "pdf_field_observations",
     }.issubset(tables)
 
 
@@ -495,7 +496,7 @@ def test_v5_database_migrates_to_v8_without_losing_auction_rows(tmp_path):
             """
         ).fetchone()[0]
 
-    assert version == 10
+    assert version == SCHEMA_VERSION
     assert auction == ("210547", "BCA DE 3.3")
     assert marker_table == 1
 
@@ -556,7 +557,7 @@ def test_v6_database_migrates_to_v9_and_preserves_existing_lots(tmp_path):
         }
         lot_count = connection.execute("SELECT COUNT(*) FROM auction_lots").fetchone()[0]
 
-    assert version == 10
+    assert version == SCHEMA_VERSION
     assert "last_detail_checked_at" in columns
     assert "last_detail_attempted_at" in columns
     assert "last_api_checked_at" in columns
@@ -590,7 +591,7 @@ def test_v7_database_migrates_api_check_timestamp_without_losing_lot_history(tmp
             """
         ).fetchone()
 
-    assert version == 10
+    assert version == SCHEMA_VERSION
     assert "last_api_checked_at" in columns
     assert lot == (
         UTC_SECOND.isoformat(timespec="microseconds").replace("+00:00", "Z"),
@@ -657,7 +658,7 @@ def test_v8_migration_backfills_eur_on_all_price_observations(tmp_path):
             "SELECT currency FROM lot_price_observations"
         ).fetchone()[0]
 
-    assert version == 10
+    assert version == SCHEMA_VERSION
     assert api_currency == "EUR"
     assert reference_currency == "EUR"
     assert lot_price_currency == "EUR"
@@ -689,7 +690,7 @@ def test_v9_database_migrates_lot_media_registry_without_losing_lots(tmp_path):
             )
         }
 
-    assert version == 10
+    assert version == SCHEMA_VERSION
     assert lot_count == 1
     assert {
         "media_assets",
@@ -833,3 +834,38 @@ def test_media_registry_rejects_untrusted_urls_and_unsafe_object_keys(tmp_path):
             mime_type="application/pdf",
             byte_size=100,
         )
+
+
+def test_v10_database_migrates_pdf_field_observation_storage(tmp_path):
+    database = ArchiveDatabase(tmp_path / "legacy_v10.sqlite3")
+    database.initialize()
+    database.upsert_auction_lot("car-1", "auction-1", observed_at=UTC_FIRST)
+
+    with sqlite3.connect(database.path) as connection:
+        connection.execute("DROP TABLE pdf_field_observations")
+        connection.execute("PRAGMA user_version = 10")
+
+    database.initialize()
+
+    with sqlite3.connect(database.path) as connection:
+        version = connection.execute("PRAGMA user_version").fetchone()[0]
+        lot_count = connection.execute("SELECT COUNT(*) FROM auction_lots").fetchone()[0]
+        tables = {
+            row[0]
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'"
+            )
+        }
+        foreign_keys = connection.execute(
+            "PRAGMA foreign_key_list(pdf_field_observations)"
+        ).fetchall()
+        integrity_errors = connection.execute("PRAGMA foreign_key_check").fetchall()
+
+    assert version == SCHEMA_VERSION
+    assert lot_count == 1
+    assert "pdf_field_observations" in tables
+    assert any(
+        row[2] == "auction_lots" and row[3] == "auction_lot_id"
+        for row in foreign_keys
+    )
+    assert integrity_errors == []
