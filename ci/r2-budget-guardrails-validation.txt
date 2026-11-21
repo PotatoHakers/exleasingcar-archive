@@ -1,0 +1,1 @@
+Temporary CI trigger for the R2 budget guardrails branch. No live Cloudflare credentials or R2 writes are used by CI.
