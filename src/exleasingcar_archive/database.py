@@ -1,3 +1,4 @@
+import math
 import re
 import sqlite3
 from collections.abc import Iterator
@@ -9,9 +10,10 @@ from urllib.parse import urlsplit
 
 from .models import AuctionCardMarker, PriceType, SaleType
 from .parsers import PriceObservation
+from .pdf_damage import PDFDamageObservation, PDFDamagePhotoReference
 from .pdf_fields import PDFExtractedField, PDFFieldProvenance, PDFFieldState
 
-SCHEMA_VERSION = 11
+SCHEMA_VERSION = 12
 DEFAULT_SOURCE = "ajax_update_car_form.v3.1.php"
 
 
@@ -224,6 +226,44 @@ CREATE TABLE IF NOT EXISTS pdf_field_observations (
 """
 
 
+PDF_DAMAGE_OBSERVATIONS_SQL = """
+CREATE TABLE IF NOT EXISTS pdf_damage_observations (
+    id INTEGER PRIMARY KEY,
+    report_sha256 TEXT NOT NULL CHECK (
+        length(report_sha256) = 64 AND report_sha256 NOT GLOB '*[^0-9a-f]*'
+    ),
+    source_lot_id TEXT,
+    auction_lot_id INTEGER,
+    item_number INTEGER NOT NULL CHECK (item_number > 0),
+    category TEXT NOT NULL CHECK (length(trim(category)) > 0),
+    component TEXT NOT NULL CHECK (length(trim(component)) > 0),
+    damage_description TEXT NOT NULL CHECK (length(trim(damage_description)) > 0),
+    page_number INTEGER NOT NULL CHECK (page_number > 0),
+    photo_page_number INTEGER,
+    photo_index INTEGER,
+    photo_caption TEXT,
+    photo_x0 REAL,
+    photo_top REAL,
+    photo_x1 REAL,
+    photo_bottom REAL,
+    parser_name TEXT NOT NULL CHECK (length(trim(parser_name)) > 0),
+    parser_version TEXT NOT NULL CHECK (length(trim(parser_version)) > 0),
+    extracted_at TEXT NOT NULL,
+    CHECK (
+        (photo_page_number IS NULL AND photo_index IS NULL AND photo_caption IS NULL
+         AND photo_x0 IS NULL AND photo_top IS NULL AND photo_x1 IS NULL
+         AND photo_bottom IS NULL)
+        OR
+        (photo_page_number > 0 AND photo_index > 0
+         AND photo_caption IS NOT NULL AND length(trim(photo_caption)) > 0
+         AND photo_x0 IS NOT NULL AND photo_top IS NOT NULL
+         AND photo_x1 > photo_x0 AND photo_bottom > photo_top)
+    ),
+    FOREIGN KEY (auction_lot_id) REFERENCES auction_lots(id) ON DELETE RESTRICT
+)
+"""
+
+
 class ArchiveDatabase:
     """SQLite storage for Exleasingcar Archive."""
 
@@ -245,7 +285,7 @@ class ArchiveDatabase:
             connection.close()
 
     def initialize(self) -> None:
-        """Create schema v11 or safely migrate older database versions."""
+        """Create schema v12 or safely migrate older database versions."""
         self.path.parent.mkdir(parents=True, exist_ok=True)
 
         with self._connect() as connection:
@@ -275,6 +315,7 @@ class ArchiveDatabase:
                     (8, self._migrate_v8_to_v9),
                     (9, self._migrate_v9_to_v10),
                     (10, self._migrate_v10_to_v11),
+                    (11, self._migrate_v11_to_v12),
                 )
                 for from_version, migration in migrations:
                     if version <= from_version:
@@ -300,6 +341,7 @@ class ArchiveDatabase:
             LOT_MEDIA_SOURCES_SQL,
             MEDIA_ASSET_VERSIONS_SQL,
             PDF_FIELD_OBSERVATIONS_SQL,
+            PDF_DAMAGE_OBSERVATIONS_SQL,
         ):
             connection.execute(statement)
         ArchiveDatabase._create_indexes(connection)
@@ -361,6 +403,14 @@ class ArchiveDatabase:
             """
             CREATE INDEX IF NOT EXISTS idx_pdf_field_observations_lot
             ON pdf_field_observations(auction_lot_id, id)
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_pdf_damage_observations_report
+            ON pdf_damage_observations(report_sha256, page_number, item_number, id)
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_pdf_damage_observations_lot
+            ON pdf_damage_observations(auction_lot_id, id)
             """,
         )
         for statement in statements:
@@ -570,6 +620,11 @@ class ArchiveDatabase:
     def _migrate_v10_to_v11(cls, connection: sqlite3.Connection) -> None:
         """Add durable storage for extracted PDF field observations."""
         connection.execute(PDF_FIELD_OBSERVATIONS_SQL)
+
+    @classmethod
+    def _migrate_v11_to_v12(cls, connection: sqlite3.Connection) -> None:
+        """Add separate storage for numbered PDF damage observations."""
+        connection.execute(PDF_DAMAGE_OBSERVATIONS_SQL)
 
     @staticmethod
     def _serialize_datetime(value: datetime | None) -> str:
@@ -2040,6 +2095,213 @@ class ArchiveDatabase:
                        normalized_text, state, parser_name, parser_version,
                        extracted_at
                 FROM pdf_field_observations
+                WHERE {" AND ".join(conditions)}
+                ORDER BY id
+                """,
+                tuple(parameters),
+            ).fetchall()
+        return [dict(row) for row in observations]
+
+    def save_pdf_damage_observations(
+        self,
+        damages: tuple[PDFDamageObservation, ...],
+        *,
+        auction_lot_id: int | None = None,
+    ) -> tuple[int, ...]:
+        """Save numbered damage observations without replacing earlier extractions."""
+        if not isinstance(damages, tuple) or any(
+            not isinstance(damage, PDFDamageObservation) for damage in damages
+        ):
+            raise TypeError("damages must be a tuple of PDFDamageObservation values")
+
+        if auction_lot_id is not None:
+            if isinstance(auction_lot_id, bool) or not isinstance(auction_lot_id, int):
+                raise TypeError("auction_lot_id must be an integer or None")
+            if auction_lot_id <= 0:
+                raise ValueError("auction_lot_id must be a positive integer")
+
+        if not damages:
+            return ()
+
+        rows: list[tuple[object, ...]] = []
+        report_hashes: set[str] = set()
+        for damage in damages:
+            provenance = damage.provenance
+            if not isinstance(provenance, PDFFieldProvenance):
+                raise TypeError("damage provenance must be a PDFFieldProvenance")
+
+            report_sha256 = provenance.report_sha256
+            if not isinstance(report_sha256, str):
+                raise TypeError("report_sha256 must be a string")
+            if re.fullmatch(r"[0-9a-fA-F]{64}", report_sha256) is None:
+                raise ValueError(
+                    "report_sha256 must contain exactly 64 hexadecimal characters"
+                )
+            report_sha256 = report_sha256.lower()
+            report_hashes.add(report_sha256)
+
+            for value, name in (
+                (damage.category, "damage category"),
+                (damage.component, "damage component"),
+                (damage.description, "damage description"),
+                (provenance.source_label, "source label"),
+                (provenance.parser_name, "parser name"),
+                (provenance.parser_version, "parser version"),
+            ):
+                if not isinstance(value, str):
+                    raise TypeError(f"{name} must be a string")
+                if not value.strip():
+                    raise ValueError(f"{name} cannot be empty")
+
+            if provenance.lot_id is not None:
+                if not isinstance(provenance.lot_id, str):
+                    raise TypeError("source lot_id must be a string or None")
+                if not provenance.lot_id.strip():
+                    raise ValueError("source lot_id cannot be empty")
+
+            for value, name in (
+                (damage.item_number, "item_number"),
+                (provenance.page_number, "page_number"),
+            ):
+                if isinstance(value, bool) or not isinstance(value, int):
+                    raise TypeError(f"{name} must be an integer")
+                if value <= 0:
+                    raise ValueError(f"{name} must be positive")
+
+            if not isinstance(provenance.extracted_at, datetime):
+                raise TypeError("extracted_at must be a datetime")
+            timestamp = self._serialize_datetime(provenance.extracted_at)
+
+            photo = damage.photo
+            if photo is None:
+                photo_values: tuple[object, ...] = (None,) * 7
+            else:
+                if not isinstance(photo, PDFDamagePhotoReference):
+                    raise TypeError("photo must be a PDFDamagePhotoReference or None")
+                if (
+                    isinstance(photo.page_number, bool)
+                    or not isinstance(photo.page_number, int)
+                    or photo.page_number <= 0
+                ):
+                    raise ValueError("photo page_number must be a positive integer")
+                if (
+                    isinstance(photo.image_index, bool)
+                    or not isinstance(photo.image_index, int)
+                    or photo.image_index <= 0
+                ):
+                    raise ValueError("photo image_index must be a positive integer")
+                if not isinstance(photo.caption, str) or not photo.caption.strip():
+                    raise ValueError("photo caption cannot be empty")
+
+                coordinates = (photo.x0, photo.top, photo.x1, photo.bottom)
+                if any(
+                    isinstance(value, bool)
+                    or not isinstance(value, (int, float))
+                    or not math.isfinite(value)
+                    for value in coordinates
+                ):
+                    raise TypeError("photo coordinates must be finite numbers")
+                if photo.x1 <= photo.x0 or photo.bottom <= photo.top:
+                    raise ValueError("photo rectangle must have positive width and height")
+                photo_values = (
+                    photo.page_number,
+                    photo.image_index,
+                    photo.caption,
+                    float(photo.x0),
+                    float(photo.top),
+                    float(photo.x1),
+                    float(photo.bottom),
+                )
+
+            rows.append(
+                (
+                    report_sha256,
+                    provenance.lot_id,
+                    auction_lot_id,
+                    damage.item_number,
+                    damage.category,
+                    damage.component,
+                    damage.description,
+                    provenance.page_number,
+                    *photo_values,
+                    provenance.parser_name,
+                    provenance.parser_version,
+                    timestamp,
+                )
+            )
+
+        if len(report_hashes) != 1:
+            raise ValueError("all damage observations in a batch must belong to the same report")
+
+        inserted_ids: list[int] = []
+        with self._connect() as connection:
+            if auction_lot_id is not None:
+                lot = connection.execute(
+                    "SELECT id FROM auction_lots WHERE id = ?", (auction_lot_id,)
+                ).fetchone()
+                if lot is None:
+                    raise ValueError(
+                        f"auction_lot_id {auction_lot_id} does not refer to an existing lot"
+                    )
+
+            for row in rows:
+                cursor = connection.execute(
+                    """
+                    INSERT INTO pdf_damage_observations (
+                        report_sha256, source_lot_id, auction_lot_id, item_number,
+                        category, component, damage_description, page_number,
+                        photo_page_number, photo_index, photo_caption,
+                        photo_x0, photo_top, photo_x1, photo_bottom,
+                        parser_name, parser_version, extracted_at
+                    ) VALUES (
+                        ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                    )
+                    """,
+                    row,
+                )
+                inserted_ids.append(int(cursor.lastrowid))
+        return tuple(inserted_ids)
+
+    def get_pdf_damage_observations(
+        self,
+        *,
+        report_sha256: str | None = None,
+        auction_lot_id: int | None = None,
+    ) -> list[dict[str, object]]:
+        """Read damage observations for a report, a confirmed lot, or both."""
+        conditions: list[str] = []
+        parameters: list[str | int] = []
+
+        if report_sha256 is not None:
+            if not isinstance(report_sha256, str):
+                raise TypeError("report_sha256 must be a string or None")
+            if re.fullmatch(r"[0-9a-fA-F]{64}", report_sha256) is None:
+                raise ValueError(
+                    "report_sha256 must contain exactly 64 hexadecimal characters"
+                )
+            conditions.append("report_sha256 = ?")
+            parameters.append(report_sha256.lower())
+
+        if auction_lot_id is not None:
+            if isinstance(auction_lot_id, bool) or not isinstance(auction_lot_id, int):
+                raise TypeError("auction_lot_id must be an integer or None")
+            if auction_lot_id <= 0:
+                raise ValueError("auction_lot_id must be a positive integer")
+            conditions.append("auction_lot_id = ?")
+            parameters.append(auction_lot_id)
+
+        if not conditions:
+            raise ValueError("provide report_sha256, auction_lot_id, or both")
+
+        with self._connect() as connection:
+            observations = connection.execute(
+                f"""
+                SELECT id, report_sha256, source_lot_id, auction_lot_id,
+                       item_number, category, component, damage_description,
+                       page_number, photo_page_number, photo_index, photo_caption,
+                       photo_x0, photo_top, photo_x1, photo_bottom,
+                       parser_name, parser_version, extracted_at
+                FROM pdf_damage_observations
                 WHERE {" AND ".join(conditions)}
                 ORDER BY id
                 """,
