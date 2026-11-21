@@ -37,6 +37,11 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -r requirements.txt
 
+      - name: Diagnose PDF import ordering
+        run: |
+          python -m ruff check --fix src/exleasingcar_archive/pdf_extractor.py tests/test_pdf_fields.py || true
+          git diff -- src/exleasingcar_archive/pdf_extractor.py tests/test_pdf_fields.py
+
       - name: Lint source and tests
         run: python -m ruff check src tests
 
