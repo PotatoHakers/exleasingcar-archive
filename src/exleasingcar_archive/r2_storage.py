@@ -1,7 +1,7 @@
 """Private Cloudflare R2 storage for content-addressed archive media.
 
-The bucket must remain private. This adapter never sets a public ACL and only
-creates short-lived, object-specific presigned GET URLs on demand.
+The bucket must remain private. This adapter never sets a public ACL. Direct
+presigned GET URLs are disabled until reads can pass through a guarded proxy.
 """
 
 from __future__ import annotations
