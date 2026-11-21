@@ -183,3 +183,75 @@ def test_parallel_reservations_never_cross_the_limit(tmp_path):
 
     assert sum(accepted) == 8
     assert budgets[0].report()["class_a_used"] == 8
+
+
+
+def test_account_analytics_with_no_storage_metrics_fails_closed():
+    payload = {
+        "data": {
+            "viewer": {
+                "accounts": [
+                    {
+                        "r2OperationsAdaptiveGroups": [],
+                        "r2StorageAdaptiveGroups": [],
+                    }
+                ]
+            }
+        }
+    }
+    client = httpx.Client(
+        transport=httpx.MockTransport(
+            lambda request: httpx.Response(200, json=payload)
+        )
+    )
+    with CloudflareR2Analytics("a" * 32, "read-only-token", client=client) as analytics:
+        with pytest.raises(R2AnalyticsError, match="no R2 storage metrics"):
+            analytics.fetch_usage()
+    client.close()
+
+
+def test_stale_storage_analytics_fails_closed():
+    from datetime import timedelta
+
+    stale_timestamp = (
+        datetime.now(timezone.utc) - timedelta(days=4)
+    ).isoformat().replace("+00:00", "Z")
+    payload = {
+        "data": {
+            "viewer": {
+                "accounts": [
+                    {
+                        "r2OperationsAdaptiveGroups": [],
+                        "r2StorageAdaptiveGroups": [
+                            {
+                                "max": {"payloadSize": 0, "metadataSize": 0},
+                                "dimensions": {
+                                    "datetime": stale_timestamp,
+                                    "bucketName": "bucket-one",
+                                },
+                            }
+                        ],
+                    }
+                ]
+            }
+        }
+    }
+    client = httpx.Client(
+        transport=httpx.MockTransport(
+            lambda request: httpx.Response(200, json=payload)
+        )
+    )
+    with CloudflareR2Analytics("a" * 32, "read-only-token", client=client) as analytics:
+        with pytest.raises(R2AnalyticsError, match="older than 72 hours"):
+            analytics.fetch_usage()
+    client.close()
+
+
+def test_real_budget_configuration_rejects_an_in_memory_ledger():
+    with pytest.raises(ValueError, match="persistent file"):
+        R2UsageBudget.from_env(
+            R2UsageSnapshot(0, 0, 0),
+            {
+                "EXLEASINGCAR_R2_BUDGET_DATABASE": ":memory:",
+            },
+        )
