@@ -38,6 +38,7 @@ def test_database_initialization_creates_current_schema(tmp_path):
         "lot_media_sources",
         "media_asset_versions",
         "pdf_field_observations",
+        "pdf_damage_observations",
     }.issubset(tables)
 
 
@@ -842,6 +843,7 @@ def test_v10_database_migrates_pdf_field_observation_storage(tmp_path):
     database.upsert_auction_lot("car-1", "auction-1", observed_at=UTC_FIRST)
 
     with sqlite3.connect(database.path) as connection:
+        connection.execute("DROP TABLE pdf_damage_observations")
         connection.execute("DROP TABLE pdf_field_observations")
         connection.execute("PRAGMA user_version = 10")
 
@@ -864,6 +866,35 @@ def test_v10_database_migrates_pdf_field_observation_storage(tmp_path):
     assert version == SCHEMA_VERSION
     assert lot_count == 1
     assert "pdf_field_observations" in tables
+    assert "pdf_damage_observations" in tables
+    assert any(
+        row[2] == "auction_lots" and row[3] == "auction_lot_id"
+        for row in foreign_keys
+    )
+    assert integrity_errors == []
+
+
+def test_v11_database_migrates_pdf_damage_observations(tmp_path):
+    database = ArchiveDatabase(tmp_path / "legacy_v11.sqlite3")
+    database.initialize()
+    database.upsert_auction_lot("synthetic-car", "synthetic-auction", observed_at=UTC_FIRST)
+
+    with sqlite3.connect(database.path) as connection:
+        connection.execute("DROP TABLE pdf_damage_observations")
+        connection.execute("PRAGMA user_version = 11")
+
+    database.initialize()
+
+    with sqlite3.connect(database.path) as connection:
+        version = connection.execute("PRAGMA user_version").fetchone()[0]
+        lot_count = connection.execute("SELECT COUNT(*) FROM auction_lots").fetchone()[0]
+        foreign_keys = connection.execute(
+            "PRAGMA foreign_key_list(pdf_damage_observations)"
+        ).fetchall()
+        integrity_errors = connection.execute("PRAGMA foreign_key_check").fetchall()
+
+    assert version == SCHEMA_VERSION
+    assert lot_count == 1
     assert any(
         row[2] == "auction_lots" and row[3] == "auction_lot_id"
         for row in foreign_keys
