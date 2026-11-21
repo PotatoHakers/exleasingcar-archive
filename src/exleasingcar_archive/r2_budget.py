@@ -136,7 +136,11 @@ class R2UsageBudget:
         path = values.get(
             "EXLEASINGCAR_R2_BUDGET_DATABASE",
             "data/r2_usage_budget.sqlite3",
-        )
+        ).strip()
+        if not path or path == ":memory:":
+            raise ValueError(
+                "EXLEASINGCAR_R2_BUDGET_DATABASE must point to a persistent file"
+            )
         return cls(path, snapshot=snapshot, limits=limits)
 
     @contextmanager
