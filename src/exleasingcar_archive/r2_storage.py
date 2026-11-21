@@ -104,7 +104,10 @@ class CloudflareR2Storage:
                 aws_access_key_id=settings.access_key_id,
                 aws_secret_access_key=settings.secret_access_key,
                 region_name="auto",
-                config=Config(signature_version="s3v4"),
+                config=Config(
+                    signature_version="s3v4",
+                    retries={"mode": "standard", "total_max_attempts": 1},
+                ),
             )
         self._client = client
 
@@ -199,27 +202,8 @@ class CloudflareR2Storage:
         *,
         expires_in_seconds: int = 300,
     ) -> str:
-        """Direct presigned reads are disabled until reads can be metered.
-
-        A browser can reuse a presigned URL without passing through this
-        process, so counting URL creation would not safely count R2 GETs.
-        Media must be served through a guarded application-side read path.
-        """
+        """Refuse direct reads because browser GETs bypass the local budget ledger."""
         raise R2BudgetExceeded(
-            "Direct presigned R2 reads are disabled by the free-tier guard"
+            "Direct presigned R2 reads are disabled by the free-tier guard; "
+            "serve media through a guarded application-side read endpoint"
         )
-        normalized_key = self.validate_object_key(object_key)
-        if (
-            isinstance(expires_in_seconds, bool)
-            or not isinstance(expires_in_seconds, int)
-            or not 1 <= expires_in_seconds <= 3600
-        ):
-            raise ValueError("presigned URL expiry must be between 1 and 3600 seconds")
-        url = self._client.generate_presigned_url(
-            "get_object",
-            Params={"Bucket": self.settings.bucket_name, "Key": normalized_key},
-            ExpiresIn=expires_in_seconds,
-        )
-        if not isinstance(url, str) or not url.startswith("https://"):
-            raise RuntimeError("R2 client returned a non-HTTPS presigned URL")
-        return url
