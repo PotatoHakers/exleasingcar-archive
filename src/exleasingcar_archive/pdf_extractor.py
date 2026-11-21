@@ -12,7 +12,6 @@ from io import BytesIO
 
 import pypdf
 
-
 DEFAULT_MAX_PDF_BYTES = 100 * 1024 * 1024
 DEFAULT_MAX_PDF_PAGES = 500
 
