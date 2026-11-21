@@ -17,6 +17,8 @@ from dotenv import load_dotenv
 from typing_extensions import Self
 
 from .database import ArchiveDatabase
+from .r2_analytics import CloudflareR2Analytics, R2AnalyticsError
+from .r2_budget import R2BudgetExceeded, R2UsageBudget
 from .r2_storage import CloudflareR2Storage, R2Settings
 
 TRUSTED_MEDIA_HOSTS = frozenset({"data.exleasingcar.com"})
@@ -204,6 +206,9 @@ class MediaDownloader:
             self.database.mark_media_source_attempted(source_id)
             try:
                 result = self._download_one(source_id, media_type, source_url)
+            except R2BudgetExceeded as exc:
+                self.database.mark_media_source_failed(source_id, str(exc))
+                raise
             except Exception as exc:  # noqa: BLE001 - isolate all failures for this media source
                 # Exception text can contain signed URLs or query parameters. Never persist it.
                 safe_error = (
@@ -396,6 +401,8 @@ class MediaDownloader:
                     expected_sha256=sha256,
                 )
                 return True
+            except R2BudgetExceeded:
+                raise
             except Exception as exc:  # noqa: BLE001 - boto3 clients expose varied SDK exceptions
                 last_error = exc
                 if attempt + 1 < self.settings.max_attempts:
@@ -437,19 +444,37 @@ def main(argv: list[str] | None = None) -> int:
     )
     database = ArchiveDatabase(args.database)
     database.initialize()
-    storage = CloudflareR2Storage(R2Settings.from_env())
 
-    with MediaDownloader(database, storage, settings=settings) as downloader:
-        summary = downloader.download_batch(include_downloaded=args.refresh)
+    try:
+        r2_settings = R2Settings.from_env()
+        with CloudflareR2Analytics.from_env() as analytics:
+            snapshot = analytics.fetch_usage()
+            budget = R2UsageBudget.from_env(snapshot)
+            budget.ensure_available()
+            storage = CloudflareR2Storage(r2_settings, budget=budget)
 
-    print(
-        "Media batch: "
-        f"selected={summary.selected}, downloaded={summary.downloaded}, "
-        f"uploaded={summary.uploaded}, reused={summary.reused}, "
-        f"failed={summary.failed}, bytes={summary.bytes_downloaded}"
-    )
+            with MediaDownloader(database, storage, settings=settings) as downloader:
+                summary = downloader.download_batch(include_downloaded=args.refresh)
+
+            print(
+                "Media batch: "
+                f"selected={summary.selected}, downloaded={summary.downloaded}, "
+                f"uploaded={summary.uploaded}, reused={summary.reused}, "
+                f"failed={summary.failed}, bytes={summary.bytes_downloaded}"
+            )
+            report = budget.report()
+            print(
+                "R2 safety budget: "
+                f"Class A {report['class_a_used']}/{report['class_a_limit']}, "
+                f"Class B {report['class_b_used']}/{report['class_b_limit']}, "
+                f"storage {report['storage_used_bytes']}/"
+                f"{report['storage_limit_bytes']} bytes"
+            )
+    except (R2AnalyticsError, R2BudgetExceeded, RuntimeError, ValueError) as exc:
+        print(f"R2 safety guard: {exc}")
+        return 2
+
     return 1 if summary.failed else 0
-
 
 if __name__ == "__main__":
     raise SystemExit(main())

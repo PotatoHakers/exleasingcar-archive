@@ -1,7 +1,7 @@
 """Private Cloudflare R2 storage for content-addressed archive media.
 
-The bucket must remain private. This adapter never sets a public ACL and only
-creates short-lived, object-specific presigned GET URLs on demand.
+The bucket must remain private. This adapter never sets a public ACL. Direct
+presigned GET URLs are disabled until reads can pass through a guarded proxy.
 """
 
 from __future__ import annotations
@@ -11,6 +11,8 @@ import os
 import re
 from dataclasses import dataclass, field
 from typing import Any
+
+from .r2_budget import R2BudgetExceeded, R2UsageBudget
 
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _BUCKET_RE = re.compile(r"^[a-z0-9][a-z0-9-]{1,61}[a-z0-9]$")
@@ -76,8 +78,17 @@ class R2Settings:
 class CloudflareR2Storage:
     """Small S3-compatible adapter; it deliberately has no public-ACL methods."""
 
-    def __init__(self, settings: R2Settings, client: Any | None = None) -> None:
+    def __init__(
+        self,
+        settings: R2Settings,
+        client: Any | None = None,
+        *,
+        budget: R2UsageBudget,
+    ) -> None:
+        if not isinstance(budget, R2UsageBudget):
+            raise TypeError("budget must be an R2UsageBudget instance")
         self.settings = settings
+        self._budget = budget
         if client is None:
             try:
                 import boto3
@@ -93,7 +104,10 @@ class CloudflareR2Storage:
                 aws_access_key_id=settings.access_key_id,
                 aws_secret_access_key=settings.secret_access_key,
                 region_name="auto",
-                config=Config(signature_version="s3v4"),
+                config=Config(
+                    signature_version="s3v4",
+                    retries={"mode": "standard", "total_max_attempts": 1},
+                ),
             )
         self._client = client
 
@@ -148,6 +162,7 @@ class CloudflareR2Storage:
         if normalized_key.rsplit("/", 1)[-1] != digest:
             raise ValueError("Payload SHA-256 does not match object key")
 
+        self._budget.reserve_put(normalized_key, len(body))
         self._client.put_object(
             Bucket=self.settings.bucket_name,
             Key=normalized_key,
@@ -161,6 +176,7 @@ class CloudflareR2Storage:
     def object_exists(self, object_key: str) -> bool:
         """Check whether an object exists without downloading its contents."""
         normalized_key = self.validate_object_key(object_key)
+        self._budget.reserve_operation("class_b")
         try:
             self._client.head_object(
                 Bucket=self.settings.bucket_name,
@@ -186,19 +202,8 @@ class CloudflareR2Storage:
         *,
         expires_in_seconds: int = 300,
     ) -> str:
-        """Create an object-specific temporary URL; never persist the result."""
-        normalized_key = self.validate_object_key(object_key)
-        if (
-            isinstance(expires_in_seconds, bool)
-            or not isinstance(expires_in_seconds, int)
-            or not 1 <= expires_in_seconds <= 3600
-        ):
-            raise ValueError("presigned URL expiry must be between 1 and 3600 seconds")
-        url = self._client.generate_presigned_url(
-            "get_object",
-            Params={"Bucket": self.settings.bucket_name, "Key": normalized_key},
-            ExpiresIn=expires_in_seconds,
+        """Refuse direct reads because browser GETs bypass the local budget ledger."""
+        raise R2BudgetExceeded(
+            "Direct presigned R2 reads are disabled by the free-tier guard; "
+            "serve media through a guarded application-side read endpoint"
         )
-        if not isinstance(url, str) or not url.startswith("https://"):
-            raise RuntimeError("R2 client returned a non-HTTPS presigned URL")
-        return url

@@ -4,12 +4,14 @@ import hashlib
 import sqlite3
 
 import httpx
+import pytest
 
 from exleasingcar_archive.database import ArchiveDatabase
 from exleasingcar_archive.media_downloader import (
     MediaDownloader,
     MediaDownloaderSettings,
 )
+from exleasingcar_archive.r2_budget import R2BudgetExceeded, R2UsageBudget, R2UsageSnapshot
 from exleasingcar_archive.r2_storage import CloudflareR2Storage, R2Settings
 
 
@@ -75,6 +77,9 @@ def _storage(client=None):
             secret_access_key="test-secret",
         ),
         client=r2_client,
+        budget=R2UsageBudget(
+            ":memory:", snapshot=R2UsageSnapshot(0, 0, 0)
+        ),
     )
     return storage, r2_client
 
@@ -128,6 +133,9 @@ def test_batch_size_limits_the_number_of_sources_processed(tmp_path):
     assert summary.failed == 0
     assert len(r2_client.put_calls) == 1
     assert len(database.get_pending_media_sources(10)) == 1
+    budget_report = storage._budget.report()
+    assert budget_report["class_a_used"] == 1
+    assert budget_report["class_b_used"] == 1
     client.close()
 
 
@@ -352,6 +360,10 @@ def test_r2_failure_is_retried_without_losing_the_download(tmp_path):
     assert summary.uploaded == 1
     assert summary.failed == 0
     assert len(r2_client.put_calls) == 1
+    retry_budget = storage._budget.report()
+    assert retry_budget["class_a_used"] == 2
+    assert retry_budget["class_b_used"] == 2
+    assert retry_budget["storage_used_bytes"] == len(_photo_response().content)
     client.close()
 
 
@@ -422,3 +434,13 @@ def test_invalid_http_status_is_recorded_without_exposing_source_url(tmp_path):
     assert secret_url not in str(row["last_error"])
     assert r2_client.put_calls == []
     client.close()
+
+
+
+def test_direct_presigned_get_is_blocked_by_the_budget_guard():
+    storage, _ = _storage()
+    digest = hashlib.sha256(b"private-media").hexdigest()
+    object_key = f"archive/photo/{digest[:2]}/{digest}"
+
+    with pytest.raises(R2BudgetExceeded, match="Direct presigned R2 reads are disabled"):
+        storage.presign_get_url(object_key)

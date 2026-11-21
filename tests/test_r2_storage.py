@@ -4,6 +4,11 @@ import hashlib
 
 import pytest
 
+from exleasingcar_archive.r2_budget import (
+    R2BudgetExceeded,
+    R2UsageBudget,
+    R2UsageSnapshot,
+)
 from exleasingcar_archive.r2_storage import CloudflareR2Storage, R2Settings
 
 
@@ -32,6 +37,10 @@ class FakeR2Client:
     def generate_presigned_url(self, operation, *, Params, ExpiresIn):
         self.presign_calls.append((operation, Params, ExpiresIn))
         return "https://example.r2.cloudflarestorage.com/signed-object"
+
+
+def _budget():
+    return R2UsageBudget(":memory:", snapshot=R2UsageSnapshot(0, 0, 0))
 
 
 def _settings():
@@ -81,7 +90,7 @@ def test_object_key_is_content_addressed_and_media_type_scoped():
 
 def test_put_bytes_uploads_private_content_without_public_acl():
     client = FakeR2Client()
-    storage = CloudflareR2Storage(_settings(), client=client)
+    storage = CloudflareR2Storage(_settings(), client=client, budget=_budget())
     body = b"%PDF-1.7 synthetic report"
     digest = hashlib.sha256(body).hexdigest()
     key = storage.object_key_for(digest, "report")
@@ -105,7 +114,7 @@ def test_put_bytes_uploads_private_content_without_public_acl():
 
 def test_put_bytes_rejects_hash_mismatch_and_unknown_mime():
     client = FakeR2Client()
-    storage = CloudflareR2Storage(_settings(), client=client)
+    storage = CloudflareR2Storage(_settings(), client=client, budget=_budget())
     digest = hashlib.sha256(b"image").hexdigest()
     key = storage.object_key_for(digest, "photo")
 
@@ -118,7 +127,7 @@ def test_put_bytes_rejects_hash_mismatch_and_unknown_mime():
 
 def test_put_bytes_requires_digest_inside_key_and_accepts_mime_parameters():
     client = FakeR2Client()
-    storage = CloudflareR2Storage(_settings(), client=client)
+    storage = CloudflareR2Storage(_settings(), client=client, budget=_budget())
     body = b"image"
     digest = hashlib.sha256(body).hexdigest()
     with pytest.raises(ValueError, match="does not match"):
@@ -143,7 +152,7 @@ def test_object_key_rejects_absolute_and_traversal_paths():
 
 def test_object_exists_checks_head_without_downloading():
     client = FakeR2Client()
-    storage = CloudflareR2Storage(_settings(), client=client)
+    storage = CloudflareR2Storage(_settings(), client=client, budget=_budget())
 
     assert storage.object_exists("archive/photo/a1/image") is False
     digest = hashlib.sha256(b"photo").hexdigest()
@@ -153,20 +162,12 @@ def test_object_exists_checks_head_without_downloading():
     assert len(client.head_calls) == 2
 
 
-def test_presigned_get_url_is_short_lived_and_object_specific():
+def test_presigned_get_url_is_disabled_until_reads_can_be_metered():
     client = FakeR2Client()
-    storage = CloudflareR2Storage(_settings(), client=client)
+    storage = CloudflareR2Storage(_settings(), client=client, budget=_budget())
     digest = hashlib.sha256(b"photo").hexdigest()
     key = storage.object_key_for(digest, "photo")
 
-    assert storage.presign_get_url(key, expires_in_seconds=120).startswith("https://")
-    assert client.presign_calls == [
-        ("get_object", {"Bucket": "private-archive", "Key": key}, 120)
-    ]
-
-
-@pytest.mark.parametrize("expiry", [0, -1, 3601, True, 1.5])
-def test_presigned_get_url_rejects_invalid_expiry(expiry):
-    storage = CloudflareR2Storage(_settings(), client=FakeR2Client())
-    with pytest.raises(ValueError, match="expiry"):
-        storage.presign_get_url("archive/photo/a1/image", expires_in_seconds=expiry)
+    with pytest.raises(R2BudgetExceeded, match="Direct presigned R2 reads are disabled"):
+        storage.presign_get_url(key, expires_in_seconds=120)
+    assert client.presign_calls == []
