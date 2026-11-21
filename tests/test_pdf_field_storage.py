@@ -14,18 +14,18 @@ RULES = (
     PDFFieldRule(
         key="mileage",
         label="Mileage",
-        pattern=r"^Mileage:\\s*(?P<value>.*)$",
+        pattern=r"^Mileage:\s*(?P<value>.*)$",
     ),
     PDFFieldRule(
         key="oil_leak",
         label="Oil leak",
-        pattern=r"^Oil leak:\\s*(?P<value>.*)$",
+        pattern=r"^Oil leak:\s*(?P<value>.*)$",
         state_tokens=(("No", PDFFieldState.EXPLICIT_NO),),
     ),
     PDFFieldRule(
         key="interior_condition",
         label="Interior condition",
-        pattern=r"^Interior condition:\\s*(?P<value>.*)$",
+        pattern=r"^Interior condition:\s*(?P<value>.*)$",
     ),
 )
 
@@ -56,7 +56,7 @@ def test_pdf_field_observations_keep_provenance_states_and_repeated_history(tmp_
         "synthetic-car-1", "synthetic-auction-1", observed_at=EXTRACTED_AT
     )
     fields = _fields(
-        "Mileage: 42 500   km\\nOil leak: No\\nInterior condition:   ",
+        "Mileage: 42 500   km\nOil leak: No\nInterior condition:   ",
         "Mileage: 43 000 km",
         lot_id="external-lot-reference-1",
     )
