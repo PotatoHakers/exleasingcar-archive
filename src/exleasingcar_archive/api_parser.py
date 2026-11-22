@@ -24,6 +24,29 @@ class ParsedCarUpdate:
     auction_end_at: str | None
     live_bidding: bool | None
 
+    @property
+    def has_positive_highest_offer(self) -> bool:
+        """A zero/negative API placeholder is never a candidate bid."""
+        return self.highest_offer is not None and self.highest_offer > 0
+
+    @property
+    def completion_reason(self) -> str | None:
+        """Return only a source-confirmed terminal state; never infer from a date alone."""
+        if self.final_call_active or self.live_bidding is True:
+            return None
+        terminal_values = {"closed", "completed", "ended", "finished"}
+        phase = (self.auction_phase or "").strip().casefold().replace("_", "-")
+        status = (self.bid_status or "").strip().casefold().replace("_", "-")
+        if phase in terminal_values or status in terminal_values:
+            return "api_terminal_status"
+        if (
+            self.remaining_seconds is not None
+            and self.remaining_seconds <= 0
+            and self.live_bidding is False
+        ):
+            return "countdown_expired"
+        return None
+
 
 def _optional_text(value: Any) -> str | None:
     if value is None or value == "":

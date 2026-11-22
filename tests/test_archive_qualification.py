@@ -4,6 +4,7 @@ import sqlite3
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
+from exleasingcar_archive.api_parser import parse_car_update_response
 from exleasingcar_archive.collector import CapturedApiResponse, ExleasingcarCollector
 from exleasingcar_archive.database import SCHEMA_VERSION, ArchiveDatabase
 from exleasingcar_archive.detail_parser import parse_vehicle_detail
@@ -395,7 +396,7 @@ def test_v13_migration_backfills_fixed_price_eligibility() -> None:
     ]
     connection.close()
 
-    assert SCHEMA_VERSION == 14
+    assert SCHEMA_VERSION == 15
     assert rows == [
         (1, 1, 0),
         (2, 0, 0),
@@ -499,3 +500,275 @@ def test_api_price_insert_does_not_promote_an_unqualified_candidate(tmp_path) ->
 
     assert eligibility == 0
     assert sale_type is None
+
+
+def test_zero_highest_offer_is_preserved_but_not_a_bid_and_terminal_api_state_is_explicit():
+    parsed = parse_car_update_response(
+        {
+            "car-zero": {
+                "highest_offer": 0,
+                "car_auction_time": {
+                    "type": "",
+                    "liveBidding": "0",
+                    "remainingSeconds": 0,
+                },
+            },
+            "car-positive": {
+                "highest_offer": 12500,
+                "car_auction_time": {
+                    "type": "ongoing",
+                    "liveBidding": "1",
+                    "remainingSeconds": 180,
+                },
+            },
+            "car-final-call": {
+                "highest_offer": 15000,
+                "car_auction_time": {
+                    "type": "final-call",
+                    "image": "final-call-active",
+                    "liveBidding": "0",
+                    "remainingSeconds": 0,
+                },
+            },
+        }
+    )
+
+    zero = parsed["car-zero"]
+    positive = parsed["car-positive"]
+    final_call = parsed["car-final-call"]
+
+    assert zero.highest_offer == Decimal(0)
+    assert zero.has_positive_highest_offer is False
+    assert zero.completion_reason == "countdown_expired"
+    assert positive.has_positive_highest_offer is True
+    assert positive.completion_reason is None
+    # A zero timer alone cannot finish an auction while FINAL CALL is active.
+    assert final_call.completion_reason is None
+
+
+def test_explicit_terminal_api_status_completes_even_without_a_countdown():
+    parsed = parse_car_update_response(
+        {
+            "car-finished": {
+                "highest_offer": 12500,
+                "bid_status": "completed",
+                "car_auction_time": {
+                    "liveBidding": "0",
+                },
+            }
+        }
+    )
+
+    assert parsed["car-finished"].completion_reason == "api_terminal_status"
+
+
+def test_completed_open_auction_keeps_final_observation_and_stops_later_updates(
+    tmp_path,
+) -> None:
+    database = ArchiveDatabase(tmp_path / "archive.sqlite3")
+    database.initialize()
+    auction_id = "auction-completes"
+    seed_candidate(database, "car-completes", auction_id)
+    database.set_auction_lot_qualification(
+        "car-completes",
+        auction_id,
+        sale_type=SaleType.OPEN_AUCTION,
+        has_fixed_price=False,
+        collection_eligible=True,
+    )
+    collector = ExleasingcarCollector(database, tmp_path / "raw", page_delay_seconds=0)
+    first_seen = datetime(2026, 11, 22, 10, 0, tzinfo=timezone.utc)
+    completed_at = datetime(2026, 11, 22, 10, 5, tzinfo=timezone.utc)
+    late_seen = datetime(2026, 11, 22, 10, 10, tzinfo=timezone.utc)
+
+    collector.recorder.responses.extend(
+        (
+            CapturedApiResponse(
+                "https://www.exleasingcar.com/ajax_update_car_form.v3.1.php",
+                {
+                    "car-completes": {
+                        "highest_offer": 12000,
+                        "car_auction_time": {
+                            "type": "ongoing",
+                            "liveBidding": "1",
+                            "remainingSeconds": 300,
+                        },
+                    }
+                },
+                first_seen,
+            ),
+            CapturedApiResponse(
+                "https://www.exleasingcar.com/ajax_update_car_form.v3.1.php",
+                {
+                    "car-completes": {
+                        "highest_offer": 0,
+                        "car_auction_time": {
+                            "type": "",
+                            "liveBidding": "0",
+                            "remainingSeconds": 0,
+                        },
+                    }
+                },
+                completed_at,
+            ),
+            CapturedApiResponse(
+                "https://www.exleasingcar.com/ajax_update_car_form.v3.1.php",
+                {
+                    "car-completes": {
+                        "highest_offer": 15000,
+                        "car_auction_time": {
+                            "type": "ongoing",
+                            "liveBidding": "1",
+                            "remainingSeconds": 120,
+                        },
+                    }
+                },
+                late_seen,
+            ),
+        )
+    )
+
+    collector._persist_api_updates(
+        AuctionContext(auction_id),
+        {"car-completes"},
+        {"car-completes": LotMetadata()},
+        open_auction_car_ids={"car-completes"},
+    )
+
+    with sqlite3.connect(database.path) as connection:
+        price_values = [
+            row[0]
+            for row in connection.execute(
+                """
+                SELECT highest_offer FROM price_observations
+                ORDER BY observed_at, id
+                """
+            )
+        ]
+        events = connection.execute(
+            """
+            SELECT remaining_seconds, live_bidding
+            FROM auction_events ORDER BY observed_at, id
+            """
+        ).fetchall()
+        completion = connection.execute(
+            """
+            SELECT monitoring_completed_at, monitoring_completion_reason
+            FROM auction_lots
+            """
+        ).fetchone()
+
+    assert price_values == ["12000", "0"]
+    assert events == [(300, 1), (0, 0)]
+    expected_completed_at = completed_at.isoformat(timespec="microseconds").replace(
+        "+00:00", "Z"
+    )
+    assert completion == (expected_completed_at, "countdown_expired")
+    assert database.get_completed_open_auction_lots(
+        auction_id, {"car-completes"}
+    ) == {"car-completes"}
+    assert database.get_detail_check_order(
+        auction_id, {"car-completes"}
+    ) == []
+
+    # A later collector invocation does not add another value for a completed lot.
+    later_collector = ExleasingcarCollector(
+        database, tmp_path / "raw", page_delay_seconds=0
+    )
+    later_collector.recorder.responses.append(
+        CapturedApiResponse(
+            "https://www.exleasingcar.com/ajax_update_car_form.v3.1.php",
+            {
+                "car-completes": {
+                    "highest_offer": 18000,
+                    "car_auction_time": {
+                        "type": "ongoing",
+                        "liveBidding": "1",
+                        "remainingSeconds": 60,
+                    },
+                }
+            },
+            late_seen,
+        )
+    )
+    later_collector._persist_api_updates(
+        AuctionContext(auction_id),
+        {"car-completes"},
+        {"car-completes": LotMetadata()},
+        open_auction_car_ids={"car-completes"},
+    )
+
+    with sqlite3.connect(database.path) as connection:
+        after = connection.execute(
+            "SELECT highest_offer FROM price_observations ORDER BY id"
+        ).fetchall()
+    assert after == [("12000",), ("0",)]
+
+
+def test_v14_migration_marks_only_conclusively_finished_open_auctions():
+    connection = sqlite3.connect(":memory:")
+    connection.row_factory = sqlite3.Row
+    connection.execute(
+        """
+        CREATE TABLE auction_lots (
+            id INTEGER PRIMARY KEY,
+            sale_type TEXT
+        )
+        """
+    )
+    connection.execute(
+        """
+        CREATE TABLE auction_events (
+            id INTEGER PRIMARY KEY,
+            auction_lot_id INTEGER NOT NULL,
+            remaining_seconds INTEGER,
+            live_bidding INTEGER,
+            final_call_active INTEGER,
+            observed_at TEXT NOT NULL
+        )
+        """
+    )
+    connection.executemany(
+        "INSERT INTO auction_lots (id, sale_type) VALUES (?, ?)",
+        [
+            (1, "open_auction"),
+            (2, "open_auction"),
+            (3, "closed_auction"),
+            (4, "open_auction"),
+        ],
+    )
+    connection.executemany(
+        """
+        INSERT INTO auction_events (
+            auction_lot_id, remaining_seconds, live_bidding,
+            final_call_active, observed_at
+        ) VALUES (?, ?, ?, ?, ?)
+        """,
+        [
+            (1, 0, 0, 0, "2026-11-22T10:00:00Z"),
+            (2, 0, 0, 1, "2026-11-22T10:00:00Z"),
+            (3, 0, 0, 0, "2026-11-22T10:00:00Z"),
+            (4, 0, 0, 0, "2026-11-22T10:00:00Z"),
+            (4, 30, 1, 0, "2026-11-22T10:01:00Z"),
+        ],
+    )
+
+    ArchiveDatabase._migrate_v14_to_v15(connection)
+    rows = [
+        tuple(row)
+        for row in connection.execute(
+            """
+            SELECT id, monitoring_completed_at, monitoring_completion_reason
+            FROM auction_lots ORDER BY id
+            """
+        ).fetchall()
+    ]
+    connection.close()
+
+    assert SCHEMA_VERSION == 15
+    assert rows == [
+        (1, "2026-11-22T10:00:00Z", "countdown_expired"),
+        (2, None, None),
+        (3, None, None),
+        (4, None, None),
+    ]

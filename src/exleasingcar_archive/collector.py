@@ -460,12 +460,30 @@ class ExleasingcarCollector:
         *,
         open_auction_car_ids: set[str] | None = None,
     ) -> None:
-        """Persist API data only after each lot has passed archive qualification.
+        """Persist qualified offers until each open auction reaches a final state.
 
-        Open auctions retain their API offer/event observations. Fixed-price-only
-        lots retain seller reference prices, but hidden-bid fields are deliberately
-        discarded because they are not public purchase prices.
+        The final terminal response remains in history; later responses for that
+        lot are ignored. Fixed-price-only lots retain seller references, but
+        hidden-bid and auction-state fields are discarded.
         """
+        completed_before_run = self.database.get_completed_open_auction_lots(
+            auction.exleasingcar_auction_id,
+            eligible_car_ids,
+        )
+        active_open_ids = (
+            set(open_auction_car_ids)
+            if open_auction_car_ids is not None
+            else {
+                car_id
+                for car_id, sale_type in self.database.get_collection_eligible_lots(
+                    auction.exleasingcar_auction_id,
+                    eligible_car_ids,
+                ).items()
+                if sale_type == SaleType.OPEN_AUCTION.value
+            }
+        ) - completed_before_run
+        completed_during_run: set[str] = set()
+
         while self.api_cursor < len(self.recorder.responses):
             captured = self.recorder.responses[self.api_cursor]
             self.api_cursor += 1
@@ -477,14 +495,26 @@ class ExleasingcarCollector:
                 continue
 
             selected = filter_updates_for_catalog(updates, eligible_car_ids)
+            selected = {
+                car_id: update
+                for car_id, update in selected.items()
+                if car_id not in completed_before_run
+                and car_id not in completed_during_run
+            }
             if not selected:
                 continue
 
-            if open_auction_car_ids is not None:
-                selected = {
+            completed_updates = {
+                car_id: update.completion_reason
+                for car_id, update in selected.items()
+                if car_id in active_open_ids
+                and update.completion_reason is not None
+            }
+
+            selected = {
                     car_id: (
                         update
-                        if car_id in open_auction_car_ids
+                        if car_id in active_open_ids
                         else replace(
                             update,
                             highest_offer=None,
@@ -511,6 +541,21 @@ class ExleasingcarCollector:
                     if car_id in lot_metadata
                 },
             )
+            for car_id, reason in completed_updates.items():
+                completed = self.database.mark_open_auction_completed(
+                    car_id,
+                    auction.exleasingcar_auction_id,
+                    reason=reason,
+                    completed_at=captured.observed_at,
+                )
+                if completed:
+                    completed_during_run.add(car_id)
+                    active_open_ids.discard(car_id)
+                    print(
+                        f"  Open auction {car_id} completed; "
+                        "final observation retained and further monitoring stopped."
+                    )
+
             self.api_cars_processed += summary.cars_processed
             self.prices_checked += summary.prices_checked
             self.prices_inserted += summary.prices_inserted
