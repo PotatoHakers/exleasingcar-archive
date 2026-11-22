@@ -602,7 +602,7 @@ def test_dashboard_labels_unverified_highest_offer_as_api_value():
     from exleasingcar_archive.dashboard import PAGE
 
     assert "История значений API highest_offer" in PAGE
-    assert "Смысл этого поля пока не подтверждён" in PAGE
+    assert "не доказывает наличие публичной ставки" in PAGE
     assert "API highest_offer" in PAGE
     assert "История реальных ставок" not in PAGE
     assert "Последняя ставка" not in PAGE
@@ -611,7 +611,7 @@ def test_dashboard_labels_unverified_highest_offer_as_api_value():
 
 
 def test_dashboard_copy_includes_zero_highest_offer_observations():
-    assert "включая 0" in PAGE
+    assert "включая исходный 0" in PAGE
     assert "только положительные значения" not in PAGE
     assert "Наблюдений API highest_offer пока нет" in PAGE
 
@@ -1092,3 +1092,91 @@ def test_catalog_pagination_returns_lots_beyond_first_page(tmp_path, monkeypatch
     assert second_page["pagination"]["page"] == 2
     assert second_page["pagination"]["has_previous"] is True
     assert second_page["pagination"]["has_next"] is False
+
+
+def test_dashboard_marks_zero_highest_offer_as_non_bid_and_shows_completed_status(
+    tmp_path,
+) -> None:
+    from datetime import datetime, timezone
+
+    database = ArchiveDatabase(tmp_path / "dashboard-completed.sqlite3")
+    database.initialize()
+    database.upsert_vehicle(
+        "car-completed",
+        displayed_title="Example open-auction vehicle",
+    )
+    database.upsert_auction("auction-completed")
+    lot_id = database.upsert_auction_lot(
+        "car-completed",
+        "auction-completed",
+        sale_type=SaleType.OPEN_AUCTION,
+    )
+    database.record_price_observation(
+        "car-completed",
+        Decimal(0),
+        datetime(2026, 11, 22, 10, 0, tzinfo=timezone.utc),
+        exleasingcar_auction_id="auction-completed",
+    )
+    completed_at = datetime(2026, 11, 22, 10, 5, tzinfo=timezone.utc)
+    assert database.mark_open_auction_completed(
+        "car-completed",
+        "auction-completed",
+        reason="countdown_expired",
+        completed_at=completed_at,
+    )
+
+    handler = object.__new__(DashboardHandler)
+    handler.database_path = database.path
+    payload = handler._load_data(selected_lot_id=lot_id)
+
+    assert payload["lot_prices_summary"]["highest_offer"]["amount"] == "0"
+    assert payload["selected_lot"]["monitoring_completed_at"] == (
+        completed_at.isoformat(timespec="microseconds").replace("+00:00", "Z")
+    )
+    assert payload["selected_lot"]["monitoring_completion_reason"] == "countdown_expired"
+    assert "Нулевое значение API · не ставка" in PAGE
+    assert "ноль не считается ставкой" in PAGE
+
+
+def test_dashboard_zero_offer_is_labelled_as_not_a_bid_and_completed_status_is_visible(
+    tmp_path,
+) -> None:
+    database = ArchiveDatabase(tmp_path / "dashboard-completed.sqlite3")
+    database.initialize()
+    database.upsert_vehicle(
+        "car-completed",
+        displayed_title="Example open-auction vehicle",
+    )
+    database.upsert_auction("auction-completed")
+    lot_id = database.upsert_auction_lot(
+        "car-completed",
+        "auction-completed",
+        sale_type=SaleType.OPEN_AUCTION,
+    )
+    database.record_price_observation(
+        "car-completed",
+        Decimal(0),
+        datetime(2026, 11, 22, 10, 0, tzinfo=timezone.utc),
+        exleasingcar_auction_id="auction-completed",
+    )
+    completed_at = datetime(2026, 11, 22, 10, 5, tzinfo=timezone.utc)
+    assert database.mark_open_auction_completed(
+        "car-completed",
+        "auction-completed",
+        reason="countdown_expired",
+        completed_at=completed_at,
+    )
+
+    handler = object.__new__(DashboardHandler)
+    handler.database_path = database.path
+    payload = handler._load_data(selected_lot_id=lot_id)
+
+    assert payload["lot_prices_summary"]["highest_offer"]["amount"] == "0"
+    assert payload["selected_lot"]["monitoring_completed_at"] == (
+        completed_at.isoformat().replace("+00:00", "Z")
+    )
+    assert payload["selected_lot"]["monitoring_completion_reason"] == "countdown_expired"
+    assert "Нулевое значение API · не ставка" in PAGE
+    assert "ноль не считается ставкой" in PAGE
+    assert "const apiOfferCell" in PAGE
+
