@@ -127,7 +127,7 @@ footer{color:#7b8795;font-size:12px;margin-top:20px}
 </div><section id="car-card" class="detail-card" hidden aria-live="polite"></section><div class="wrap"><table><thead><tr>
 <th></th><th>Фото</th><th>Автомобиль / ID</th><th>Тип продажи</th><th>Пробег, км</th>
 <th>API highest_offer (€)</th><th>Цена аукциона (€)</th><th>Buy Now (€)</th>
-<th>Мин. продавца (€)</th><th>Ориентир (€)</th><th>VIN / кузов</th>
+<th>Мин. цена продавца (€)</th><th>Ориентир (€)</th><th>VIN / кузов</th>
 <th>Последнее наблюдение</th><th>Аукцион / лот</th>
 </tr></thead><tbody id="lots"></tbody></table></div><div id="lot-pagination" class="pagination-controls" hidden><button type="button" id="page-prev">← Назад</button><span id="page-info"></span><button type="button" id="page-next">Дальше →</button></div></section>
 <section><h2>История значений API highest_offer</h2><p class="hint">Здесь отображаются все полученные значения поля highest_offer, включая 0, если поле присутствовало в API-ответе. Отсутствующее поле не создаёт наблюдение. Смысл этого поля пока не подтверждён: не считайте каждое значение доказанной публичной ставкой.</p><div class="wrap"><table><thead><tr><th>Дата наблюдения</th><th>Аукцион</th><th>ID автомобиля</th><th>Значение highest_offer (€)</th><th>Источник</th></tr></thead><tbody id="bids"></tbody></table></div></section>
@@ -572,7 +572,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
             sort_expression = sort_expressions[normalized_sort]
             order_by_sql = (
                 f"({sort_expression}) IS NULL ASC, "
-                f"({sort_expression}) {normalized_direction.upper()}, al.id ASC"
+                f"({sort_expression}) {normalized_direction.upper()}, al.id DESC"
             )
             available_makes = [
                 row["make"]

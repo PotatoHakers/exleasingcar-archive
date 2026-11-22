@@ -1029,9 +1029,9 @@ class ArchiveDatabase:
                     mileage_km,
                     sale_type,
                     int(collection_eligible) if collection_eligible is not None else None,
+                    observed_at,
+                    observed_at,
                     int(collection_eligible) if collection_eligible is not None else None,
-                    observed_at,
-                    observed_at,
                 ),
             )
             row = connection.execute(

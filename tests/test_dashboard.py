@@ -979,10 +979,10 @@ def test_catalog_sorting_is_stable_and_null_prices_sort_after_zero(tmp_path):
     handler = object.__new__(DashboardHandler)
     handler.database_path = database.path
     expected_ascending = [
-        "car-zero-first", "car-zero-second", "car-ten", "car-null"
+        "car-zero-second", "car-zero-first", "car-ten", "car-null"
     ]
     expected_descending = [
-        "car-ten", "car-zero-first", "car-zero-second", "car-null"
+        "car-ten", "car-zero-second", "car-zero-first", "car-null"
     ]
     for sort_by in (
         "highest_offer", "displayed_price", "fixed_price",
@@ -997,7 +997,7 @@ def test_catalog_sorting_is_stable_and_null_prices_sort_after_zero(tmp_path):
         sort_by="last_observation", sort_direction="desc"
     )
     assert [row["car_id"] for row in by_last_observation["lots"]] == [
-        "car-ten", "car-null", "car-zero-first", "car-zero-second"
+        "car-ten", "car-null", "car-zero-second", "car-zero-first"
     ]
 
 

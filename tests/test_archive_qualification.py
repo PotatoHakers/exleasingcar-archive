@@ -387,9 +387,12 @@ def test_v13_migration_backfills_fixed_price_eligibility() -> None:
     )
 
     ArchiveDatabase._migrate_v13_to_v14(connection)
-    rows = connection.execute(
-        "SELECT id, collection_eligible, has_fixed_price FROM auction_lots ORDER BY id"
-    ).fetchall()
+    rows = [
+        tuple(row)
+        for row in connection.execute(
+            "SELECT id, collection_eligible, has_fixed_price FROM auction_lots ORDER BY id"
+        ).fetchall()
+    ]
     connection.close()
 
     assert SCHEMA_VERSION == 14
