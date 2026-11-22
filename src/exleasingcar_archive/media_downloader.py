@@ -8,8 +8,9 @@ import re
 import tempfile
 import time
 from collections.abc import Callable
+from collections import Counter
 from dataclasses import dataclass
-from pathlib import PurePosixPath
+from pathlib import Path, PurePosixPath
 from urllib.parse import unquote, urljoin, urlsplit
 
 import httpx
@@ -596,7 +597,57 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Recheck sources that already have an archived version.",
     )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help=(
+            "Preview the next eligible media batch without downloading files, "
+            "checking Cloudflare analytics, or making R2 requests."
+        ),
+    )
     args = parser.parse_args(argv)
+
+    database = ArchiveDatabase(args.database)
+    if args.dry_run:
+        if not Path(args.database).is_file():
+            print("Media queue dry run unavailable: database file does not exist.")
+            return 2
+        try:
+            sources = database.get_pending_media_sources(
+                args.batch_size,
+                include_downloaded=args.refresh,
+            )
+        except Exception as exc:  # noqa: BLE001 - report a safe CLI failure
+            print(
+                "Media queue dry run unavailable "
+                f"({type(exc).__name__}); no network or R2 request was made."
+            )
+            return 2
+
+        by_type = Counter(str(source["media_type"]) for source in sources)
+        by_auction: dict[str, Counter[str]] = {}
+        for source in sources:
+            auction_id = str(source.get("auction_id") or "unassigned")
+            media_type = str(source["media_type"])
+            by_auction.setdefault(auction_id, Counter())[media_type] += 1
+
+        print("Media queue dry run — no downloads or Cloudflare/R2 requests")
+        print(
+            f"Selected {len(sources)} source(s) "
+            f"(batch limit {args.batch_size}; refresh={args.refresh})"
+        )
+        print(f"Photos: {by_type['photo']}; PDF reports: {by_type['report']}")
+        if by_auction:
+            print("Selected sources by auction:")
+            for auction_id, counts in sorted(by_auction.items()):
+                print(
+                    f"  {auction_id}: {counts['photo']} photo(s), "
+                    f"{counts['report']} report(s)"
+                )
+        else:
+            print("No eligible media sources are currently queued.")
+        print("Source URLs and vehicle identifiers were not displayed.")
+        return 0
 
     settings = MediaDownloaderSettings(
         batch_size=args.batch_size,
@@ -604,7 +655,6 @@ def main(argv: list[str] | None = None) -> int:
         max_report_bytes=args.max_report_bytes,
         max_attempts=args.max_attempts,
     )
-    database = ArchiveDatabase(args.database)
     database.initialize()
 
     try:
