@@ -10,7 +10,6 @@ from .api_parser import parse_car_update_response
 from .database import ArchiveDatabase
 from .detail_parser import parse_vehicle_detail
 from .ingestion import AuctionContext, IngestionSummary, LotMetadata, store_car_updates
-from .models import SaleType
 from .metadata_parser import (
     ParsedAuctionListing,
     ParsedAuctionLotMetadata,
@@ -20,6 +19,7 @@ from .metadata_parser import (
     parse_vehicle_media,
     parse_vehicle_metadata,
 )
+from .models import SaleType
 
 
 @dataclass(frozen=True, slots=True)

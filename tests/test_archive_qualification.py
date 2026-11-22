@@ -5,7 +5,7 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
 from exleasingcar_archive.collector import CapturedApiResponse, ExleasingcarCollector
-from exleasingcar_archive.database import ArchiveDatabase, SCHEMA_VERSION
+from exleasingcar_archive.database import SCHEMA_VERSION, ArchiveDatabase
 from exleasingcar_archive.detail_parser import parse_vehicle_detail
 from exleasingcar_archive.ingestion import AuctionContext, LotMetadata
 from exleasingcar_archive.models import SaleType
@@ -485,7 +485,7 @@ def test_api_price_insert_does_not_promote_an_unqualified_candidate(tmp_path) ->
 
     database.record_price_observation(
         "car-candidate",
-        Decimal("12345"),
+        Decimal(12345),
         exleasingcar_auction_id="auction-candidate",
     )
 

@@ -8,7 +8,6 @@ from exleasingcar_archive.models import AuctionCardMarker, PriceType, SaleType
 from exleasingcar_archive.parsers import PriceObservation
 
 
-
 def test_dashboard_hides_unqualified_lots_but_keeps_open_and_fixed_offers(tmp_path):
     database = ArchiveDatabase(tmp_path / "dashboard.sqlite3")
     database.initialize()

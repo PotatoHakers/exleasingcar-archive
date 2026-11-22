@@ -25,7 +25,6 @@ from bs4 import BeautifulSoup, Tag
 from .api_parser import parse_car_update_response
 from .database import ArchiveDatabase
 from .detail_parser import parse_vehicle_detail
-from .models import SaleType
 from .ingestion import AuctionContext, LotMetadata, store_car_updates
 from .metadata_parser import (
     ParsedAuctionListing,
@@ -36,6 +35,7 @@ from .metadata_parser import (
     parse_vehicle_media,
     parse_vehicle_metadata,
 )
+from .models import SaleType
 
 try:
     from playwright.sync_api import Error as PlaywrightError
