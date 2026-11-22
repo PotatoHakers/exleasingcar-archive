@@ -304,7 +304,7 @@ def test_detail_enrichment_persists_fixed_sale_type_and_price(tmp_path, monkeypa
         tmp_path / "snapshot",
     )
 
-    assert result is True
+    assert result == "fixed_price"
     assert collector.sale_types_recognized == 1
     assert collector.lot_price_observations_inserted == 1
     with sqlite3.connect(database.path) as connection:

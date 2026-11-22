@@ -80,6 +80,10 @@ footer{color:#7b8795;font-size:12px;margin-top:20px}
 .lot-gallery{display:grid;grid-template-columns:repeat(auto-fill,minmax(170px,1fr));gap:10px;margin:14px 0 18px}
 .lot-photo{border:1px solid #e1e7ef;border-radius:9px;overflow:hidden;background:#f8fafc}
 .lot-photo img{display:block;width:100%;height:150px;object-fit:contain;background:#eef2f7}
+.lot-thumb{display:block;width:82px;height:54px;object-fit:contain;background:#eef2f7;border:1px solid #e1e7ef;border-radius:6px}
+.price-source{display:block;max-width:180px;color:#7a8796;font-size:10px;white-space:normal;overflow-wrap:anywhere}
+.lot-main-title{font-weight:600;white-space:normal;min-width:180px}
+.lot-main-id{display:block;color:#7a8796;font-size:10px;margin-top:3px}
 .lot-photo .photo-meta{padding:8px 10px;font-size:11px;color:#637185;display:flex;justify-content:space-between;gap:8px}
 .lot-photo a,.report-link{color:#235b91;text-decoration:none}
 .lot-photo a:hover,.report-link:hover{text-decoration:underline}
@@ -105,7 +109,27 @@ footer{color:#7b8795;font-size:12px;margin-top:20px}
 <main>
 <div class="status"><span><i class="dot"></i>Подключено к локальной базе</span><span id="dbpath" class="mono"></span><span id="updated"></span></div>
 <div id="metrics" class="cards"><div class="card">Загрузка…</div></div>
-<section><h2>Лоты автомобилей</h2><p class="hint">Каждая строка — конкретный лот в конкретном аукционе. Повторный выход одной машины отображается отдельно. Откройте лот, чтобы посмотреть его фотографии, отчёты и собственную историю цен. Маркеры относятся к карточке аукциона.</p><div class="search-controls"><label for="make-filter">Марка</label><select id="make-filter"><option value="">Все марки</option></select><label for="lot-search">Поиск по названию, ID или номеру кузова</label><input id="lot-search" type="search" autocomplete="off" placeholder="Например, Mercedes, 19702473 или VIN"><span id="search-status" class="muted" aria-live="polite"></span></div><section id="car-card" class="detail-card" hidden aria-live="polite"></section><div class="wrap"><table><thead><tr><th></th><th>Аукцион</th><th>ID автомобиля</th><th>Автомобиль</th><th>Тип продажи</th><th>Маркеры аукциона</th><th>Пробег, км</th><th>Номер кузова</th><th>API highest_offer (€)</th><th>Мин. цена продавца (€)</th><th>Ориентир (€)</th><th>Проверка API</th><th>Первое наблюдение</th></tr></thead><tbody id="lots"></tbody></table></div><div id="lot-pagination" class="pagination-controls" hidden><button type="button" id="page-prev">← Назад</button><span id="page-info"></span><button type="button" id="page-next">Дальше →</button></div></section>
+<section><h2>Лоты автомобилей</h2><p class="hint">Каждая строка — конкретный лот в конкретном аукционе. Повторный выход одной машины отображается отдельно. Откройте лот, чтобы посмотреть его фотографии, отчёты и собственную историю цен. Маркеры относятся к карточке аукциона.</p><div class="search-controls">
+<label for="make-filter">Марка</label><select id="make-filter"><option value="">Все марки</option></select>
+<label for="model-filter">Модель</label><select id="model-filter"><option value="">Все модели</option></select>
+<label for="lot-search">Поиск по названию, ID или VIN</label><input id="lot-search" type="search" autocomplete="off" placeholder="Название, ID автомобиля или VIN-фрагмент">
+<label for="lot-sort">Сортировка</label><select id="lot-sort">
+<option value="last_observation">Последнее наблюдение</option>
+<option value="highest_offer">API highest_offer</option>
+<option value="displayed_price">Цена аукциона</option>
+<option value="fixed_price">Buy Now</option>
+<option value="minimum_price">Минимальная цена продавца</option>
+<option value="indicative_price">Ориентировочная цена</option>
+<option value="mileage">Пробег</option>
+</select>
+<select id="sort-direction" aria-label="Порядок сортировки"><option value="desc">По убыванию</option><option value="asc">По возрастанию</option></select>
+<span id="search-status" class="muted" aria-live="polite"></span>
+</div><section id="car-card" class="detail-card" hidden aria-live="polite"></section><div class="wrap"><table><thead><tr>
+<th></th><th>Фото</th><th>Автомобиль / ID</th><th>Тип продажи</th><th>Пробег, км</th>
+<th>API highest_offer (€)</th><th>Цена аукциона (€)</th><th>Buy Now (€)</th>
+<th>Мин. продавца (€)</th><th>Ориентир (€)</th><th>VIN / кузов</th>
+<th>Последнее наблюдение</th><th>Аукцион / лот</th>
+</tr></thead><tbody id="lots"></tbody></table></div><div id="lot-pagination" class="pagination-controls" hidden><button type="button" id="page-prev">← Назад</button><span id="page-info"></span><button type="button" id="page-next">Дальше →</button></div></section>
 <section><h2>История значений API highest_offer</h2><p class="hint">Здесь отображаются все полученные значения поля highest_offer, включая 0, если поле присутствовало в API-ответе. Отсутствующее поле не создаёт наблюдение. Смысл этого поля пока не подтверждён: не считайте каждое значение доказанной публичной ставкой.</p><div class="wrap"><table><thead><tr><th>Дата наблюдения</th><th>Аукцион</th><th>ID автомобиля</th><th>Значение highest_offer (€)</th><th>Источник</th></tr></thead><tbody id="bids"></tbody></table></div></section>
 <section><h2>История цен продавца</h2><p class="hint">Минимальная и ориентировочная цены — отдельно от API highest_offer и отображаемых цен.</p><div class="wrap"><table><thead><tr><th>Дата наблюдения</th><th>Аукцион</th><th>ID автомобиля</th><th>Минимальная цена (€)</th><th>Ориентировочная цена (€)</th><th>Источник</th></tr></thead><tbody id="refs"></tbody></table></div></section>
 <section><h2>Отображаемые и фиксированные цены</h2><p class="hint">Начальная/текущая цена открытого аукциона и цена «Купить сейчас» хранятся отдельно от API highest_offer и справочных цен продавца.</p><div class="wrap"><table><thead><tr><th>Дата наблюдения</th><th>Аукцион</th><th>ID автомобиля</th><th>Тип цены</th><th>Сумма (€)</th><th>Валюта</th><th>Поле источника</th></tr></thead><tbody id="lotprices"></tbody></table></div></section>
@@ -133,6 +157,8 @@ const markerBadges = markers => {
  }).join('')}</div>`;
 };
 function rows(id, values, empty) { const el=document.getElementById(id); el.innerHTML=values.length?values.join(""):`<tr><td class="empty" colspan="13">${esc(empty)}</td></tr>`; }
+const priceCell=(value,source,field)=>`<td><div>${value==null?'—':'€ '+esc(value)}</div><small class="price-source">${esc([source,field].filter(Boolean).join(' · '))}</small></td>;
+const photoCell=url=>url?'<td><img class="lot-thumb" src="'+esc(url)+'" loading="lazy" referrerpolicy="no-referrer" alt="Фото автомобиля"></td>':'<td><span class="muted">Нет фото</span></td>';
 let selectedCarId=null;
 let selectedLotId=null;
 let currentPage=1;
@@ -224,11 +250,17 @@ async function refresh(){
  try{
   const query=document.getElementById('lot-search').value.trim();
   const selectedMake=document.getElementById('make-filter').value.trim();
+  const selectedModel=document.getElementById('model-filter').value.trim();
+  const sortBy=document.getElementById('lot-sort').value;
+  const sortDirection=document.getElementById('sort-direction').value;
   const params=new URLSearchParams();
   if(selectedLotId) params.set('lot_id',selectedLotId);
   else if(selectedCarId) params.set('car_id',selectedCarId);
   else if(query) params.set('q',query);
   if(selectedMake) params.set('make',selectedMake);
+  if(selectedModel) params.set('model',selectedModel);
+  params.set('sort',sortBy);
+  params.set('direction',sortDirection);
   params.set('page',String(currentPage));
   const queryString=params.toString();
   const apiUrl='/api/data'+(queryString?'?'+queryString:'');
@@ -240,6 +272,13 @@ async function refresh(){
   const makeOptions='<option value="">Все марки</option>'+(d.available_makes||[]).map(make=>'<option value="'+esc(make)+'">'+esc(make)+'</option>').join('');
   if(makeFilter.dataset.options!==makeOptions){makeFilter.innerHTML=makeOptions;makeFilter.dataset.options=makeOptions;}
   makeFilter.value=d.selected_make || '';
+  const modelFilter=document.getElementById('model-filter');
+  const modelOptions='<option value="">Все модели</option>'+(d.available_models||[]).map(model=>'<option value="'+esc(model)+'">'+esc(model)+'</option>').join('');
+  if(modelFilter.dataset.options!==modelOptions){modelFilter.innerHTML=modelOptions;modelFilter.dataset.options=modelOptions;}
+  modelFilter.value=d.selected_model || '';
+  modelFilter.disabled=(d.available_models||[]).length===0;
+  document.getElementById('lot-sort').value=d.selected_sort || 'last_observation';
+  document.getElementById('sort-direction').value=d.sort_direction || 'desc';
   const metrics=[['Аукционов',d.counts.auctions],['Автомобилей',d.counts.vehicles],['Лотов',d.counts.auction_lots],['Наблюдений highest_offer (API)',d.counts.price_observations],['Цен продавца',d.counts.price_reference_observations],['Отображаемых/фиксированных цен',d.counts.lot_price_observations],['Событий',d.counts.auction_events]];
   document.getElementById('metrics').innerHTML=metrics.map(x=>`<div class="card"><div class="k">${esc(x[0])}</div><div class="v">${esc(x[1])}</div></div>`).join('');
   if(selectedLotId){
@@ -262,20 +301,38 @@ async function refresh(){
    document.getElementById('page-next').disabled=!pagination.has_next;
    paginationPanel.hidden=pagination.total_pages<=1;
   }
-  rows('lots',d.lots.map(x=>`<tr><td><button type="button" class="open-car" data-lot-id="${esc(x.lot_id)}">Открыть лот</button></td>${cell(x.auction_id)}${cell(x.car_id)}${cell(x.title)}${cell(x.sale_type)}<td>${markerBadges(x.markers)}</td>${cell(x.mileage_km)}${cell(x.chassis)}${moneyCell(x.highest_offer)}${moneyCell(x.minimum_price)}${moneyCell(x.indicative_price)}${cell(x.last_api_checked_at)}${cell(x.first_seen_at)}</tr>`),query?'По этому запросу ничего не найдено':'Лотов пока нет');
+  rows('lots',d.lots.map(x=>`<tr>
+   <td><button type="button" class="open-car" data-lot-id="${esc(x.lot_id)}">Открыть</button></td>
+   ${photoCell(x.primary_photo_url)}
+   <td><div class="lot-main-title">${esc(x.title)}</div><small class="lot-main-id">ID: ${esc(x.car_id)}</small></td>
+   ${cell(x.sale_type)}
+   ${cell(x.mileage_km)}
+   ${priceCell(x.highest_offer,x.highest_offer_source,'API highest_offer')}
+   ${priceCell(x.displayed_auction_price,x.displayed_price_origin,x.displayed_price_source)}
+   ${priceCell(x.fixed_price,x.fixed_price_origin,x.fixed_price_source)}
+   ${priceCell(x.minimum_price,x.minimum_price_source,'Минимум продавца')}
+   ${priceCell(x.indicative_price,x.indicative_price_source,'Ориентир продавца')}
+   ${cell(x.chassis)}
+   ${cell(x.last_observation_at)}
+   <td><div>${esc(x.source_auction_name || x.auction_id)}</div><small class="lot-main-id">Лот: ${esc(x.displayed_lot_reference)}</small></td>
+  </tr>`),query?'По этому запросу ничего не найдено':'Лотов пока нет');
   rows('bids',d.bids.map(x=>`<tr>${cell(x.observed_at)}${cell(x.auction_id)}${cell(x.car_id)}${moneyCell(x.highest_offer)}${cell(x.source)}</tr>`),'Наблюдений API highest_offer пока нет');
   rows('refs',d.references.map(x=>`<tr>${cell(x.observed_at)}${cell(x.auction_id)}${cell(x.car_id)}${moneyCell(x.minimum_price)}${moneyCell(x.indicative_price)}${cell(x.source)}</tr>`),'Наблюдений цен продавца пока нет');
   rows('lotprices',d.lot_prices.map(x=>`<tr>${cell(x.observed_at)}${cell(x.auction_id)}${cell(x.car_id)}${cell(x.price_type)}${moneyCell(x.amount)}${cell(x.currency)}${cell(x.source_field)}</tr>`),'Отображаемые и фиксированные цены пока не записаны');
   rows('events',d.events.map(x=>`<tr>${cell(x.observed_at)}${cell(x.auction_id)}${cell(x.car_id)}${cell(x.auction_phase)}${cell(x.bid_status)}${cell(x.auction_end_at)}${cell(x.remaining_seconds)}<td>${x.final_call_active===1?'<span class="pill warn">Да</span>':x.final_call_active===0?'<span class="pill">Нет</span>':'—'}</td></tr>`),'Событий пока нет');
  }catch(e){document.getElementById('updated').textContent='Ошибка чтения базы: '+e.message;}
 }
-const makeFilter=document.getElementById('make-filter');
-makeFilter.addEventListener('change',()=>{
+const resetCatalogueView=()=>{
  selectedCarId=null;
  selectedLotId=null;
  currentPage=1;
  refresh();
-});
+};
+const makeFilter=document.getElementById('make-filter');
+makeFilter.addEventListener('change',resetCatalogueView);
+document.getElementById('model-filter').addEventListener('change',resetCatalogueView);
+document.getElementById('lot-sort').addEventListener('change',resetCatalogueView);
+document.getElementById('sort-direction').addEventListener('change',resetCatalogueView);
 const searchInput=document.getElementById('lot-search');
 let searchTimer;
 searchInput.addEventListener('input',()=>{
@@ -332,6 +389,9 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 if selected_lot_id is not None and selected_lot_id <= 0:
                     selected_lot_id = None
                 selected_make = query_values.get("make", [""])[0]
+                selected_model = query_values.get("model", [""])[0]
+                sort_by = query_values.get("sort", ["last_observation"])[0]
+                sort_direction = query_values.get("direction", ["desc"])[0]
                 try:
                     page = int(query_values.get("page", ["1"])[0])
                 except ValueError:
@@ -342,6 +402,9 @@ class DashboardHandler(BaseHTTPRequestHandler):
                     selected_lot_id=selected_lot_id,
                     page=page,
                     selected_make=selected_make,
+                    selected_model=selected_model,
+                    sort_by=sort_by,
+                    sort_direction=sort_direction,
                 )
                 body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
                 self._send(200, body, "application/json; charset=utf-8")
@@ -365,6 +428,9 @@ class DashboardHandler(BaseHTTPRequestHandler):
         selected_lot_id: int | None = None,
         page: int = 1,
         selected_make: str | None = None,
+        selected_model: str | None = None,
+        sort_by: str = "last_observation",
+        sort_direction: str = "desc",
     ) -> dict[str, Any]:
         if not self.database_path.is_file():
             raise FileNotFoundError(f"Database not found: {self.database_path}")
@@ -373,10 +439,10 @@ class DashboardHandler(BaseHTTPRequestHandler):
             connection.row_factory = sqlite3.Row
             connection.execute("PRAGMA query_only = ON")
             version = int(connection.execute("PRAGMA user_version").fetchone()[0])
-            if version < 5:
+            if version < 14:
                 raise sqlite3.DatabaseError(
-                    f"Database schema is {version}; run the collector or snapshot importer "
-                    "once to migrate it to schema 5"
+                    f"Database schema is {version}; run the collector once "
+                    "to migrate it to schema 14 before opening the Dashboard."
                 )
             tables = {
                 row[0]
@@ -395,14 +461,55 @@ class DashboardHandler(BaseHTTPRequestHandler):
                     "Missing database tables: " + ", ".join(sorted(missing))
                 )
 
-            count_tables = (
-                "auctions", "vehicles", "auction_lots", "price_observations",
-                "price_reference_observations", "lot_price_observations",
-                "auction_events",
-            )
             counts = {
-                table: int(connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0])
-                for table in count_tables
+                "auctions": int(connection.execute(
+                    """
+                    SELECT COUNT(DISTINCT a.id)
+                    FROM auctions AS a
+                    JOIN auction_lots AS al ON al.auction_id = a.id
+                    WHERE al.collection_eligible = 1
+                    """
+                ).fetchone()[0]),
+                "vehicles": int(connection.execute(
+                    """
+                    SELECT COUNT(DISTINCT al.vehicle_id)
+                    FROM auction_lots AS al
+                    WHERE al.collection_eligible = 1
+                    """
+                ).fetchone()[0]),
+                "auction_lots": int(connection.execute(
+                    "SELECT COUNT(*) FROM auction_lots WHERE collection_eligible = 1"
+                ).fetchone()[0]),
+                "price_observations": int(connection.execute(
+                    """
+                    SELECT COUNT(*) FROM price_observations AS p
+                    JOIN auction_lots AS al ON al.id = p.auction_lot_id
+                    WHERE al.collection_eligible = 1
+                      AND al.sale_type = 'open_auction'
+                    """
+                ).fetchone()[0]),
+                "price_reference_observations": int(connection.execute(
+                    """
+                    SELECT COUNT(*) FROM price_reference_observations AS p
+                    JOIN auction_lots AS al ON al.id = p.auction_lot_id
+                    WHERE al.collection_eligible = 1
+                    """
+                ).fetchone()[0]),
+                "lot_price_observations": int(connection.execute(
+                    """
+                    SELECT COUNT(*) FROM lot_price_observations AS p
+                    JOIN auction_lots AS al ON al.id = p.auction_lot_id
+                    WHERE al.collection_eligible = 1
+                    """
+                ).fetchone()[0]),
+                "auction_events": int(connection.execute(
+                    """
+                    SELECT COUNT(*) FROM auction_events AS e
+                    JOIN auction_lots AS al ON al.id = e.auction_lot_id
+                    WHERE al.collection_eligible = 1
+                      AND al.sale_type = 'open_auction'
+                    """
+                ).fetchone()[0]),
             }
             normalized_search = " ".join((search_query or "").split())[:100]
             selected_car_id = " ".join((selected_car_id or "").split())[:100]
@@ -413,15 +520,85 @@ class DashboardHandler(BaseHTTPRequestHandler):
             ):
                 selected_lot_id = None
             normalized_make = " ".join((selected_make or "").split())[:100]
+            normalized_model = " ".join((selected_model or "").split())[:100]
+            valid_sorts = {
+                "last_observation", "highest_offer", "displayed_price",
+                "fixed_price", "minimum_price", "indicative_price", "mileage",
+            }
+            normalized_sort = sort_by if sort_by in valid_sorts else "last_observation"
+            normalized_direction = (
+                sort_direction.lower()
+                if sort_direction and sort_direction.lower() in {"asc", "desc"}
+                else "desc"
+            )
+            sort_expressions = {
+                "highest_offer": """CASE WHEN al.sale_type = 'open_auction' THEN
+                    (SELECT CAST(po.highest_offer AS REAL) FROM price_observations po
+                     WHERE po.auction_lot_id=al.id
+                     ORDER BY po.observed_at DESC, po.id DESC LIMIT 1)
+                    ELSE NULL END""",
+                "displayed_price": """(SELECT CAST(lp.amount AS REAL)
+                    FROM lot_price_observations lp
+                    WHERE lp.auction_lot_id=al.id
+                      AND lp.price_type='displayed_auction_price'
+                    ORDER BY lp.observed_at DESC, lp.id DESC LIMIT 1)""",
+                "fixed_price": """(SELECT CAST(lp.amount AS REAL)
+                    FROM lot_price_observations lp
+                    WHERE lp.auction_lot_id=al.id
+                      AND lp.price_type='fixed_price'
+                    ORDER BY lp.observed_at DESC, lp.id DESC LIMIT 1)""",
+                "minimum_price": """(SELECT CAST(pr.minimum_price AS REAL)
+                    FROM price_reference_observations pr
+                    WHERE pr.auction_lot_id=al.id AND pr.minimum_price IS NOT NULL
+                    ORDER BY pr.observed_at DESC, pr.id DESC LIMIT 1)""",
+                "indicative_price": """(SELECT CAST(pr.indicative_price AS REAL)
+                    FROM price_reference_observations pr
+                    WHERE pr.auction_lot_id=al.id AND pr.indicative_price IS NOT NULL
+                    ORDER BY pr.observed_at DESC, pr.id DESC LIMIT 1)""",
+                "mileage": "al.mileage_km",
+                "last_observation": """NULLIF(MAX(
+                    COALESCE(al.last_seen_at, ''),
+                    COALESCE(al.last_api_checked_at, ''),
+                    COALESCE((SELECT MAX(po.observed_at) FROM price_observations po
+                              WHERE po.auction_lot_id=al.id), ''),
+                    COALESCE((SELECT MAX(pr.observed_at) FROM price_reference_observations pr
+                              WHERE pr.auction_lot_id=al.id), ''),
+                    COALESCE((SELECT MAX(lp.observed_at) FROM lot_price_observations lp
+                              WHERE lp.auction_lot_id=al.id), ''),
+                    COALESCE((SELECT MAX(ae.observed_at) FROM auction_events ae
+                              WHERE ae.auction_lot_id=al.id), '')
+                ), '')""",
+            }
+            sort_expression = sort_expressions[normalized_sort]
+            order_by_sql = (
+                f"({sort_expression}) IS NULL ASC, "
+                f"({sort_expression}) {normalized_direction.upper()}, al.id ASC"
+            )
             available_makes = [
                 row["make"]
                 for row in connection.execute(
                     """
-                    SELECT MIN(TRIM(make)) AS make
-                    FROM vehicles
-                    WHERE make IS NOT NULL AND TRIM(make) <> ''
-                    GROUP BY LOWER(TRIM(make))
+                    SELECT MIN(TRIM(v.make)) AS make
+                    FROM vehicles AS v
+                    JOIN auction_lots AS al ON al.vehicle_id = v.id
+                    WHERE al.collection_eligible = 1
+                      AND v.make IS NOT NULL AND TRIM(v.make) <> ''
+                    GROUP BY LOWER(TRIM(v.make))
                     ORDER BY LOWER(make), make
+                    """
+                )
+            ]
+            available_models = [
+                row["model"]
+                for row in connection.execute(
+                    """
+                    SELECT MIN(TRIM(v.model)) AS model
+                    FROM vehicles AS v
+                    JOIN auction_lots AS al ON al.vehicle_id = v.id
+                    WHERE al.collection_eligible = 1
+                      AND v.model IS NOT NULL AND TRIM(v.model) <> ''
+                    GROUP BY LOWER(TRIM(v.model))
+                    ORDER BY LOWER(model), model
                     """
                 )
             ]
@@ -430,7 +607,11 @@ class DashboardHandler(BaseHTTPRequestHandler):
                        a.exleasingcar_auction_id AS auction_id,
                        v.source_car_id AS car_id,
                        COALESCE(v.displayed_title, trim(COALESCE(v.make,'') || ' ' || COALESCE(v.model,''))) AS title,
+                       v.make,
+                       v.model,
                        al.sale_type,
+                       al.collection_eligible,
+                       al.has_fixed_price,
                        al.displayed_lot_reference,
                        al.mileage_km,
                         al.last_api_checked_at,
@@ -440,18 +621,74 @@ class DashboardHandler(BaseHTTPRequestHandler):
                               CASE WHEN COALESCE(v.chassis_number_masked,0)=1 THEN '… (скрыт)' ELSE '' END
                          ELSE NULL
                        END AS chassis,
-                       (SELECT po.highest_offer FROM price_observations po
-                        WHERE po.auction_lot_id=al.id ORDER BY po.observed_at DESC, po.id DESC LIMIT 1) AS highest_offer,
-                       (SELECT po.currency FROM price_observations po
-                        WHERE po.auction_lot_id=al.id ORDER BY po.observed_at DESC, po.id DESC LIMIT 1) AS highest_offer_currency,
-                       (SELECT po.observed_at FROM price_observations po
-                        WHERE po.auction_lot_id=al.id ORDER BY po.observed_at DESC, po.id DESC LIMIT 1) AS highest_offer_observed_at,
-                        (SELECT pr.minimum_price FROM price_reference_observations pr
-                        WHERE pr.auction_lot_id=al.id ORDER BY pr.observed_at DESC, pr.id DESC LIMIT 1) AS minimum_price,
+                       CASE WHEN al.sale_type = 'open_auction' THEN
+                         (SELECT po.highest_offer FROM price_observations po
+                          WHERE po.auction_lot_id=al.id ORDER BY po.observed_at DESC, po.id DESC LIMIT 1)
+                       ELSE NULL END AS highest_offer,
+                       CASE WHEN al.sale_type = 'open_auction' THEN
+                         (SELECT po.currency FROM price_observations po
+                          WHERE po.auction_lot_id=al.id ORDER BY po.observed_at DESC, po.id DESC LIMIT 1)
+                       ELSE NULL END AS highest_offer_currency,
+                       CASE WHEN al.sale_type = 'open_auction' THEN
+                         (SELECT po.observed_at FROM price_observations po
+                          WHERE po.auction_lot_id=al.id ORDER BY po.observed_at DESC, po.id DESC LIMIT 1)
+                       ELSE NULL END AS highest_offer_observed_at,
+                       CASE WHEN al.sale_type = 'open_auction' THEN
+                         (SELECT po.source FROM price_observations po
+                          WHERE po.auction_lot_id=al.id ORDER BY po.observed_at DESC, po.id DESC LIMIT 1)
+                       ELSE NULL END AS highest_offer_source,
+                       (SELECT lp.amount FROM lot_price_observations lp
+                        WHERE lp.auction_lot_id=al.id AND lp.price_type='displayed_auction_price'
+                        ORDER BY lp.observed_at DESC, lp.id DESC LIMIT 1) AS displayed_auction_price,
+                       (SELECT lp.source FROM lot_price_observations lp
+                        WHERE lp.auction_lot_id=al.id AND lp.price_type='displayed_auction_price'
+                        ORDER BY lp.observed_at DESC, lp.id DESC LIMIT 1) AS displayed_price_origin,
+                       (SELECT lp.source_field FROM lot_price_observations lp
+                        WHERE lp.auction_lot_id=al.id AND lp.price_type='displayed_auction_price'
+                        ORDER BY lp.observed_at DESC, lp.id DESC LIMIT 1) AS displayed_price_source,
+                       (SELECT lp.amount FROM lot_price_observations lp
+                        WHERE lp.auction_lot_id=al.id AND lp.price_type='fixed_price'
+                        ORDER BY lp.observed_at DESC, lp.id DESC LIMIT 1) AS fixed_price,
+                       (SELECT lp.source FROM lot_price_observations lp
+                        WHERE lp.auction_lot_id=al.id AND lp.price_type='fixed_price'
+                        ORDER BY lp.observed_at DESC, lp.id DESC LIMIT 1) AS fixed_price_origin,
+                       (SELECT lp.source_field FROM lot_price_observations lp
+                        WHERE lp.auction_lot_id=al.id AND lp.price_type='fixed_price'
+                        ORDER BY lp.observed_at DESC, lp.id DESC LIMIT 1) AS fixed_price_source,
+                       (SELECT pr.minimum_price FROM price_reference_observations pr
+                        WHERE pr.auction_lot_id=al.id AND pr.minimum_price IS NOT NULL
+                        ORDER BY pr.observed_at DESC, pr.id DESC LIMIT 1) AS minimum_price,
+                       (SELECT pr.source FROM price_reference_observations pr
+                        WHERE pr.auction_lot_id=al.id AND pr.minimum_price IS NOT NULL
+                        ORDER BY pr.observed_at DESC, pr.id DESC LIMIT 1) AS minimum_price_source,
                        (SELECT pr.currency FROM price_reference_observations pr
                         WHERE pr.auction_lot_id=al.id ORDER BY pr.observed_at DESC, pr.id DESC LIMIT 1) AS reference_currency,
-                        (SELECT pr.indicative_price FROM price_reference_observations pr
-                        WHERE pr.auction_lot_id=al.id ORDER BY pr.observed_at DESC, pr.id DESC LIMIT 1) AS indicative_price,
+                       (SELECT pr.indicative_price FROM price_reference_observations pr
+                        WHERE pr.auction_lot_id=al.id AND pr.indicative_price IS NOT NULL
+                        ORDER BY pr.observed_at DESC, pr.id DESC LIMIT 1) AS indicative_price,
+                       (SELECT pr.source FROM price_reference_observations pr
+                        WHERE pr.auction_lot_id=al.id AND pr.indicative_price IS NOT NULL
+                        ORDER BY pr.observed_at DESC, pr.id DESC LIMIT 1) AS indicative_price_source,
+                       NULLIF(MAX(
+                         COALESCE(al.last_seen_at, ''),
+                         COALESCE(al.last_api_checked_at, ''),
+                         COALESCE((SELECT MAX(po.observed_at) FROM price_observations po
+                                   WHERE po.auction_lot_id=al.id), ''),
+                         COALESCE((SELECT MAX(pr.observed_at) FROM price_reference_observations pr
+                                   WHERE pr.auction_lot_id=al.id), ''),
+                         COALESCE((SELECT MAX(lp.observed_at) FROM lot_price_observations lp
+                                   WHERE lp.auction_lot_id=al.id), ''),
+                         COALESCE((SELECT MAX(ae.observed_at) FROM auction_events ae
+                                   WHERE ae.auction_lot_id=al.id), '')
+                       ), '') AS last_observation_at,
+                       (SELECT COALESCE(m.preview_url, m.source_url)
+                        FROM lot_media_sources AS m
+                        WHERE m.auction_lot_id=al.id AND m.media_type='photo'
+                        ORDER BY m.source_order, m.id LIMIT 1) AS primary_photo_preview,
+                       (SELECT m.source_url
+                        FROM lot_media_sources AS m
+                        WHERE m.auction_lot_id=al.id AND m.media_type='photo'
+                        ORDER BY m.source_order, m.id LIMIT 1) AS primary_photo_source,
                        al.first_seen_at,
                        al.last_seen_at,
                        a.source_auction_name,
@@ -462,7 +699,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 JOIN vehicles v ON v.id=al.vehicle_id
                 LEFT JOIN auctions a ON a.id=al.auction_id
             """
-            lot_conditions: list[str] = []
+            lot_conditions: list[str] = ["al.collection_eligible = 1"]
             filter_values: list[str] = []
             if selected_lot_id is not None:
                 lot_conditions.append("al.id = ?")
@@ -491,6 +728,11 @@ class DashboardHandler(BaseHTTPRequestHandler):
                         "lower(trim(COALESCE(v.make, ''))) = lower(?)"
                     )
                     filter_values.append(normalized_make)
+                if normalized_model:
+                    lot_conditions.append(
+                        "lower(trim(COALESCE(v.model, ''))) = lower(?)"
+                    )
+                    filter_values.append(normalized_model)
 
             lots_filter = (
                 " WHERE " + " AND ".join(lot_conditions) if lot_conditions else ""
@@ -511,17 +753,24 @@ class DashboardHandler(BaseHTTPRequestHandler):
             requested_page = max(1, int(page))
             if selected_car_id or selected_lot_id is not None:
                 current_page = 1
-                lots_sql += lots_filter + " ORDER BY al.last_seen_at DESC, al.id DESC"
+                lots_sql += lots_filter + f" ORDER BY {order_by_sql}"
             else:
                 current_page = min(requested_page, total_pages)
                 offset = (current_page - 1) * LOT_PAGE_SIZE
                 lots_sql += (
                     lots_filter
-                    + " ORDER BY al.last_seen_at DESC, al.id DESC LIMIT ? OFFSET ?"
+                    + f" ORDER BY {order_by_sql} LIMIT ? OFFSET ?"
                 )
                 parameters = (*parameters, LOT_PAGE_SIZE, offset)
 
             lots = [dict(row) for row in connection.execute(lots_sql, parameters)]
+            for lot in lots:
+                raw_preview = lot.pop("primary_photo_preview", None)
+                raw_source = lot.pop("primary_photo_source", None)
+                lot["primary_photo_url"] = (
+                    _safe_exleasingcar_url(raw_preview)
+                    or _safe_exleasingcar_url(raw_source)
+                )
             markers_by_auction: dict[str, list[dict[str, Any]]] = {}
             auction_ids = sorted({
                 lot["auction_id"] for lot in lots if lot["auction_id"]
@@ -597,6 +846,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 ).fetchone()
                 vehicle = dict(vehicle_row) if vehicle_row is not None else None
 
+            open_history_filter = history_filter + " AND al.sale_type = 'open_auction'"
             bids = [dict(row) for row in connection.execute(
                 f"""
                 SELECT po.observed_at, a.exleasingcar_auction_id AS auction_id,
@@ -605,7 +855,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 JOIN auction_lots al ON al.id=po.auction_lot_id
                 JOIN vehicles v ON v.id=al.vehicle_id
                 LEFT JOIN auctions a ON a.id=al.auction_id
-                {history_filter}
+                {open_history_filter}
                 ORDER BY po.observed_at DESC, po.id DESC{history_limit}
                 """,
                 history_parameters,
@@ -647,7 +897,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 JOIN auction_lots al ON al.id=ae.auction_lot_id
                 JOIN vehicles v ON v.id=al.vehicle_id
                 LEFT JOIN auctions a ON a.id=al.auction_id
-                {history_filter}
+                {open_history_filter}
                 ORDER BY ae.observed_at DESC, ae.id DESC{history_limit}
                 """,
                 history_parameters,
@@ -662,7 +912,11 @@ class DashboardHandler(BaseHTTPRequestHandler):
             if selected_lot_id is not None and lots:
                 selected_lot_row = lots[0]
                 lot_detail = dict(selected_lot_row)
-                highest_offer = bids[0] if bids else None
+                highest_offer = (
+                    bids[0]
+                    if bids and selected_lot_row["sale_type"] == "open_auction"
+                    else None
+                )
                 latest_displayed = next(
                     (
                         row
@@ -757,14 +1011,17 @@ class DashboardHandler(BaseHTTPRequestHandler):
                                        al.last_api_checked_at,
                                        al.first_seen_at,
                                        al.last_seen_at,
-                                       (SELECT po.highest_offer
-                                        FROM price_observations po
-                                        WHERE po.auction_lot_id = al.id
-                                        ORDER BY po.observed_at DESC, po.id DESC
-                                        LIMIT 1) AS highest_offer
+                                       CASE WHEN al.sale_type = 'open_auction' THEN
+                                         (SELECT po.highest_offer
+                                          FROM price_observations po
+                                          WHERE po.auction_lot_id = al.id
+                                          ORDER BY po.observed_at DESC, po.id DESC
+                                          LIMIT 1)
+                                       ELSE NULL END AS highest_offer
                                 FROM auction_lots al
                                 LEFT JOIN auctions a ON a.id = al.auction_id
                                 WHERE al.vehicle_id = ? AND al.id <> ?
+                                  AND al.collection_eligible = 1
                                 ORDER BY al.last_seen_at DESC, al.id DESC
                                 """,
                                 (vehicle_id, selected_lot_id),
@@ -868,7 +1125,11 @@ class DashboardHandler(BaseHTTPRequestHandler):
             "pdf_damages": pdf_damages,
             "lot_prices_summary": lot_prices_summary,
             "available_makes": available_makes,
+            "available_models": available_models,
             "selected_make": normalized_make,
+            "selected_model": normalized_model,
+            "selected_sort": normalized_sort,
+            "sort_direction": normalized_direction,
             "lots": lots,
             "pagination": {
                 "page": current_page,

@@ -22,6 +22,7 @@ class ParsedVehicleDetail:
     bidding_mode_classes: tuple[str, ...]
     displayed_auction_price: PriceObservation | None
     fixed_price: PriceObservation | None
+    has_fixed_price_option: bool
     is_hot_bid: bool
 
     @property
@@ -29,6 +30,14 @@ class ParsedVehicleDetail:
         """Only public open auctions belong to the main monitor."""
 
         return self.sale_type is SaleType.OPEN_AUCTION
+
+    @property
+    def should_archive(self) -> bool:
+        """Archive public open auctions or any lot with a verified fixed price."""
+        return (
+            self.sale_type is SaleType.OPEN_AUCTION
+            or self.fixed_price is not None
+        )
 
 
 def detect_car_id(
@@ -207,6 +216,10 @@ def parse_vehicle_detail(
 
     displayed_price = None
     fixed_price = None
+    has_fixed_price_option = (
+        (bids_container is not None and "fix" in set(bids_container.get("class", [])))
+        or soup.select_one(".fixed-price") is not None
+    )
 
     # This is a public displayed auction price, never a bid observation.
     if sale_type is SaleType.OPEN_AUCTION and bids_container is not None:
@@ -237,10 +250,10 @@ def parse_vehicle_detail(
                     source_field=source_field or "current-price",
                 )
 
-    # A fixed price is taken only from the explicit fixed-price UI block.
-    # schema.org Offer is a fallback only after the "fix" mode marker
-    # has independently confirmed the sale mechanism.
-    if sale_type is SaleType.FIXED_PRICE:
+    # A fixed price is independent of the primary bidding mode: the site may
+    # expose Buy Now alongside either open or closed bidding.
+    # schema.org Offer is used only when an explicit fixed-price option exists.
+    if has_fixed_price_option:
         fixed_block = soup.select_one(".fixed-price")
         buy_offer = fixed_block.select_one(".buy-offer") if fixed_block else None
         raw_fixed_price = None
@@ -271,5 +284,6 @@ def parse_vehicle_detail(
         bidding_mode_classes=bidding_classes,
         displayed_auction_price=displayed_price,
         fixed_price=fixed_price,
+        has_fixed_price_option=has_fixed_price_option,
         is_hot_bid=has_hot_bid_marker(soup),
     )

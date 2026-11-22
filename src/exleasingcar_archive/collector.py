@@ -14,7 +14,7 @@ import json
 import re
 import time
 from collections.abc import Mapping
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -25,6 +25,7 @@ from bs4 import BeautifulSoup, Tag
 from .api_parser import parse_car_update_response
 from .database import ArchiveDatabase
 from .detail_parser import parse_vehicle_detail
+from .models import SaleType
 from .ingestion import AuctionContext, LotMetadata, store_car_updates
 from .metadata_parser import (
     ParsedAuctionListing,
@@ -74,6 +75,10 @@ class CollectorSummary:
     lot_price_observations_checked: int
     lot_price_observations_inserted: int
     lot_price_observations_unchanged: int
+    qualified_lots: int
+    lots_with_fixed_price: int
+    excluded_closed_lots: int
+    excluded_unknown_lots: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -102,6 +107,7 @@ def _catalog_detail_coverage(
 class CapturedApiResponse:
     url: str
     payload: Mapping[str, Any]
+    observed_at: datetime
 
 
 class ApiResponseRecorder:
@@ -145,7 +151,13 @@ class ApiResponseRecorder:
         if not isinstance(payload, Mapping):
             self.errors.append(f"Unexpected JSON response shape: {response.url}")
             return False
-        self.responses.append(CapturedApiResponse(response.url, payload))
+        self.responses.append(
+            CapturedApiResponse(
+                response.url,
+                payload,
+                observed_at=datetime.now(timezone.utc),
+            )
+        )
         return True
 
     def _on_response_received(self, response: Any) -> None:
@@ -423,6 +435,10 @@ class ExleasingcarCollector:
         self.events_inserted = 0
         self.events_unchanged = 0
         self.sale_types_recognized = 0
+        self.qualified_lots = 0
+        self.lots_with_fixed_price = 0
+        self.excluded_closed_lots = 0
+        self.excluded_unknown_lots = 0
         self.lot_price_observations_checked = 0
         self.lot_price_observations_inserted = 0
         self.lot_price_observations_unchanged = 0
@@ -439,10 +455,17 @@ class ExleasingcarCollector:
     def _persist_api_updates(
         self,
         auction: AuctionContext,
-        catalog_car_ids: set[str],
+        eligible_car_ids: set[str],
         lot_metadata: Mapping[str, LotMetadata],
+        *,
+        open_auction_car_ids: set[str] | None = None,
     ) -> None:
-        """Ingest new API responses, keeping auction/vehicle relationships strict."""
+        """Persist API data only after each lot has passed archive qualification.
+
+        Open auctions retain their API offer/event observations. Fixed-price-only
+        lots retain seller reference prices, but hidden-bid fields are deliberately
+        discarded because they are not public purchase prices.
+        """
         while self.api_cursor < len(self.recorder.responses):
             captured = self.recorder.responses[self.api_cursor]
             self.api_cursor += 1
@@ -453,14 +476,35 @@ class ExleasingcarCollector:
                 print(f"  Skipped malformed API response: {exc}")
                 continue
 
-            selected = filter_updates_for_catalog(updates, catalog_car_ids)
+            selected = filter_updates_for_catalog(updates, eligible_car_ids)
             if not selected:
                 continue
+
+            if open_auction_car_ids is not None:
+                selected = {
+                    car_id: (
+                        update
+                        if car_id in open_auction_car_ids
+                        else replace(
+                            update,
+                            highest_offer=None,
+                            user_offer=None,
+                            bid_status=None,
+                            auction_phase=None,
+                            final_call_active=False,
+                            remaining_seconds=None,
+                            auction_end_at=None,
+                            live_bidding=None,
+                        )
+                    )
+                    for car_id, update in selected.items()
+                }
 
             summary = store_car_updates(
                 self.database,
                 selected,
                 auction,
+                observed_at=captured.observed_at,
                 lot_metadata={
                     car_id: lot_metadata[car_id]
                     for car_id in selected
@@ -498,6 +542,7 @@ class ExleasingcarCollector:
                 displayed_lot_reference=lot.displayed_lot_reference,
                 listing_code_attribute=lot.listing_code_attribute,
                 mileage_km=lot.mileage_km,
+                collection_eligible=None,
                 observed_at=observed_at,
             )
             result[lot.source_car_id] = _lot_metadata(lot)
@@ -816,14 +861,15 @@ class ExleasingcarCollector:
         page: Any,
         observed_at: datetime,
         snapshot_dir: Path,
-    ) -> bool:
+    ) -> str | None:
+        """Qualify a lot before retaining detail fields, media links or prices."""
         try:
             page.goto(detail_url, wait_until="domcontentloaded", timeout=45_000)
             _wait_for_dynamic_content(page)
             self.recorder.wait_for_pending(page)
         except PlaywrightError as exc:
             print(f"  Detail page {car_id} failed: {exc}")
-            return False
+            return None
 
         html = page.content()
         vehicle = parse_vehicle_metadata(html, page.url)
@@ -841,37 +887,31 @@ class ExleasingcarCollector:
                 self.recorder.wait_for_pending(page)
             except PlaywrightError as exc:
                 print(f"  Detail retry after automatic login failed for {car_id}: {exc}")
-                return False
+                return None
             html = page.content()
             vehicle = parse_vehicle_metadata(html, page.url)
         elif (
             vehicle.source_car_id != car_id
-            # The account header may be present behind the site's post-login
-            # information dialog. Dismiss only the explicit Continue control,
-            # then retry the same read-only detail URL.
             and self._click_continue_if_visible(page)
         ):
-                try:
-                    page.goto(detail_url, wait_until="domcontentloaded", timeout=45_000)
-                    _wait_for_dynamic_content(page)
-                    self.recorder.wait_for_pending(page)
-                except PlaywrightError as exc:
-                    print(f"  Detail retry after Continue failed for {car_id}: {exc}")
-                    return False
-                html = page.content()
-                vehicle = parse_vehicle_metadata(html, page.url)
+            try:
+                page.goto(detail_url, wait_until="domcontentloaded", timeout=45_000)
+                _wait_for_dynamic_content(page)
+                self.recorder.wait_for_pending(page)
+            except PlaywrightError as exc:
+                print(f"  Detail retry after Continue failed for {car_id}: {exc}")
+                return None
+            html = page.content()
+            vehicle = parse_vehicle_metadata(html, page.url)
 
-        self._save_html(snapshot_dir / f"vehicle_{_safe_component(car_id)}.html", html)
         if vehicle.source_car_id != car_id:
             print(
                 f"  Skipped detail {car_id}: expected page ID {car_id}, "
                 f"received {vehicle.source_car_id!r}; final URL: {page.url}; "
-                f"title: {page.title()!r}. Snapshot saved for inspection."
+                f"title: {page.title()!r}."
             )
-            return False
+            return None
 
-        # A successful detail load confirms that manual sign-in worked. Allow
-        # another re-authentication pause later if the server expires the session again.
         self._manual_reauth_prompted = False
         if (
             vehicle.exleasingcar_auction_id is not None
@@ -881,8 +921,46 @@ class ExleasingcarCollector:
                 f"  Skipped detail {car_id}: auction ID mismatch "
                 f"{vehicle.exleasingcar_auction_id} != {auction.exleasingcar_auction_id}"
             )
-            return False
+            return None
 
+        parsed_detail = parse_vehicle_detail(
+            html,
+            source_car_id=car_id,
+            page_url=page.url,
+        )
+        fixed_price_available = parsed_detail.fixed_price is not None
+        archive_eligible = parsed_detail.should_archive
+        self.database.set_auction_lot_qualification(
+            car_id,
+            auction.exleasingcar_auction_id,
+            sale_type=parsed_detail.sale_type,
+            has_fixed_price=fixed_price_available,
+            collection_eligible=archive_eligible,
+            checked_at=datetime.now(timezone.utc),
+        )
+
+        if parsed_detail.sale_type is not None:
+            self.sale_types_recognized += 1
+        if fixed_price_available:
+            self.lots_with_fixed_price += 1
+
+        if not archive_eligible:
+            if parsed_detail.sale_type is SaleType.CLOSED_AUCTION:
+                self.excluded_closed_lots += 1
+                outcome = "excluded_closed"
+                reason = "closed bidding without a verified fixed price"
+            else:
+                self.excluded_unknown_lots += 1
+                outcome = "excluded_unknown"
+                reason = "unknown or unpriced sale mode"
+            print(
+                f"  Lot {car_id} excluded from the archive: {reason}; "
+                "no detail metadata, price history or media URLs retained."
+            )
+            return outcome
+
+        self.qualified_lots += 1
+        self._save_html(snapshot_dir / f"vehicle_{_safe_component(car_id)}.html", html)
         media_references = parse_vehicle_media(html, page.url)
         for reference in media_references:
             self.database.upsert_lot_media_source(
@@ -905,24 +983,11 @@ class ExleasingcarCollector:
                 f"{photo_count} photo(s), {report_count} report(s)"
             )
 
-        parsed_detail = parse_vehicle_detail(
-            html,
-            source_car_id=car_id,
-            page_url=page.url,
-        )
         if parsed_detail.sale_type is None:
             print(
-                f"  WARNING: sale type for vehicle {car_id} is unknown; "
-                "vehicle metadata is saved without guessing the sale mode."
+                f"  Lot {car_id} included only because a verified fixed price "
+                "is publicly available; bidding mode remains unknown."
             )
-        else:
-            self.database.upsert_auction_lot(
-                car_id,
-                auction.exleasingcar_auction_id,
-                sale_type=parsed_detail.sale_type,
-                observed_at=observed_at,
-            )
-            self.sale_types_recognized += 1
 
         for price in (
             parsed_detail.displayed_auction_price,
@@ -954,12 +1019,10 @@ class ExleasingcarCollector:
             last_registration_country_name=vehicle.last_registration_country_name,
             observed_at=observed_at,
         )
-        self.database.mark_detail_checked(
-            car_id,
-            auction.exleasingcar_auction_id,
-            checked_at=datetime.now(timezone.utc),
-        )
-        return True
+
+        if parsed_detail.sale_type is SaleType.OPEN_AUCTION:
+            return "open_auction"
+        return "fixed_price"
 
     def _collect_auction(
         self,
@@ -1031,14 +1094,6 @@ class ExleasingcarCollector:
             lots_seen += len(catalog.lots)
             detail_urls.update(extract_vehicle_detail_urls(html, page.url))
 
-            # The page's AJAX responses are parsed only after its catalog IDs are
-            # known, so unrelated IDs can never be attached to this auction.
-            self._persist_api_updates(
-                auction,
-                set(all_lot_metadata),
-                all_lot_metadata,
-            )
-
             pagination = parse_catalog_pagination(html, page.url)
             next_url = pagination.next_page_url
             if next_url is None:
@@ -1053,9 +1108,7 @@ class ExleasingcarCollector:
             if self.page_delay_seconds:
                 time.sleep(self.page_delay_seconds)
 
-        # Process any endpoint responses that finished as the final page closed.
-        self._persist_api_updates(auction, set(all_lot_metadata), all_lot_metadata)
-
+        # API responses remain in memory until each lot has been qualified.
         if (
             listing.vehicle_count is not None
             and listing.vehicle_count > len(all_lot_metadata)
@@ -1074,6 +1127,16 @@ class ExleasingcarCollector:
             (car_id, detail_urls[car_id]) for car_id in ordered_car_ids
             if car_id in detail_urls
         ]
+        previously_eligible = self.database.get_collection_eligible_lots(
+            listing.exleasingcar_auction_id,
+            set(all_lot_metadata),
+        )
+        eligible_car_ids = set(previously_eligible)
+        open_auction_car_ids = {
+            car_id
+            for car_id, sale_type in previously_eligible.items()
+            if sale_type == SaleType.OPEN_AUCTION.value
+        }
         if max_detail_pages == 0:
             detail_items = []
         elif max_detail_pages > 0:
@@ -1086,24 +1149,38 @@ class ExleasingcarCollector:
             )
             details_attempted += 1
             attempted_detail_ids.add(car_id)
-            if self._enrich_vehicle_detail(
+            qualification = self._enrich_vehicle_detail(
                 auction,
                 car_id,
                 detail_url,
                 page,
                 observed_at,
                 auction_dir,
-            ):
-                details_processed += 1
-            else:
-                failed_detail_ids.append(car_id)
-            self._persist_api_updates(
-                auction,
-                set(all_lot_metadata),
-                all_lot_metadata,
             )
+            if qualification is None:
+                failed_detail_ids.append(car_id)
+            else:
+                details_processed += 1
+                if qualification == "open_auction":
+                    eligible_car_ids.add(car_id)
+                    open_auction_car_ids.add(car_id)
+                elif qualification == "fixed_price":
+                    eligible_car_ids.add(car_id)
+                    open_auction_car_ids.discard(car_id)
+                else:
+                    eligible_car_ids.discard(car_id)
+                    open_auction_car_ids.discard(car_id)
             if self.page_delay_seconds:
                 time.sleep(self.page_delay_seconds)
+
+        # Only API rows belonging to known or newly qualified lots are persisted.
+        # Fixed-price-only lots keep seller references but not hidden-bid fields.
+        self._persist_api_updates(
+            auction,
+            eligible_car_ids,
+            all_lot_metadata,
+            open_auction_car_ids=open_auction_car_ids,
+        )
 
         coverage = _catalog_detail_coverage(
             lots_seen,
@@ -1135,7 +1212,7 @@ class ExleasingcarCollector:
             print("  Detail pages not processed: " + ", ".join(failed_detail_ids))
         if unattempted_detail_ids:
             print(
-                "  Detail pages skipped by --max-detail-pages: "
+                "  Detail pages deferred by weekly refresh or --max-detail-pages: "
                 + ", ".join(unattempted_detail_ids)
             )
         return pages_processed, lots_seen, details_processed
@@ -1279,6 +1356,10 @@ class ExleasingcarCollector:
             lot_price_observations_checked=self.lot_price_observations_checked,
             lot_price_observations_inserted=self.lot_price_observations_inserted,
             lot_price_observations_unchanged=self.lot_price_observations_unchanged,
+            qualified_lots=self.qualified_lots,
+            lots_with_fixed_price=self.lots_with_fixed_price,
+            excluded_closed_lots=self.excluded_closed_lots,
+            excluded_unknown_lots=self.excluded_unknown_lots,
         )
 
 

@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 
 from .api_parser import parse_car_update_response
 from .database import ArchiveDatabase
 from .detail_parser import parse_vehicle_detail
 from .ingestion import AuctionContext, IngestionSummary, LotMetadata, store_car_updates
+from .models import SaleType
 from .metadata_parser import (
     ParsedAuctionListing,
     ParsedAuctionLotMetadata,
@@ -36,6 +37,8 @@ class MetadataImportSummary:
     sale_type_recognized: bool = False
     lot_price_observations_inserted: int = 0
     media_sources_registered: int = 0
+    collection_eligible: bool = False
+    has_fixed_price: bool = False
 
 
 def _auction_context(listing: ParsedAuctionListing) -> AuctionContext:
@@ -229,37 +232,8 @@ def import_html_snapshots(
             displayed_lot_reference=lot.displayed_lot_reference,
             listing_code_attribute=lot.listing_code_attribute,
             mileage_km=lot.mileage_km,
+            collection_eligible=None,
             observed_at=timestamp,
-        )
-
-    database.upsert_vehicle(
-        vehicle.source_car_id,
-        displayed_title=vehicle.title,
-        chassis_number=vehicle.chassis_number,
-        chassis_number_fragment=vehicle.chassis_number_fragment,
-        chassis_number_masked=vehicle.chassis_number_masked,
-        location_text=vehicle.location_text,
-        location_country_code=vehicle.location_country_code,
-        location_country_name=vehicle.location_country_name,
-        last_registration_country_code=vehicle.last_registration_country_code,
-        last_registration_country_name=vehicle.last_registration_country_name,
-        observed_at=timestamp,
-    )
-
-    media_references = parse_vehicle_media(
-        vehicle_detail_html,
-        vehicle_detail_url,
-    )
-    for reference in media_references:
-        database.upsert_lot_media_source(
-            vehicle.source_car_id,
-            catalog.exleasingcar_auction_id,
-            reference.media_type,
-            reference.source_url,
-            preview_url=reference.preview_url,
-            label=reference.label,
-            source_order=reference.source_order,
-            discovered_at=timestamp,
         )
 
     parsed_detail = parse_vehicle_detail(
@@ -267,48 +241,117 @@ def import_html_snapshots(
         source_car_id=vehicle.source_car_id,
         page_url=vehicle_detail_url,
     )
-    if parsed_detail.sale_type is not None:
-        database.upsert_auction_lot(
+    has_fixed_price = parsed_detail.fixed_price is not None
+    collection_eligible = parsed_detail.should_archive
+    database.set_auction_lot_qualification(
+        vehicle.source_car_id,
+        catalog.exleasingcar_auction_id,
+        sale_type=parsed_detail.sale_type,
+        has_fixed_price=has_fixed_price,
+        collection_eligible=collection_eligible,
+        checked_at=timestamp,
+    )
+
+    media_references = ()
+    lot_prices_inserted = 0
+    if collection_eligible:
+        database.upsert_vehicle(
             vehicle.source_car_id,
-            catalog.exleasingcar_auction_id,
-            sale_type=parsed_detail.sale_type,
+            displayed_title=vehicle.title,
+            chassis_number=vehicle.chassis_number,
+            chassis_number_fragment=vehicle.chassis_number_fragment,
+            chassis_number_masked=vehicle.chassis_number_masked,
+            location_text=vehicle.location_text,
+            location_country_code=vehicle.location_country_code,
+            location_country_name=vehicle.location_country_name,
+            last_registration_country_code=vehicle.last_registration_country_code,
+            last_registration_country_name=vehicle.last_registration_country_name,
             observed_at=timestamp,
         )
 
-    lot_prices_inserted = 0
-    for price in (
-        parsed_detail.displayed_auction_price,
-        parsed_detail.fixed_price,
-    ):
-        if price is None:
-            continue
-        lot_prices_inserted += int(
-            database.record_lot_price_observation(
-                vehicle.source_car_id,
-                price,
-                observed_at=timestamp,
-                exleasingcar_auction_id=catalog.exleasingcar_auction_id,
-                sale_type=parsed_detail.sale_type,
-            )
+        media_references = parse_vehicle_media(
+            vehicle_detail_html,
+            vehicle_detail_url,
         )
+        for reference in media_references:
+            database.upsert_lot_media_source(
+                vehicle.source_car_id,
+                catalog.exleasingcar_auction_id,
+                reference.media_type,
+                reference.source_url,
+                preview_url=reference.preview_url,
+                label=reference.label,
+                source_order=reference.source_order,
+                discovered_at=timestamp,
+            )
+
+        for price in (
+            parsed_detail.displayed_auction_price,
+            parsed_detail.fixed_price,
+        ):
+            if price is None:
+                continue
+            lot_prices_inserted += int(
+                database.record_lot_price_observation(
+                    vehicle.source_car_id,
+                    price,
+                    observed_at=timestamp,
+                    exleasingcar_auction_id=catalog.exleasingcar_auction_id,
+                    sale_type=parsed_detail.sale_type,
+                )
+            )
 
     api_summary = None
     if parsed_api_updates is not None:
-        api_summary = store_car_updates(
-            database,
-            parsed_api_updates,
-            selected_context,
-            observed_at=timestamp,
-            lot_metadata={
-                car_id: _lot_context(lot)
-                for car_id, lot in lots_by_car_id.items()
-            },
+        eligible_by_car = database.get_collection_eligible_lots(
+            catalog.exleasingcar_auction_id,
+            set(lots_by_car_id),
         )
+        eligible_car_ids = set(eligible_by_car)
+        open_auction_car_ids = {
+            car_id
+            for car_id, sale_type in eligible_by_car.items()
+            if sale_type == SaleType.OPEN_AUCTION.value
+        }
+        selected_updates = {
+            car_id: update
+            for car_id, update in parsed_api_updates.items()
+            if car_id in eligible_car_ids
+        }
+        selected_updates = {
+            car_id: (
+                update
+                if car_id in open_auction_car_ids
+                else replace(
+                    update,
+                    highest_offer=None,
+                    user_offer=None,
+                    bid_status=None,
+                    auction_phase=None,
+                    final_call_active=False,
+                    remaining_seconds=None,
+                    auction_end_at=None,
+                    live_bidding=None,
+                )
+            )
+            for car_id, update in selected_updates.items()
+        }
+        if selected_updates:
+            api_summary = store_car_updates(
+                database,
+                selected_updates,
+                selected_context,
+                observed_at=timestamp,
+                lot_metadata={
+                    car_id: _lot_context(lot)
+                    for car_id, lot in lots_by_car_id.items()
+                },
+            )
 
     return MetadataImportSummary(
         auctions_seen=len(auctions),
         lots_seen=len(lots_by_car_id),
-        vehicle_details_enriched=1,
+        vehicle_details_enriched=int(collection_eligible),
         selected_auction_id=catalog.exleasingcar_auction_id,
         selected_car_id=vehicle.source_car_id,
         catalog_pages_imported=len(catalog_html_pages),
@@ -317,4 +360,6 @@ def import_html_snapshots(
         sale_type_recognized=parsed_detail.sale_type is not None,
         lot_price_observations_inserted=lot_prices_inserted,
         media_sources_registered=len(media_references),
+        collection_eligible=collection_eligible,
+        has_fixed_price=has_fixed_price,
     )

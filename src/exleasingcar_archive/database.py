@@ -3,7 +3,7 @@ import re
 import sqlite3
 from collections.abc import Iterator
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -13,7 +13,7 @@ from .parsers import PriceObservation
 from .pdf_damage import PDFDamageObservation, PDFDamagePhotoReference
 from .pdf_fields import PDFExtractedField, PDFFieldProvenance, PDFFieldState
 
-SCHEMA_VERSION = 13
+SCHEMA_VERSION = 14
 DEFAULT_SOURCE = "ajax_update_car_form.v3.1.php"
 
 
@@ -60,6 +60,8 @@ CREATE TABLE IF NOT EXISTS auction_lots (
     listing_code_attribute TEXT,
     mileage_km INTEGER,
     sale_type TEXT,
+    collection_eligible INTEGER NOT NULL DEFAULT 1 CHECK (collection_eligible IN (0, 1)),
+    has_fixed_price INTEGER NOT NULL DEFAULT 0 CHECK (has_fixed_price IN (0, 1)),
     last_detail_checked_at TEXT,
     last_detail_attempted_at TEXT,
     last_api_checked_at TEXT,
@@ -344,6 +346,7 @@ class ArchiveDatabase:
                     (10, self._migrate_v10_to_v11),
                     (11, self._migrate_v11_to_v12),
                     (12, self._migrate_v12_to_v13),
+                    (13, self._migrate_v13_to_v14),
                 )
                 for from_version, migration in migrations:
                     if version <= from_version:
@@ -381,6 +384,10 @@ class ArchiveDatabase:
             """
             CREATE INDEX IF NOT EXISTS idx_auction_lots_detail_check
             ON auction_lots(auction_id, last_detail_checked_at, id)
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_auction_lots_collection_eligible
+            ON auction_lots(collection_eligible, auction_id, last_seen_at)
             """,
             """
             CREATE INDEX IF NOT EXISTS idx_auction_lots_auction_vehicle
@@ -664,6 +671,43 @@ class ArchiveDatabase:
         """Add source-linked image preview derivatives."""
         connection.execute(MEDIA_DERIVATIVES_SQL)
 
+    @classmethod
+    def _migrate_v13_to_v14(cls, connection: sqlite3.Connection) -> None:
+        """Track current archive eligibility independently from auction mode."""
+        cls._add_column_if_missing(
+            connection,
+            "auction_lots",
+            "collection_eligible",
+            "INTEGER NOT NULL DEFAULT 1 CHECK (collection_eligible IN (0, 1))",
+        )
+        cls._add_column_if_missing(
+            connection,
+            "auction_lots",
+            "has_fixed_price",
+            "INTEGER NOT NULL DEFAULT 0 CHECK (has_fixed_price IN (0, 1))",
+        )
+        connection.execute(
+            """
+            UPDATE auction_lots
+            SET has_fixed_price = CASE WHEN EXISTS (
+                SELECT 1
+                FROM lot_price_observations AS price
+                WHERE price.auction_lot_id = auction_lots.id
+                  AND price.price_type = 'fixed_price'
+            ) THEN 1 ELSE 0 END
+            """
+        )
+        connection.execute(
+            """
+            UPDATE auction_lots
+            SET collection_eligible = CASE
+                WHEN sale_type = 'open_auction' THEN 1
+                WHEN has_fixed_price = 1 THEN 1
+                ELSE 0
+            END
+            """
+        )
+
     @staticmethod
     def _serialize_datetime(value: datetime | None) -> str:
         if value is None:
@@ -884,6 +928,7 @@ class ArchiveDatabase:
         listing_code_attribute: str | None = None,
         mileage_km: int | None = None,
         sale_type: str | None = None,
+        collection_eligible: bool | None = None,
     ) -> int:
         if mileage_km is not None and (
             isinstance(mileage_km, bool)
@@ -891,6 +936,8 @@ class ArchiveDatabase:
             or mileage_km < 0
         ):
             raise ValueError("mileage_km must be a non-negative integer or None")
+        if collection_eligible is not None and not isinstance(collection_eligible, bool):
+            raise TypeError("collection_eligible must be bool or None")
         if auction_id is None:
             row = connection.execute(
                 "SELECT id FROM auction_lots "
@@ -907,7 +954,8 @@ class ArchiveDatabase:
                         displayed_lot_reference = COALESCE(?, displayed_lot_reference),
                         listing_code_attribute = COALESCE(?, listing_code_attribute),
                         mileage_km = COALESCE(?, mileage_km),
-                        sale_type = COALESCE(?, sale_type)
+                        sale_type = COALESCE(?, sale_type),
+                        collection_eligible = COALESCE(?, collection_eligible)
                     WHERE id = ?
                     """,
                     (
@@ -917,6 +965,7 @@ class ArchiveDatabase:
                         listing_code_attribute,
                         mileage_km,
                         sale_type,
+                        int(collection_eligible) if collection_eligible is not None else None,
                         lot_id,
                     ),
                 )
@@ -926,8 +975,8 @@ class ArchiveDatabase:
                 INSERT INTO auction_lots (
                     vehicle_id, auction_id, displayed_lot_reference,
                     listing_code_attribute, mileage_km, sale_type,
-                    first_seen_at, last_seen_at
-                ) VALUES (?, NULL, ?, ?, ?, ?, ?, ?)
+                    collection_eligible, first_seen_at, last_seen_at
+                ) VALUES (?, NULL, ?, ?, ?, ?, COALESCE(?, 0), ?, ?)
                 """,
                 (
                     vehicle_id,
@@ -935,6 +984,7 @@ class ArchiveDatabase:
                     listing_code_attribute,
                     mileage_km,
                     sale_type,
+                    int(collection_eligible) if collection_eligible is not None else None,
                     observed_at,
                     observed_at,
                 ),
@@ -945,8 +995,8 @@ class ArchiveDatabase:
                 INSERT INTO auction_lots (
                     vehicle_id, auction_id, displayed_lot_reference,
                     listing_code_attribute, mileage_km, sale_type,
-                    first_seen_at, last_seen_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    collection_eligible, first_seen_at, last_seen_at
+                ) VALUES (?, ?, ?, ?, ?, ?, COALESCE(?, 0), ?, ?)
                 ON CONFLICT(vehicle_id, auction_id) DO UPDATE SET
                     first_seen_at = MIN(
                         auction_lots.first_seen_at, excluded.first_seen_at
@@ -965,7 +1015,11 @@ class ArchiveDatabase:
                     mileage_km = COALESCE(
                         excluded.mileage_km, auction_lots.mileage_km
                     ),
-                    sale_type = COALESCE(excluded.sale_type, auction_lots.sale_type)
+                    sale_type = COALESCE(excluded.sale_type, auction_lots.sale_type),
+                    collection_eligible = CASE
+                        WHEN ? IS NULL THEN auction_lots.collection_eligible
+                        ELSE excluded.collection_eligible
+                    END
                 """,
                 (
                     vehicle_id,
@@ -974,6 +1028,8 @@ class ArchiveDatabase:
                     listing_code_attribute,
                     mileage_km,
                     sale_type,
+                    int(collection_eligible) if collection_eligible is not None else None,
+                    int(collection_eligible) if collection_eligible is not None else None,
                     observed_at,
                     observed_at,
                 ),
@@ -1129,17 +1185,26 @@ class ArchiveDatabase:
         self,
         exleasingcar_auction_id: str,
         source_car_ids: set[str],
+        *,
+        recheck_after_days: int = 7,
     ) -> list[str]:
-        """Order known catalogue cars by oldest successful detail-page check."""
+        """Refresh detail metadata weekly; API snapshots still flow on each catalogue run."""
         auction_id = self._validate_identifier(
             exleasingcar_auction_id, "exleasingcar_auction_id"
         )
+        if isinstance(recheck_after_days, bool) or not isinstance(recheck_after_days, int):
+            raise TypeError("recheck_after_days must be an integer")
+        if recheck_after_days < 1:
+            raise ValueError("recheck_after_days must be at least one day")
         car_ids = sorted(
             {self._validate_identifier(car_id, "source_car_id") for car_id in source_car_ids}
         )
         if not car_ids:
             return []
         placeholders = ", ".join("?" for _ in car_ids)
+        cutoff = self._serialize_datetime(
+            datetime.now(timezone.utc) - timedelta(days=recheck_after_days)
+        )
         with self._connect() as connection:
             rows = connection.execute(
                 f"""
@@ -1149,6 +1214,16 @@ class ArchiveDatabase:
                 JOIN auctions AS a ON a.id = l.auction_id
                 WHERE a.exleasingcar_auction_id = ?
                   AND v.source_car_id IN ({placeholders})
+                  AND (
+                      MAX(
+                          COALESCE(l.last_detail_checked_at, ''),
+                          COALESCE(l.last_detail_attempted_at, '')
+                      ) = ''
+                      OR MAX(
+                          COALESCE(l.last_detail_checked_at, ''),
+                          COALESCE(l.last_detail_attempted_at, '')
+                      ) <= ?
+                  )
                 ORDER BY
                     CASE WHEN MAX(
                         COALESCE(l.last_detail_checked_at, ''),
@@ -1160,11 +1235,112 @@ class ArchiveDatabase:
                     ),
                     l.id
                 """,
+                (auction_id, *car_ids, cutoff),
+            ).fetchall()
+            existing_rows = connection.execute(
+                f"""
+                SELECT v.source_car_id
+                FROM auction_lots AS l
+                JOIN vehicles AS v ON v.id = l.vehicle_id
+                JOIN auctions AS a ON a.id = l.auction_id
+                WHERE a.exleasingcar_auction_id = ?
+                  AND v.source_car_id IN ({placeholders})
+                """,
                 (auction_id, *car_ids),
             ).fetchall()
         ordered = [str(row["source_car_id"]) for row in rows]
-        missing = sorted(set(car_ids) - set(ordered))
+        existing = {str(row["source_car_id"]) for row in existing_rows}
+        missing = sorted(set(car_ids) - existing)
         return ordered + missing
+
+    def set_auction_lot_qualification(
+        self,
+        source_car_id: str,
+        exleasingcar_auction_id: str,
+        *,
+        sale_type: SaleType | str | None,
+        has_fixed_price: bool,
+        collection_eligible: bool,
+        checked_at: datetime | None = None,
+    ) -> bool:
+        """Persist the latest detail-page qualification for one auction lot."""
+        car_id = self._validate_identifier(source_car_id, "source_car_id")
+        auction_id = self._validate_identifier(
+            exleasingcar_auction_id, "exleasingcar_auction_id"
+        )
+        if sale_type is None:
+            normalized_sale_type = None
+        else:
+            try:
+                normalized_sale_type = SaleType(sale_type).value
+            except ValueError as exc:
+                raise ValueError(f"Unsupported sale_type: {sale_type!r}") from exc
+            if normalized_sale_type not in {
+                SaleType.OPEN_AUCTION.value,
+                SaleType.CLOSED_AUCTION.value,
+                SaleType.FIXED_PRICE.value,
+            }:
+                raise ValueError(f"Unsupported sale_type: {sale_type!r}")
+        if not isinstance(has_fixed_price, bool):
+            raise TypeError("has_fixed_price must be bool")
+        if not isinstance(collection_eligible, bool):
+            raise TypeError("collection_eligible must be bool")
+        timestamp = self._serialize_datetime(checked_at)
+        with self._connect() as connection:
+            cursor = connection.execute(
+                """
+                UPDATE auction_lots
+                SET sale_type = ?,
+                    has_fixed_price = ?,
+                    collection_eligible = ?,
+                    last_detail_checked_at = ?
+                WHERE vehicle_id = (
+                    SELECT id FROM vehicles WHERE source_car_id = ?
+                )
+                AND auction_id = (
+                    SELECT id FROM auctions WHERE exleasingcar_auction_id = ?
+                )
+                """,
+                (
+                    normalized_sale_type,
+                    int(has_fixed_price),
+                    int(collection_eligible),
+                    timestamp,
+                    car_id,
+                    auction_id,
+                ),
+            )
+            return cursor.rowcount > 0
+
+    def get_collection_eligible_lots(
+        self,
+        exleasingcar_auction_id: str,
+        source_car_ids: set[str],
+    ) -> dict[str, str | None]:
+        """Return previously qualified lot IDs and their preserved bidding mode."""
+        auction_id = self._validate_identifier(
+            exleasingcar_auction_id, "exleasingcar_auction_id"
+        )
+        car_ids = sorted(
+            {self._validate_identifier(car_id, "source_car_id") for car_id in source_car_ids}
+        )
+        if not car_ids:
+            return {}
+        placeholders = ", ".join("?" for _ in car_ids)
+        with self._connect() as connection:
+            rows = connection.execute(
+                f"""
+                SELECT v.source_car_id, al.sale_type
+                FROM auction_lots AS al
+                JOIN vehicles AS v ON v.id = al.vehicle_id
+                JOIN auctions AS a ON a.id = al.auction_id
+                WHERE a.exleasingcar_auction_id = ?
+                  AND v.source_car_id IN ({placeholders})
+                  AND al.collection_eligible = 1
+                """,
+                (auction_id, *car_ids),
+            ).fetchall()
+        return {str(row["source_car_id"]): row["sale_type"] for row in rows}
 
     def mark_detail_attempted(
         self,
@@ -1407,7 +1583,8 @@ class ArchiveDatabase:
                 JOIN auction_lots AS al ON al.id = m.auction_lot_id
                 JOIN vehicles AS v ON v.id = al.vehicle_id
                 JOIN auctions AS a ON a.id = al.auction_id
-                WHERE (
+                WHERE al.collection_eligible = 1
+                  AND (
                     (
                         m.current_asset_id IS NULL
                         AND m.download_status IN ('discovered', 'failed')
@@ -1834,6 +2011,7 @@ class ArchiveDatabase:
         listing_code_attribute: str | None = None,
         mileage_km: int | None = None,
         sale_type: SaleType | str | None = None,
+        collection_eligible: bool | None = True,
         observed_at: datetime | None = None,
     ) -> int:
         car_id = self._validate_identifier(source_car_id, "source_car_id")
@@ -1872,6 +2050,7 @@ class ArchiveDatabase:
                 listing_code_attribute=listing_code_attribute,
                 mileage_km=mileage_km,
                 sale_type=normalized_sale_type,
+                collection_eligible=collection_eligible,
             )
 
     def record_price_observation(

@@ -126,6 +126,7 @@ def store_car_updates(
             displayed_lot_reference=lot.displayed_lot_reference,
             listing_code_attribute=lot.listing_code_attribute,
             mileage_km=lot.mileage_km,
+            collection_eligible=None,
             observed_at=timestamp,
         )
         lots_upserted += 1
