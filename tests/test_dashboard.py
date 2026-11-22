@@ -8,6 +8,65 @@ from exleasingcar_archive.models import AuctionCardMarker, PriceType, SaleType
 from exleasingcar_archive.parsers import PriceObservation
 
 
+def test_dashboard_hides_unqualified_lots_but_keeps_open_and_fixed_offers(tmp_path):
+    database = ArchiveDatabase(tmp_path / "dashboard.sqlite3")
+    database.initialize()
+    database.upsert_vehicle("car-open", displayed_title="Open auction")
+    database.upsert_auction_lot(
+        "car-open", "auction-1", sale_type=SaleType.OPEN_AUCTION
+    )
+    database.upsert_vehicle("car-hidden", displayed_title="Hidden bid")
+    database.upsert_auction_lot(
+        "car-hidden",
+        "auction-1",
+        sale_type=SaleType.CLOSED_AUCTION,
+        collection_eligible=False,
+    )
+    database.upsert_vehicle("car-fixed", displayed_title="Closed with Buy Now")
+    database.upsert_auction_lot(
+        "car-fixed", "auction-1", sale_type=SaleType.CLOSED_AUCTION
+    )
+    assert database.set_auction_lot_qualification(
+        "car-fixed",
+        "auction-1",
+        sale_type=SaleType.CLOSED_AUCTION,
+        has_fixed_price=True,
+        collection_eligible=True,
+    )
+    database.record_price_observation(
+        "car-hidden",
+        Decimal(50000),
+        exleasingcar_auction_id="auction-1",
+    )
+    database.record_price_observation(
+        "car-open",
+        Decimal(8500),
+        exleasingcar_auction_id="auction-1",
+    )
+    database.record_price_observation(
+        "car-fixed",
+        Decimal(21000),
+        exleasingcar_auction_id="auction-1",
+    )
+
+    handler = object.__new__(DashboardHandler)
+    handler.database_path = database.path
+    payload = handler._load_data()
+
+    visible = {lot["car_id"] for lot in payload["lots"]}
+    assert visible == {"car-open", "car-fixed"}
+    assert payload["counts"]["auction_lots"] == 2
+    assert payload["counts"]["vehicles"] == 2
+    assert payload["counts"]["auctions"] == 1
+    assert payload["counts"]["price_observations"] == 1
+    closed_fixed_row = next(lot for lot in payload["lots"] if lot["car_id"] == "car-fixed")
+    assert closed_fixed_row["highest_offer"] is None
+    closed_detail = handler._load_data(selected_lot_id=closed_fixed_row["lot_id"])
+    assert closed_detail["lot_prices_summary"]["highest_offer"]["amount"] is None
+    assert closed_detail["bids"] == []
+    assert closed_detail["events"] == []
+
+
 def test_dashboard_exposes_sale_type_and_fixed_price_without_bid_mixing(tmp_path):
     database = ArchiveDatabase(tmp_path / "dashboard.sqlite3")
     database.initialize()
@@ -115,10 +174,16 @@ def test_dashboard_search_shows_full_history_across_relisted_auctions(tmp_path):
         chassis_number_fragment="WAUZZZ",
         chassis_number_masked=True,
     )
-    database.upsert_auction_lot("car-target", "auction-old")
-    database.upsert_auction_lot("car-target", "auction-new")
+    database.upsert_auction_lot(
+        "car-target", "auction-old", sale_type=SaleType.OPEN_AUCTION
+    )
+    database.upsert_auction_lot(
+        "car-target", "auction-new", sale_type=SaleType.OPEN_AUCTION
+    )
     database.upsert_vehicle("car-other", displayed_title="BMW 5 Series")
-    database.upsert_auction_lot("car-other", "auction-other")
+    database.upsert_auction_lot(
+        "car-other", "auction-other", sale_type=SaleType.OPEN_AUCTION
+    )
 
     with sqlite3.connect(database.path) as connection:
         lots = dict(connection.execute(
@@ -210,10 +275,12 @@ def test_dashboard_car_card_shows_vehicle_details_and_all_auction_history(tmp_pa
         last_registration_country_name="Germany",
     )
     database.upsert_auction_lot(
-        "car-card-1", "auction-old", mileage_km=120000
+        "car-card-1", "auction-old", mileage_km=120000,
+        sale_type=SaleType.OPEN_AUCTION,
     )
     database.upsert_auction_lot(
-        "car-card-1", "auction-new", mileage_km=135000
+        "car-card-1", "auction-new", mileage_km=135000,
+        sale_type=SaleType.OPEN_AUCTION,
     )
     database.upsert_vehicle(
         "car-card-other",
@@ -806,9 +873,13 @@ def test_dashboard_selected_lot_isolates_prices_reports_and_relistings(tmp_path)
 def test_dashboard_selected_lot_keeps_missing_price_distinct_from_zero(tmp_path):
     database = ArchiveDatabase(tmp_path / "dashboard-lot-missing-price.sqlite3")
     database.initialize()
-    no_price_lot = database.upsert_auction_lot("car-no-price", "auction-no-price")
+    no_price_lot = database.upsert_auction_lot(
+        "car-no-price", "auction-no-price", sale_type=SaleType.OPEN_AUCTION
+    )
     database.upsert_vehicle("car-zero-price", displayed_title="Audi A4")
-    zero_lot = database.upsert_auction_lot("car-zero-price", "auction-zero-price")
+    zero_lot = database.upsert_auction_lot(
+        "car-zero-price", "auction-zero-price", sale_type=SaleType.OPEN_AUCTION
+    )
     database.record_price_observation(
         "car-zero-price",
         Decimal(0),
@@ -860,3 +931,164 @@ def test_dashboard_page_includes_release_version_and_lot_detail_sections():
     assert "Фотографии" in PAGE
     assert "PDF-отчёты" in PAGE
     assert "Другие аукционные лоты этой машины" in PAGE
+
+
+def test_catalog_sorting_is_stable_and_null_prices_sort_after_zero(tmp_path):
+    database = ArchiveDatabase(tmp_path / "dashboard.sqlite3")
+    database.initialize()
+    auction_id = "auction-sort"
+    database.upsert_auction(auction_id)
+    records = [
+        ("car-zero-first", Decimal(0), 0, datetime(2026, 1, 1, tzinfo=timezone.utc)),
+        ("car-zero-second", Decimal(0), 0, datetime(2026, 1, 1, tzinfo=timezone.utc)),
+        ("car-ten", Decimal(10), 10, datetime(2026, 1, 3, tzinfo=timezone.utc)),
+        ("car-null", None, None, datetime(2026, 1, 2, tzinfo=timezone.utc)),
+    ]
+    for car_id, amount, mileage, observed_at in records:
+        database.upsert_vehicle(car_id, make="Volvo", model="V90", displayed_title=car_id,
+                                 observed_at=observed_at)
+        database.upsert_auction_lot(
+            car_id, auction_id, mileage_km=mileage, sale_type=SaleType.OPEN_AUCTION,
+            observed_at=observed_at,
+        )
+        if amount is None:
+            continue
+        database.record_price_observation(
+            car_id, amount, observed_at=observed_at,
+            exleasingcar_auction_id=auction_id,
+        )
+        database.record_price_reference_observation(
+            car_id, minimum_price=amount, indicative_price=amount,
+            observed_at=observed_at, exleasingcar_auction_id=auction_id,
+        )
+        database.record_lot_price_observation(
+            car_id,
+            PriceObservation(
+                price_type=PriceType.DISPLAYED_AUCTION_PRICE,
+                amount=amount,
+                currency="EUR",
+                raw_text=str(amount),
+                source_field="current-price",
+            ),
+            observed_at=observed_at,
+            exleasingcar_auction_id=auction_id,
+            sale_type=SaleType.OPEN_AUCTION,
+        )
+        database.record_lot_price_observation(
+            car_id,
+            PriceObservation(
+                price_type=PriceType.FIXED_PRICE,
+                amount=amount,
+                currency="EUR",
+                raw_text=str(amount),
+                source_field="buy-offer",
+            ),
+            observed_at=observed_at,
+            exleasingcar_auction_id=auction_id,
+            sale_type=SaleType.OPEN_AUCTION,
+        )
+
+    handler = object.__new__(DashboardHandler)
+    handler.database_path = database.path
+    expected_ascending = [
+        "car-zero-second", "car-zero-first", "car-ten", "car-null"
+    ]
+    expected_descending = [
+        "car-ten", "car-zero-second", "car-zero-first", "car-null"
+    ]
+    for sort_by in (
+        "highest_offer", "displayed_price", "fixed_price",
+        "minimum_price", "indicative_price", "mileage",
+    ):
+        ascending = handler._load_data(sort_by=sort_by, sort_direction="asc")
+        descending = handler._load_data(sort_by=sort_by, sort_direction="desc")
+        assert [row["car_id"] for row in ascending["lots"]] == expected_ascending
+        assert [row["car_id"] for row in descending["lots"]] == expected_descending
+
+    by_last_observation = handler._load_data(
+        sort_by="last_observation", sort_direction="desc"
+    )
+    assert [row["car_id"] for row in by_last_observation["lots"]] == [
+        "car-ten", "car-null", "car-zero-second", "car-zero-first"
+    ]
+
+
+def test_catalog_filters_by_explicit_model_and_searches_masked_vin_fragment(tmp_path):
+    database = ArchiveDatabase(tmp_path / "dashboard.sqlite3")
+    database.initialize()
+    database.upsert_vehicle(
+        "car-volvo", make="Volvo", model="V90",
+        displayed_title="Volvo V90 T6 Plug-in Hybrid",
+        chassis_number_fragment="YV1PWVHT812", chassis_number_masked=True,
+    )
+    database.upsert_auction_lot("car-volvo", "auction-1")
+    database.upsert_vehicle(
+        "car-mercedes", make="Mercedes-Benz",
+        displayed_title="Mercedes-Benz CLA-Klasse - 2.0 CLA 180 D",
+    )
+    database.upsert_auction_lot("car-mercedes", "auction-2")
+    database.upsert_vehicle(
+        "car-full-vin", make="Volkswagen",
+        displayed_title="Volkswagen Golf",
+        chassis_number="WVWZZZ1JZXW000001",
+    )
+    database.upsert_auction_lot("car-full-vin", "auction-3")
+
+    handler = object.__new__(DashboardHandler)
+    handler.database_path = database.path
+    model_filtered = handler._load_data(selected_make="Volvo", selected_model="V90")
+    assert [row["car_id"] for row in model_filtered["lots"]] == ["car-volvo"]
+    assert model_filtered["available_models"] == ["V90"]
+
+    vin_filtered = handler._load_data(search_query="PWVHT812")
+    assert [row["car_id"] for row in vin_filtered["lots"]] == ["car-volvo"]
+    full_vin_filtered = handler._load_data(search_query="WVWZZZ1JZXW000001")
+    assert [row["car_id"] for row in full_vin_filtered["lots"]] == ["car-full-vin"]
+
+    # The combined title is not split to fabricate a model.
+    assert "CLA-Klasse" not in model_filtered["available_models"]
+
+
+def test_catalog_primary_photo_preview_uses_only_a_trusted_plain_source_url(tmp_path):
+    database = ArchiveDatabase(tmp_path / "dashboard.sqlite3")
+    database.initialize()
+    database.upsert_vehicle("car-photo", make="Volvo", displayed_title="Volvo")
+    database.upsert_auction_lot("car-photo", "auction-1")
+    database.upsert_lot_media_source(
+        "car-photo",
+        "auction-1",
+        "photo",
+        "https://data.exleasingcar.com/photo-original.jpg",
+        preview_url="https://data.exleasingcar.com/photo-preview.jpg",
+    )
+    database.upsert_vehicle("car-no-photo", make="BMW", displayed_title="BMW")
+    database.upsert_auction_lot("car-no-photo", "auction-2")
+
+    handler = object.__new__(DashboardHandler)
+    handler.database_path = database.path
+    payload = handler._load_data()
+    photo = next(row for row in payload["lots"] if row["car_id"] == "car-photo")
+    no_photo = next(row for row in payload["lots"] if row["car_id"] == "car-no-photo")
+
+    assert photo["primary_photo_url"] == "https://data.exleasingcar.com/photo-preview.jpg"
+    assert no_photo["primary_photo_url"] is None
+
+
+def test_catalog_pagination_returns_lots_beyond_first_page(tmp_path, monkeypatch):
+    monkeypatch.setattr("exleasingcar_archive.dashboard.LOT_PAGE_SIZE", 2)
+    database = ArchiveDatabase(tmp_path / "dashboard.sqlite3")
+    database.initialize()
+    database.upsert_auction("auction-pagination")
+    for index in range(3):
+        car_id = f"car-page-{index}"
+        database.upsert_vehicle(car_id, make="Volvo", displayed_title=car_id)
+        database.upsert_auction_lot(car_id, "auction-pagination")
+
+    handler = object.__new__(DashboardHandler)
+    handler.database_path = database.path
+    second_page = handler._load_data(page=2)
+
+    assert len(second_page["lots"]) == 1
+    assert second_page["pagination"]["page"] == 2
+    assert second_page["pagination"]["has_previous"] is True
+    assert second_page["pagination"]["has_next"] is False

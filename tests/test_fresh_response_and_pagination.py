@@ -14,6 +14,20 @@ def _read(name: str) -> str:
     return (FIXTURES / name).read_text(encoding="utf-8")
 
 
+def _open_detail() -> str:
+    return _read("vehicle_detail.html").replace(
+        "</body>",
+        """
+        <div class="auto-block" car-id="19702473">
+            <div class="bids active open bids_19702473">
+                <div class="current-price">Текущая цена: € 18 300</div>
+            </div>
+        </div>
+        </body>
+        """,
+    )
+
+
 def test_actual_response_fields_are_mapped_without_substituting_prices():
     response = {
         "19655238": {
@@ -61,7 +75,7 @@ def test_api_response_time_and_zero_price_are_written_to_fresh_sqlite(tmp_path):
         database,
         auction_list_html=_read("auction_listings.html"),
         catalog_html=_read("auction_catalog.html"),
-        vehicle_detail_html=_read("vehicle_detail.html"),
+        vehicle_detail_html=_open_detail(),
         api_response=api_response,
     )
 

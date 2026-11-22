@@ -111,12 +111,16 @@ def main() -> None:
     print(f"Stored vehicle metadata: {tuple(stored_vehicle) if stored_vehicle else None}")
     print(f"Stored lot mileage (km): {stored_lot[0] if stored_lot else None}")
     print(f"Sale type recognized: {summary.sale_type_recognized}")
+    print(f"Collection eligible: {summary.collection_eligible}")
+    print(f"Verified fixed price available: {summary.has_fixed_price}")
     print(
         "New displayed/fixed price observations inserted: "
         f"{summary.lot_price_observations_inserted}"
     )
     if args.api_response is None:
         print("Price observations: not imported (no API response file supplied)")
+    elif summary.api_ingestion is None:
+        print("API response contained no archive-eligible lots to ingest")
     else:
         print(f"API cars processed: {summary.api_ingestion.cars_processed}")
         print(f"New prices inserted: {summary.api_ingestion.prices_inserted}")
