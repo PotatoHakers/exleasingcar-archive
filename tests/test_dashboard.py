@@ -602,7 +602,7 @@ def test_dashboard_labels_unverified_highest_offer_as_api_value():
     from exleasingcar_archive.dashboard import PAGE
 
     assert "История значений API highest_offer" in PAGE
-    assert "Смысл этого поля пока не подтверждён" in PAGE
+    assert "не доказывает наличие публичной ставки" in PAGE
     assert "API highest_offer" in PAGE
     assert "История реальных ставок" not in PAGE
     assert "Последняя ставка" not in PAGE
@@ -611,7 +611,7 @@ def test_dashboard_labels_unverified_highest_offer_as_api_value():
 
 
 def test_dashboard_copy_includes_zero_highest_offer_observations():
-    assert "включая 0" in PAGE
+    assert "включая исходный 0" in PAGE
     assert "только положительные значения" not in PAGE
     assert "Наблюдений API highest_offer пока нет" in PAGE
 
@@ -1131,7 +1131,7 @@ def test_dashboard_marks_zero_highest_offer_as_non_bid_and_shows_completed_statu
 
     assert payload["lot_prices_summary"]["highest_offer"]["amount"] == "0"
     assert payload["selected_lot"]["monitoring_completed_at"] == (
-        completed_at.isoformat().replace("+00:00", "Z")
+        completed_at.isoformat(timespec="microseconds").replace("+00:00", "Z")
     )
     assert payload["selected_lot"]["monitoring_completion_reason"] == "countdown_expired"
     assert "Нулевое значение API · не ставка" in PAGE

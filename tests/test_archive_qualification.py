@@ -660,7 +660,10 @@ def test_completed_open_auction_keeps_final_observation_and_stops_later_updates(
 
     assert price_values == ["12000", "0"]
     assert events == [(300, 1), (0, 0)]
-    assert completion == (completed_at.isoformat().replace("+00:00", "Z"), "countdown_expired")
+    expected_completed_at = completed_at.isoformat(timespec="microseconds").replace(
+        "+00:00", "Z"
+    )
+    assert completion == (expected_completed_at, "countdown_expired")
     assert database.get_completed_open_auction_lots(
         auction_id, {"car-completes"}
     ) == {"car-completes"}
