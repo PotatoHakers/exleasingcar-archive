@@ -58,7 +58,7 @@ def test_dashboard_hides_unqualified_lots_but_keeps_open_and_fixed_offers(tmp_pa
     assert payload["counts"]["auction_lots"] == 2
     assert payload["counts"]["vehicles"] == 2
     assert payload["counts"]["auctions"] == 1
-    assert payload["counts"]["price_observations"] == 2
+    assert payload["counts"]["price_observations"] == 1
     closed_fixed_row = next(lot for lot in payload["lots"] if lot["car_id"] == "car-fixed")
     assert closed_fixed_row["highest_offer"] is None
     closed_detail = handler._load_data(selected_lot_id=closed_fixed_row["lot_id"])
@@ -174,10 +174,16 @@ def test_dashboard_search_shows_full_history_across_relisted_auctions(tmp_path):
         chassis_number_fragment="WAUZZZ",
         chassis_number_masked=True,
     )
-    database.upsert_auction_lot("car-target", "auction-old")
-    database.upsert_auction_lot("car-target", "auction-new")
+    database.upsert_auction_lot(
+        "car-target", "auction-old", sale_type=SaleType.OPEN_AUCTION
+    )
+    database.upsert_auction_lot(
+        "car-target", "auction-new", sale_type=SaleType.OPEN_AUCTION
+    )
     database.upsert_vehicle("car-other", displayed_title="BMW 5 Series")
-    database.upsert_auction_lot("car-other", "auction-other")
+    database.upsert_auction_lot(
+        "car-other", "auction-other", sale_type=SaleType.OPEN_AUCTION
+    )
 
     with sqlite3.connect(database.path) as connection:
         lots = dict(connection.execute(
@@ -269,10 +275,12 @@ def test_dashboard_car_card_shows_vehicle_details_and_all_auction_history(tmp_pa
         last_registration_country_name="Germany",
     )
     database.upsert_auction_lot(
-        "car-card-1", "auction-old", mileage_km=120000
+        "car-card-1", "auction-old", mileage_km=120000,
+        sale_type=SaleType.OPEN_AUCTION,
     )
     database.upsert_auction_lot(
-        "car-card-1", "auction-new", mileage_km=135000
+        "car-card-1", "auction-new", mileage_km=135000,
+        sale_type=SaleType.OPEN_AUCTION,
     )
     database.upsert_vehicle(
         "car-card-other",
@@ -865,9 +873,13 @@ def test_dashboard_selected_lot_isolates_prices_reports_and_relistings(tmp_path)
 def test_dashboard_selected_lot_keeps_missing_price_distinct_from_zero(tmp_path):
     database = ArchiveDatabase(tmp_path / "dashboard-lot-missing-price.sqlite3")
     database.initialize()
-    no_price_lot = database.upsert_auction_lot("car-no-price", "auction-no-price")
+    no_price_lot = database.upsert_auction_lot(
+        "car-no-price", "auction-no-price", sale_type=SaleType.OPEN_AUCTION
+    )
     database.upsert_vehicle("car-zero-price", displayed_title="Audi A4")
-    zero_lot = database.upsert_auction_lot("car-zero-price", "auction-zero-price")
+    zero_lot = database.upsert_auction_lot(
+        "car-zero-price", "auction-zero-price", sale_type=SaleType.OPEN_AUCTION
+    )
     database.record_price_observation(
         "car-zero-price",
         Decimal(0),
