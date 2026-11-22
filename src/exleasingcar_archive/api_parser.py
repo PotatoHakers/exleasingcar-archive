@@ -39,9 +39,12 @@ class ParsedCarUpdate:
         status = (self.bid_status or "").strip().casefold().replace("_", "-")
         if phase in terminal_values or status in terminal_values:
             return "api_terminal_status"
-        if self.remaining_seconds is not None and self.remaining_seconds <= 0:
-            if self.live_bidding is False:
-                return "countdown_expired"
+        if (
+            self.remaining_seconds is not None
+            and self.remaining_seconds <= 0
+            and self.live_bidding is False
+        ):
+            return "countdown_expired"
         return None
 
 
