@@ -1173,7 +1173,7 @@ def test_dashboard_zero_offer_is_labelled_as_not_a_bid_and_completed_status_is_v
 
     assert payload["lot_prices_summary"]["highest_offer"]["amount"] == "0"
     assert payload["selected_lot"]["monitoring_completed_at"] == (
-        completed_at.isoformat().replace("+00:00", "Z")
+        completed_at.isoformat(timespec="microseconds").replace("+00:00", "Z")
     )
     assert payload["selected_lot"]["monitoring_completion_reason"] == "countdown_expired"
     assert "Нулевое значение API · не ставка" in PAGE
