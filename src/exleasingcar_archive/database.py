@@ -13,7 +13,7 @@ from .parsers import PriceObservation
 from .pdf_damage import PDFDamageObservation, PDFDamagePhotoReference
 from .pdf_fields import PDFExtractedField, PDFFieldProvenance, PDFFieldState
 
-SCHEMA_VERSION = 14
+SCHEMA_VERSION = 15
 DEFAULT_SOURCE = "ajax_update_car_form.v3.1.php"
 
 
@@ -62,6 +62,8 @@ CREATE TABLE IF NOT EXISTS auction_lots (
     sale_type TEXT,
     collection_eligible INTEGER NOT NULL DEFAULT 1 CHECK (collection_eligible IN (0, 1)),
     has_fixed_price INTEGER NOT NULL DEFAULT 0 CHECK (has_fixed_price IN (0, 1)),
+    monitoring_completed_at TEXT,
+    monitoring_completion_reason TEXT,
     last_detail_checked_at TEXT,
     last_detail_attempted_at TEXT,
     last_api_checked_at TEXT,
@@ -347,6 +349,7 @@ class ArchiveDatabase:
                     (11, self._migrate_v11_to_v12),
                     (12, self._migrate_v12_to_v13),
                     (13, self._migrate_v13_to_v14),
+                    (14, self._migrate_v14_to_v15),
                 )
                 for from_version, migration in migrations:
                     if version <= from_version:
@@ -392,6 +395,10 @@ class ArchiveDatabase:
             """
             CREATE INDEX IF NOT EXISTS idx_auction_lots_auction_vehicle
             ON auction_lots(auction_id, vehicle_id)
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_auction_lots_monitoring_active
+            ON auction_lots(auction_id, collection_eligible, monitoring_completed_at)
             """,
             """
             CREATE UNIQUE INDEX IF NOT EXISTS
@@ -705,6 +712,54 @@ class ArchiveDatabase:
                 WHEN has_fixed_price = 1 THEN 1
                 ELSE 0
             END
+            """
+        )
+
+    @classmethod
+    def _migrate_v14_to_v15(cls, connection: sqlite3.Connection) -> None:
+        """Track conclusively completed open auctions without discarding history."""
+        cls._add_column_if_missing(
+            connection,
+            "auction_lots",
+            "monitoring_completed_at",
+            "TEXT",
+        )
+        cls._add_column_if_missing(
+            connection,
+            "auction_lots",
+            "monitoring_completion_reason",
+            "TEXT",
+        )
+        connection.execute(
+            """
+            UPDATE auction_lots
+            SET monitoring_completed_at = (
+                    SELECT event.observed_at
+                    FROM auction_events AS event
+                    WHERE event.id = (
+                        SELECT latest.id
+                        FROM auction_events AS latest
+                        WHERE latest.auction_lot_id = auction_lots.id
+                        ORDER BY latest.observed_at DESC, latest.id DESC
+                        LIMIT 1
+                    )
+                ),
+                monitoring_completion_reason = 'countdown_expired'
+            WHERE sale_type = 'open_auction'
+              AND EXISTS (
+                    SELECT 1
+                    FROM auction_events AS event
+                    WHERE event.id = (
+                        SELECT latest.id
+                        FROM auction_events AS latest
+                        WHERE latest.auction_lot_id = auction_lots.id
+                        ORDER BY latest.observed_at DESC, latest.id DESC
+                        LIMIT 1
+                    )
+                      AND event.remaining_seconds <= 0
+                      AND event.live_bidding = 0
+                      AND event.final_call_active = 0
+                )
             """
         )
 
@@ -1214,6 +1269,10 @@ class ArchiveDatabase:
                 JOIN auctions AS a ON a.id = l.auction_id
                 WHERE a.exleasingcar_auction_id = ?
                   AND v.source_car_id IN ({placeholders})
+                  AND NOT (
+                      l.sale_type = 'open_auction'
+                      AND l.monitoring_completed_at IS NOT NULL
+                  )
                   AND (
                       MAX(
                           COALESCE(l.last_detail_checked_at, ''),
@@ -1311,6 +1370,75 @@ class ArchiveDatabase:
                 ),
             )
             return cursor.rowcount > 0
+
+    def mark_open_auction_completed(
+        self,
+        source_car_id: str,
+        exleasingcar_auction_id: str,
+        *,
+        reason: str,
+        completed_at: datetime | None = None,
+    ) -> bool:
+        """Freeze monitoring after a conclusive terminal event, preserving history."""
+        car_id = self._validate_identifier(source_car_id, "source_car_id")
+        auction_id = self._validate_identifier(
+            exleasingcar_auction_id, "exleasingcar_auction_id"
+        )
+        allowed_reasons = {"countdown_expired", "api_terminal_status"}
+        if reason not in allowed_reasons:
+            raise ValueError("Unsupported auction completion reason")
+        timestamp = self._serialize_datetime(completed_at)
+        with self._connect() as connection:
+            cursor = connection.execute(
+                """
+                UPDATE auction_lots
+                SET monitoring_completed_at = COALESCE(monitoring_completed_at, ?),
+                    monitoring_completion_reason = COALESCE(
+                        monitoring_completion_reason, ?
+                    )
+                WHERE vehicle_id = (
+                    SELECT id FROM vehicles WHERE source_car_id = ?
+                )
+                  AND auction_id = (
+                    SELECT id FROM auctions WHERE exleasingcar_auction_id = ?
+                )
+                  AND sale_type = 'open_auction'
+                  AND collection_eligible = 1
+                """,
+                (timestamp, reason, car_id, auction_id),
+            )
+            return cursor.rowcount > 0
+
+    def get_completed_open_auction_lots(
+        self,
+        exleasingcar_auction_id: str,
+        source_car_ids: set[str],
+    ) -> set[str]:
+        """Return open lots whose final state has already been captured."""
+        auction_id = self._validate_identifier(
+            exleasingcar_auction_id, "exleasingcar_auction_id"
+        )
+        car_ids = sorted(
+            {self._validate_identifier(car_id, "source_car_id") for car_id in source_car_ids}
+        )
+        if not car_ids:
+            return set()
+        placeholders = ", ".join("?" for _ in car_ids)
+        with self._connect() as connection:
+            rows = connection.execute(
+                f"""
+                SELECT v.source_car_id
+                FROM auction_lots AS al
+                JOIN vehicles AS v ON v.id = al.vehicle_id
+                JOIN auctions AS a ON a.id = al.auction_id
+                WHERE a.exleasingcar_auction_id = ?
+                  AND v.source_car_id IN ({placeholders})
+                  AND al.sale_type = 'open_auction'
+                  AND al.monitoring_completed_at IS NOT NULL
+                """,
+                (auction_id, *car_ids),
+            ).fetchall()
+        return {str(row["source_car_id"]) for row in rows}
 
     def get_collection_eligible_lots(
         self,
