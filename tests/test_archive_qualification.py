@@ -1149,7 +1149,9 @@ def test_positive_public_bid_qualifies_an_open_candidate(tmp_path) -> None:
     assert collector.qualified_lots == 1
 
 
-def test_public_bid_appearing_after_first_catalogue_scan_qualifies_later(tmp_path) -> None:
+def test_public_bid_appearing_after_first_catalogue_scan_qualifies_later(
+    tmp_path,
+) -> None:
     database = ArchiveDatabase(tmp_path / "archive.sqlite3")
     database.initialize()
     auction_id = "auction-later-bid"
