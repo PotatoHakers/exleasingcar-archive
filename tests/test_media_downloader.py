@@ -12,6 +12,7 @@ from exleasingcar_archive.database import ArchiveDatabase
 from exleasingcar_archive.media_downloader import (
     MediaDownloader,
     MediaDownloaderSettings,
+    main,
 )
 from exleasingcar_archive.r2_budget import R2BudgetExceeded, R2UsageBudget, R2UsageSnapshot
 from exleasingcar_archive.r2_storage import CloudflareR2Storage, R2Settings
@@ -560,3 +561,75 @@ def test_direct_presigned_get_is_blocked_by_the_budget_guard():
 
     with pytest.raises(R2BudgetExceeded, match="Direct presigned R2 reads are disabled"):
         storage.presign_get_url(object_key)
+
+
+
+def test_cli_dry_run_previews_queue_without_cloudflare_or_media_requests(
+    tmp_path, monkeypatch, capsys
+):
+    database = _database(
+        tmp_path,
+        [
+            ("photo", "https://data.exleasingcar.com/one.jpg"),
+            ("report", "https://data.exleasingcar.com/two.pdf"),
+        ],
+    )
+    monkeypatch.setattr(
+        "exleasingcar_archive.media_downloader.load_dotenv",
+        lambda: None,
+    )
+    for name in (
+        "EXLEASINGCAR_R2_ACCOUNT_ID",
+        "EXLEASINGCAR_R2_BUCKET",
+        "EXLEASINGCAR_R2_ACCESS_KEY_ID",
+        "EXLEASINGCAR_R2_SECRET_ACCESS_KEY",
+        "EXLEASINGCAR_CF_ACCOUNT_ANALYTICS_TOKEN",
+    ):
+        monkeypatch.delenv(name, raising=False)
+
+    exit_code = main(
+        [
+            "--database",
+            str(database.path),
+            "--batch-size",
+            "1",
+            "--dry-run",
+        ]
+    )
+
+    output = capsys.readouterr().out
+    assert exit_code == 0
+    assert "no downloads or Cloudflare/R2 requests" in output
+    assert "Selected 1 source(s)" in output
+    assert "Photos: 1; PDF reports: 0" in output
+    assert "209633: 1 photo(s), 0 report(s)" in output
+    assert "data.exleasingcar.com" not in output
+    assert "19702473" not in output
+
+    with sqlite3.connect(database.path) as connection:
+        rows = connection.execute(
+            """
+            SELECT download_status, last_attempted_at
+            FROM lot_media_sources
+            ORDER BY id
+            """
+        ).fetchall()
+    assert rows == [("discovered", None), ("discovered", None)]
+
+
+def test_cli_dry_run_requires_an_existing_database_file(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(
+        "exleasingcar_archive.media_downloader.load_dotenv",
+        lambda: None,
+    )
+
+    exit_code = main(
+        [
+            "--database",
+            str(tmp_path / "missing.sqlite3"),
+            "--dry-run",
+        ]
+    )
+
+    assert exit_code == 2
+    assert "database file does not exist" in capsys.readouterr().out
