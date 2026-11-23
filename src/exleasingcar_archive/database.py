@@ -1384,7 +1384,11 @@ class ArchiveDatabase:
         auction_id = self._validate_identifier(
             exleasingcar_auction_id, "exleasingcar_auction_id"
         )
-        allowed_reasons = {"countdown_expired", "api_terminal_status"}
+        allowed_reasons = {
+            "countdown_expired",
+            "api_terminal_status",
+            "catalog_terminal_status",
+        }
         if reason not in allowed_reasons:
             raise ValueError("Unsupported auction completion reason")
         timestamp = self._serialize_datetime(completed_at)
