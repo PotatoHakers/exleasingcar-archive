@@ -1247,7 +1247,6 @@ def test_qualification_is_preserved_when_same_mode_price_is_temporarily_hidden(
     assert eligibility == 1
 
 
-
 def test_collector_keeps_unpriced_open_lot_out_of_archive(
     tmp_path, monkeypatch
 ) -> None:
@@ -1305,3 +1304,67 @@ def test_collector_keeps_unpriced_open_lot_out_of_archive(
     assert price_count == 0
     assert vehicle == (None, None)
     assert collector.excluded_unpriced_lots == 1
+
+def test_catalogue_price_qualifies_open_candidate_and_is_saved(tmp_path) -> None:
+    database = ArchiveDatabase(tmp_path / "archive.sqlite3")
+    database.initialize()
+    auction_id = "auction-catalogue-price"
+    seed_candidate(database, "car-catalogue-price", auction_id)
+    database.set_auction_lot_qualification(
+        "car-catalogue-price",
+        auction_id,
+        sale_type=SaleType.OPEN_AUCTION,
+        has_fixed_price=False,
+        collection_eligible=False,
+    )
+    collector = ExleasingcarCollector(database, tmp_path / "raw", page_delay_seconds=0)
+    observed_at = datetime(2026, 11, 23, 10, 0, tzinfo=timezone.utc)
+    lot = ParsedLot(
+        source_car_id="car-catalogue-price",
+        title="Example vehicle",
+        source_url=None,
+        status=VehicleStatus.ACTIVE,
+        raw_status=None,
+        is_hot_bid=False,
+        current_price=PriceObservation(
+            price_type=PriceType.CURRENT_PRICE,
+            amount=Decimal(7600),
+            currency="EUR",
+            raw_text="€ 7 600",
+            source_field="maximum_bid_car-catalogue-price",
+        ),
+    )
+    catalogue_lots = {"car-catalogue-price": (lot, observed_at)}
+    candidate_ids = database.get_open_auction_lot_ids(
+        auction_id, {"car-catalogue-price"}
+    )
+    eligible_ids: set[str] = set()
+    open_ids: set[str] = set()
+
+    collector._qualify_open_candidates_from_catalog(
+        AuctionContext(auction_id),
+        catalogue_lots,
+        candidate_ids,
+        eligible_ids,
+        open_ids,
+    )
+    collector._persist_catalog_lot_observations(
+        AuctionContext(auction_id),
+        catalogue_lots,
+        open_ids,
+        completed_before_run=set(),
+    )
+
+    with sqlite3.connect(database.path) as connection:
+        eligibility = connection.execute(
+            "SELECT collection_eligible FROM auction_lots"
+        ).fetchone()[0]
+        prices = connection.execute(
+            "SELECT price_type, amount FROM lot_price_observations"
+        ).fetchall()
+
+    assert eligibility == 1
+    assert eligible_ids == {"car-catalogue-price"}
+    assert open_ids == {"car-catalogue-price"}
+    assert prices == [("displayed_auction_price", "7600")]
+
