@@ -1,6 +1,7 @@
 from datetime import datetime, timedelta, timezone
 
 import pytest
+
 from exleasingcar_archive.auction_timing import project_remaining_seconds
 
 
