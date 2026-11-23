@@ -1,9 +1,82 @@
 import pytest
 
 from exleasingcar_archive.collector import (
+    ExleasingcarCollector,
+    build_argument_parser,
     extract_vehicle_detail_urls,
     filter_updates_for_catalog,
 )
+
+
+def test_save_html_snapshots_can_be_disabled(tmp_path):
+    collector = ExleasingcarCollector(
+        database=None,
+        raw_dir=tmp_path,
+        save_html_snapshots=False,
+    )
+    snapshot = tmp_path / "auction" / "vehicle.html"
+
+    collector._save_html(snapshot, "<p>account-specific content</p>")
+
+    assert not snapshot.exists()
+    assert not snapshot.parent.exists()
+
+
+def test_save_html_snapshots_are_disabled_by_default(tmp_path):
+    collector = ExleasingcarCollector(database=None, raw_dir=tmp_path)
+    snapshot = tmp_path / "auction" / "vehicle.html"
+
+    collector._save_html(snapshot, "<p>public vehicle content</p>")
+
+    assert not snapshot.exists()
+
+
+def test_save_html_snapshots_redact_account_and_private_form_values(tmp_path):
+    collector = ExleasingcarCollector(
+        database=None,
+        raw_dir=tmp_path,
+        save_html_snapshots=True,
+    )
+    snapshot = tmp_path / "auction" / "vehicle.html"
+    html = """
+    <div class="module-user">Alex Example · ID вашей учетной записи: 407930</div>
+    <script>
+      var __USER_ID__ = '407930';
+      var __EMAIL__ = 'owner@example.com';
+      OneSignal.sendTag("ID", "407930");
+    </script>
+    <div class="vehicle">
+      <p>Vehicle ID: 19810183</p>
+      <p>Chassis: WAUZZZF48NA0*****</p>
+      <input name="user_offer" value="12345">
+      <input id="bid_step_max" value="25000">
+      <textarea name="note">Private account note</textarea>
+      <input name="public_vehicle_price" value="18900">
+    </div>
+    """
+
+    collector._save_html(snapshot, html)
+    saved = snapshot.read_text(encoding="utf-8")
+
+    assert "Alex Example" not in saved
+    assert "407930" not in saved
+    assert "owner@example.com" not in saved
+    assert "12345" not in saved
+    assert "25000" not in saved
+    assert "Private account note" not in saved
+    assert "19810183" in saved
+    assert "WAUZZZF48NA0*****" in saved
+    assert "18900" in saved
+
+
+def test_collector_cli_snapshot_retention_is_opt_in_and_legacy_opt_out_still_works():
+    default_args = build_argument_parser().parse_args([])
+    save_args = build_argument_parser().parse_args(["--save-html-snapshots"])
+    legacy_args = build_argument_parser().parse_args(["--no-html-snapshots"])
+
+    assert default_args.save_html_snapshots is False
+    assert save_args.save_html_snapshots is True
+    assert legacy_args.save_html_snapshots is False
 
 
 def test_filter_updates_for_catalog_rejects_other_auction_ids():
@@ -62,8 +135,8 @@ def test_api_response_recorder_accepts_only_target_endpoint_json():
         def finished(self):
             return None
 
-        def json(self):
-            return {"car-1": {"highest_offer": 123}}
+        def body(self):
+            return b'{"car-1": {"highest_offer": 123}}'
 
     recorder = ApiResponseRecorder()
     recorder._on_response(FakeResponse())
@@ -131,18 +204,15 @@ def test_api_response_recorder_reports_invalid_json():
         ok = True
         status = 200
 
-        def finished(self):
-            return None
-
-        def json(self):
-            raise ValueError("response body is not JSON")
+        def body(self):
+            return b"not valid JSON"
 
     recorder = ApiResponseRecorder()
     recorder._on_response(FakeResponse())
 
     assert recorder.responses == []
     assert len(recorder.errors) == 1
-    assert "response body is not JSON" in recorder.errors[0]
+    assert "Could not read JSON" in recorder.errors[0]
 
 
 def test_manual_reauthentication_pauses_and_retries_same_detail_url(
@@ -234,7 +304,7 @@ def test_detail_enrichment_persists_fixed_sale_type_and_price(tmp_path, monkeypa
         tmp_path / "snapshot",
     )
 
-    assert result is True
+    assert result == "fixed_price"
     assert collector.sale_types_recognized == 1
     assert collector.lot_price_observations_inserted == 1
     with sqlite3.connect(database.path) as connection:
@@ -308,15 +378,15 @@ def test_detail_enrichment_keeps_open_starting_price_out_of_bid_history(
     assert bids == 0
 
 
-def test_collector_defaults_to_all_detail_pages_for_selected_auction():
+def test_collector_defaults_to_bounded_detail_batch_for_selected_auction():
     from exleasingcar_archive.collector import build_argument_parser
 
     args = build_argument_parser().parse_args([])
     assert args.max_auctions == 1
-    assert args.max_detail_pages == -1
+    assert args.max_detail_pages == 30
 
 
-def test_api_response_recorder_captures_body_on_request_finished():
+def test_api_response_recorder_captures_body_on_response_before_navigation():
     from exleasingcar_archive.collector import ApiResponseRecorder
 
     class FakeContext:
@@ -326,38 +396,137 @@ def test_api_response_recorder_captures_body_on_request_finished():
         def on(self, event, callback):
             self.handlers[event] = callback
 
+    class FakeRequest:
+        url = "https://www.exleasingcar.com/ajax_update_car_form.v3.1.php"
+
+        def response(self):
+            return response
+
     class FakeResponse:
         url = "https://www.exleasingcar.com/ajax_update_car_form.v3.1.php"
         ok = True
         status = 200
-        def __init__(self):
+
+        def __init__(self, request):
+            self.request = request
             self.headers = {"content-type": "application/json"}
 
-        def json(self):
-            return {"car-1": {"highest_offer": "12500"}}
+        def body(self):
+            return b'{"car-1": {"highest_offer": "12500"}}'
+
+    request = FakeRequest()
+    response = FakeResponse(request)
+    context = FakeContext()
+    recorder = ApiResponseRecorder()
+    recorder.attach(context)
+
+    assert set(context.handlers) == {
+        "request", "response", "requestfinished", "requestfailed"
+    }
+
+    context.handlers["request"](request)
+    assert recorder.pending_requests
+
+    # The response body is consumed before requestfinished / next navigation.
+    context.handlers["response"](response)
+    assert len(recorder.responses) == 1
+    assert recorder.responses[0].payload["car-1"]["highest_offer"] == "12500"
+    assert recorder.errors == []
+
+    context.handlers["requestfinished"](request)
+    assert recorder.pending_requests == {}
+    assert len(recorder.responses) == 1
+
+
+def test_api_response_recorder_reports_non_json_http_response():
+    from exleasingcar_archive.collector import ApiResponseRecorder
+
+    class FakeContext:
+        def __init__(self):
+            self.handlers = {}
+
+        def on(self, event, callback):
+            self.handlers[event] = callback
 
     class FakeRequest:
         url = "https://www.exleasingcar.com/ajax_update_car_form.v3.1.php"
 
         def response(self):
-            return FakeResponse()
+            return response
 
+    class FakeResponse:
+        url = "https://www.exleasingcar.com/ajax_update_car_form.v3.1.php"
+        ok = True
+        status = 200
+        request = None
+
+        def __init__(self):
+            self.headers = {"content-type": "text/html; charset=UTF-8"}
+
+        def body(self):
+            return b"<html><body>session expired</body></html>"
+
+    request = FakeRequest()
+    response = FakeResponse()
+    response.request = request
     context = FakeContext()
     recorder = ApiResponseRecorder()
     recorder.attach(context)
 
-    assert set(context.handlers) == {"request", "requestfinished", "requestfailed"}
-
-    request = FakeRequest()
     context.handlers["request"](request)
-    assert recorder.pending_requests
-
+    context.handlers["response"](response)
     context.handlers["requestfinished"](request)
 
+    assert recorder.responses == []
+    assert len(recorder.errors) == 1
+    assert "content-type=text/html" in recorder.errors[0]
+
+
+def test_api_response_recorder_does_not_duplicate_abort_after_response_error():
+    from exleasingcar_archive.collector import ApiResponseRecorder
+
+    class FakeContext:
+        def __init__(self):
+            self.handlers = {}
+
+        def on(self, event, callback):
+            self.handlers[event] = callback
+
+    class FakeRequest:
+        url = "https://www.exleasingcar.com/ajax_update_car_form.v3.1.php"
+
+        def response(self):
+            return response
+
+        def failure(self):
+            return "net::ERR_ABORTED"
+
+    class FakeResponse:
+        url = "https://www.exleasingcar.com/ajax_update_car_form.v3.1.php"
+        ok = True
+        status = 200
+
+        def __init__(self, request):
+            self.request = request
+            self.headers = {"content-type": "text/html; charset=UTF-8"}
+
+        def body(self):
+            return b"<html>session expired</html>"
+
+    request = FakeRequest()
+    response = FakeResponse(request)
+    context = FakeContext()
+    recorder = ApiResponseRecorder()
+    recorder.attach(context)
+
+    context.handlers["request"](request)
+    context.handlers["response"](response)
+    context.handlers["requestfailed"](request)
+
     assert recorder.pending_requests == {}
-    assert len(recorder.responses) == 1
-    assert recorder.responses[0].payload["car-1"]["highest_offer"] == "12500"
-    assert recorder.errors == []
+    assert recorder.responses == []
+    assert len(recorder.errors) == 1
+    assert "content-type=text/html" in recorder.errors[0]
 
 
 def test_api_response_recorder_reports_failed_request():
@@ -389,8 +558,8 @@ def test_api_response_recorder_waits_for_pending_request_completion():
         def __init__(self):
             self.headers = {"content-type": "application/json"}
 
-        def json(self):
-            return {"car-1": {"highest_offer": 12500}}
+        def body(self):
+            return b'{"car-1": {"highest_offer": 12500}}'
 
     class FakeRequest:
         url = "https://www.exleasingcar.com/ajax_update_car_form.v3.1.php"

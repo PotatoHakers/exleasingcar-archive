@@ -36,6 +36,8 @@ def _active_final_call_response():
             "test-car-001": {
                 "user_offer": 18400,
                 "highest_offer": "18300",
+                "text_minimali_kaina": "0",
+                "text_orientacine_kaina": "0",
                 "actual_user_offer": 0,
                 "actual_car_price": "0",
                 "car_id": "test-car-001",
@@ -66,8 +68,15 @@ def test_store_api_update_with_auction_and_lot_context(tmp_path):
 
     assert summary.cars_processed == 1
     assert summary.lots_upserted == 1
+    assert summary.prices_checked == 1
     assert summary.prices_inserted == 1
+    assert summary.prices_unchanged == 0
+    assert summary.price_references_checked == 1
+    assert summary.price_references_inserted == 1
+    assert summary.price_references_unchanged == 0
+    assert summary.events_checked == 1
     assert summary.events_inserted == 1
+    assert summary.events_unchanged == 0
 
     with sqlite3.connect(database.path) as connection:
         auction = connection.execute(
@@ -87,8 +96,11 @@ def test_store_api_update_with_auction_and_lot_context(tmp_path):
             """
         ).fetchone()
         price = connection.execute(
-            "SELECT highest_offer FROM price_observations"
+            "SELECT highest_offer, currency FROM price_observations"
         ).fetchone()
+        reference_currency = connection.execute(
+            "SELECT currency FROM price_reference_observations"
+        ).fetchone()[0]
         event = connection.execute(
             """
             SELECT auction_phase, final_call_active, live_bidding,
@@ -99,7 +111,8 @@ def test_store_api_update_with_auction_and_lot_context(tmp_path):
 
     assert auction == ("test-auction-001", "Test source auction", "DE", "Germany")
     assert lot == ("test-car-001", "test-auction-001", "TEST-LOT-001", "TEST-CODE-001")
-    assert price == ("18300",)
+    assert price == ("18300", "EUR")
+    assert reference_currency == "EUR"
     assert event == ("final-call", 1, 0, 20)
 
 
@@ -111,17 +124,29 @@ def test_repeated_unchanged_response_does_not_duplicate_history(tmp_path):
     first = store_car_updates(
         database, updates, AUCTION, observed_at=OBSERVED_AT
     )
+    second_checked_at = datetime(2026, 11, 12, 13, 19, 35, tzinfo=timezone.utc)
     second = store_car_updates(
         database,
         updates,
         AUCTION,
-        observed_at=datetime(2026, 11, 12, 13, 19, 35, tzinfo=timezone.utc),
+        observed_at=second_checked_at,
     )
 
+    assert first.prices_checked == 1
     assert first.prices_inserted == 1
+    assert first.prices_unchanged == 0
+    assert first.events_checked == 1
     assert first.events_inserted == 1
+    assert first.events_unchanged == 0
+    assert second.prices_checked == 1
     assert second.prices_inserted == 0
+    assert second.prices_unchanged == 1
+    assert second.price_references_checked == 1
+    assert second.price_references_inserted == 0
+    assert second.price_references_unchanged == 1
+    assert second.events_checked == 1
     assert second.events_inserted == 0
+    assert second.events_unchanged == 1
 
     with sqlite3.connect(database.path) as connection:
         price_count = connection.execute(
@@ -130,9 +155,15 @@ def test_repeated_unchanged_response_does_not_duplicate_history(tmp_path):
         event_count = connection.execute(
             "SELECT COUNT(*) FROM auction_events"
         ).fetchone()[0]
+        api_checked_at = connection.execute(
+            "SELECT last_api_checked_at FROM auction_lots"
+        ).fetchone()[0]
 
     assert price_count == 1
     assert event_count == 1
+    assert api_checked_at == second_checked_at.isoformat(timespec="microseconds").replace(
+        "+00:00", "Z"
+    )
 
 
 def test_missing_price_still_registers_lot_and_event(tmp_path):
@@ -167,6 +198,13 @@ def test_missing_price_still_registers_lot_and_event(tmp_path):
         assert connection.execute(
             "SELECT COUNT(*) FROM auction_events"
         ).fetchone()[0] == 1
+        api_checked_at = connection.execute(
+            "SELECT last_api_checked_at FROM auction_lots"
+        ).fetchone()[0]
+
+    assert api_checked_at == OBSERVED_AT.isoformat(timespec="microseconds").replace(
+        "+00:00", "Z"
+    )
 
 
 def test_missing_timer_does_not_create_false_only_event(tmp_path):
@@ -206,3 +244,45 @@ def test_update_key_must_match_car_id(tmp_path):
         ).fetchone()[0]
 
     assert auction_count == 0
+
+def test_zero_highest_offer_is_stored_and_deduplicated(tmp_path):
+    database = ArchiveDatabase(tmp_path / "archive.sqlite3")
+    database.initialize()
+    updates = parse_car_update_response(
+        {
+            "test-car-001": {
+                "highest_offer": "0",
+                "user_offer": "18400",
+                "actual_car_price": "18500",
+            }
+        }
+    )
+
+    first = store_car_updates(
+        database, updates, AUCTION, observed_at=OBSERVED_AT
+    )
+    second = store_car_updates(
+        database,
+        updates,
+        AUCTION,
+        observed_at=datetime(2026, 11, 12, 13, 19, 35, tzinfo=timezone.utc),
+    )
+
+    assert first.prices_checked == 1
+    assert first.prices_inserted == 1
+    assert first.prices_unchanged == 0
+    assert second.prices_checked == 1
+    assert second.prices_inserted == 0
+    assert second.prices_unchanged == 1
+
+    with sqlite3.connect(database.path) as connection:
+        observations = connection.execute(
+            "SELECT highest_offer FROM price_observations"
+        ).fetchall()
+        columns = {
+            row[1] for row in connection.execute("PRAGMA table_info(vehicles)")
+        }
+
+    assert observations == [("0",)]
+    assert "user_offer" not in columns
+    assert "actual_car_price" not in columns

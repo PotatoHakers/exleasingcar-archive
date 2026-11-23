@@ -1,9 +1,12 @@
+import sqlite3
 from pathlib import Path
 from urllib.parse import unquote
 
+from exleasingcar_archive.database import ArchiveDatabase
 from exleasingcar_archive.metadata_parser import (
     parse_auction_catalog_metadata,
     parse_auction_listings,
+    parse_vehicle_media,
     parse_vehicle_metadata,
 )
 
@@ -220,3 +223,180 @@ def test_parse_all_independent_auction_card_markers_and_keep_primary_type():
         "mail-b.svg",
         "euro-sign.svg",
     }
+
+
+
+def test_catalog_make_uses_only_the_prefix_shared_with_the_displayed_title():
+    saved_page = parse_auction_catalog_metadata(
+        _read_fixture("auction_catalog_make_alt_mismatch.html"),
+    )
+    saved_lot = saved_page.lots[0]
+
+    assert saved_lot.source_car_id == "19740683"
+    assert saved_lot.displayed_title.startswith("Seat Leon")
+    # The saved card's image alt says "SEAT XC40", while its title says
+    # "Seat Leon". Keep the confirmed manufacturer, not the stale model.
+    assert saved_lot.make_label == "SEAT"
+
+    # Regression values reported for vehicle 19764527 in the dashboard:
+    # the screenshot showed "FORD Movano" as Make and "Ford Focus..." as title.
+    ford_page = parse_auction_catalog_metadata(
+        """
+        <input type="hidden" name="aukciono_id" value="210854">
+        <div class="s-car-list auto-block" car-id="19764527">
+          <img class="card-img-top" alt="FORD Movano">
+          <h5>Ford Focus - 2021 Ford Focus Lim. ST-Line</h5>
+        </div>
+        """
+    )
+    assert ford_page.lots[0].make_label == "FORD"
+
+    # Do not infer a make when the leading words of the independent fields
+    # disagree.
+    unrelated_alt_page = parse_auction_catalog_metadata(
+        """
+        <input type="hidden" name="aukciono_id" value="210854">
+        <div class="s-car-list auto-block" car-id="car-unknown">
+          <img class="card-img-top" alt="VOLKSWAGEN Golf">
+          <h5>Ford Focus - 2021 Ford Focus Lim. ST-Line</h5>
+        </div>
+        """
+    )
+    assert unrelated_alt_page.lots[0].make_label is None
+
+
+
+def test_real_masked_chassis_markup_is_parsed_and_persisted(tmp_path):
+    html = """
+    <html>
+      <head>
+        <link rel="canonical"
+              href="https://www.exleasingcar.com/ru/auto-details/19810183">
+      </head>
+      <body>
+        <div class="module-body auto-body" car-id="19810183"
+             id="auto_body_19810183">
+          <h1>AUDI A4 Av. 35TFSI S Ed. Comp. Aut 2021</h1>
+          <table>
+            <tbody>
+              <tr class="border-bottom">
+                <td class="border-0">Номер кузова</td>
+                <td class="border-0">
+                  WAUZZZF48NA0
+                  <a href="/ru/завершение-регистрации/">*****</a>
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </body>
+    </html>
+    """
+
+    parsed = parse_vehicle_metadata(
+        html,
+        "https://www.exleasingcar.com/ru/auto-details/19810183",
+    )
+
+    assert parsed.source_car_id == "19810183"
+    assert parsed.chassis_number is None
+    assert parsed.chassis_number_fragment == "WAUZZZF48NA0"
+    assert parsed.chassis_number_masked is True
+
+    database = ArchiveDatabase(tmp_path / "masked-vin.sqlite3")
+    database.initialize()
+    database.upsert_vehicle(
+        parsed.source_car_id,
+        chassis_number=parsed.chassis_number,
+        chassis_number_fragment=parsed.chassis_number_fragment,
+        chassis_number_masked=parsed.chassis_number_masked,
+    )
+
+    # A later catalogue-only update must not erase the detail-page fragment.
+    database.upsert_vehicle(parsed.source_car_id, displayed_title="Audi A4")
+
+    with sqlite3.connect(database.path) as connection:
+        stored = connection.execute(
+            """
+            SELECT chassis_number, chassis_number_fragment, chassis_number_masked
+            FROM vehicles
+            WHERE source_car_id = ?
+            """,
+            (parsed.source_car_id,),
+        ).fetchone()
+
+    assert stored == (None, "WAUZZZF48NA0", 1)
+
+
+
+def test_parse_vehicle_media_extracts_gallery_originals_and_unique_reports():
+    html = """
+    <html><body>
+      <div id="gallery-area">
+        <div class="highslide-gallery">
+          <a class="highslide" href="./saved_page_files/local-normal.jpg">
+            <img src="./saved_page_files/local-normal.jpg">
+          </a>
+        </div>
+        <div class="gallery-thumbs">
+          <div class="photo-page">
+            <a title="https://data.exleasingcar.com//auction_images/auction-123/456/car-normal_a.jpg"
+               onclick="change_thumb(this, 'https://data.exleasingcar.com//auction_images/auction-123/456/car-normal_a.jpg')">
+              <span class="photo">
+                <img src="https://data.exleasingcar.com//auction_images/auction-123/456/car-small_a.jpg">
+              </span>
+            </a>
+            <a onclick="change_thumb(this, 'https://data.exleasingcar.com//auction_images/auction-123/456/car-normal_b.jpg')">
+              <img src="https://data.exleasingcar.com//auction_images/auction-123/456/car-small_b.jpg">
+            </a>
+            <a onclick="change_thumb(this, 'https://evil.example/car-normal_c.jpg')">
+              <img src="https://evil.example/car-small_c.jpg">
+            </a>
+            <a onclick="change_thumb(this, 'http://data.exleasingcar.com/car-normal_d.jpg')">
+              <img src="http://data.exleasingcar.com/car-small_d.jpg">
+            </a>
+          </div>
+        </div>
+      </div>
+      <div class="damage-block">
+        <table><tbody>
+          <tr>
+            <td onclick="window.open('https://data.exleasingcar.com/auction_files/123/456/report-a.pdf','Damages','width=775')">
+              <strong>Inspection Report</strong>
+            </td>
+            <td onclick="window.open('https://data.exleasingcar.com/auction_files/123/456/report-a.pdf','Damages','width=775')">
+              Review
+            </td>
+          </tr>
+          <tr>
+            <td onclick="window.open('https://data.exleasingcar.com/auction_files/123/456/report-b.pdf','Damages','width=775')">
+              <strong>Inspection Report</strong>
+            </td>
+          </tr>
+          <tr>
+            <td onclick="window.open('https://evil.example/private.pdf','Damages')">
+              <strong>Inspection Report</strong>
+            </td>
+          </tr>
+        </tbody></table>
+      </div>
+    </body></html>
+    """
+
+    media = parse_vehicle_media(
+        html,
+        "https://www.exleasingcar.com/ru/auto-details/12345",
+    )
+
+    photos = [item for item in media if item.media_type == "photo"]
+    reports = [item for item in media if item.media_type == "report"]
+
+    assert len(photos) == 2
+    assert len(reports) == 2
+    assert photos[0].source_url.endswith("car-normal_a.jpg")
+    assert photos[0].preview_url.endswith("car-small_a.jpg")
+    assert photos[1].source_url.endswith("car-normal_b.jpg")
+    assert reports[0].source_url.endswith("report-a.pdf")
+    assert reports[0].label == "Inspection Report"
+    assert reports[1].source_url.endswith("report-b.pdf")
+    assert [item.source_order for item in media] == [0, 1, 2, 3]

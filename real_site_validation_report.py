@@ -1,0 +1,265 @@
+#!/usr/bin/env python3
+"""Read-only, privacy-preserving QA summary for a real-site SQLite archive.
+
+This script opens the archive in SQLite read-only mode. It does not contact
+Exleasingcar, Cloudflare, or R2 and does not print VINs, lot/vehicle IDs, source
+URLs, credentials, or browser-session data.
+
+Usage:
+    python real_site_validation_report.py data/real_site_validation.sqlite3
+"""
+
+from __future__ import annotations
+
+import argparse
+import sqlite3
+import sys
+from pathlib import Path
+from urllib.parse import quote
+
+EXPECTED_SCHEMA_VERSION = 13
+TABLES = (
+    "auctions",
+    "vehicles",
+    "auction_lots",
+    "price_observations",
+    "price_reference_observations",
+    "lot_price_observations",
+    "auction_events",
+    "lot_media_sources",
+    "media_assets",
+    "media_asset_versions",
+    "media_derivatives",
+    "pdf_field_observations",
+    "pdf_damage_observations",
+)
+
+
+def open_read_only(path: Path) -> sqlite3.Connection:
+    """Open an existing SQLite file without creating or modifying it."""
+    resolved = path.resolve().as_posix()
+    uri = f"file:{quote(resolved, safe='/:')}?mode=ro"
+    connection = sqlite3.connect(uri, uri=True)
+    connection.row_factory = sqlite3.Row
+    connection.execute("PRAGMA query_only = ON")
+    return connection
+
+
+def table_names(connection: sqlite3.Connection) -> set[str]:
+    rows = connection.execute(
+        "SELECT name FROM sqlite_master WHERE type = 'table'"
+    ).fetchall()
+    return {str(row["name"]) for row in rows}
+
+
+def count_rows(connection: sqlite3.Connection, table: str) -> int:
+    # Table names come exclusively from the fixed TABLES constant above.
+    return int(connection.execute(f'SELECT COUNT(*) FROM "{table}"').fetchone()[0])
+
+
+def print_media_summary(connection: sqlite3.Connection, tables: set[str]) -> None:
+    print("\nMedia discovery (no URLs or IDs are displayed):")
+    if "lot_media_sources" not in tables:
+        print("  lot_media_sources: MISSING")
+        return
+
+    rows = connection.execute(
+        """
+        SELECT
+            media_type,
+            COUNT(*) AS source_rows,
+            COUNT(DISTINCT source_url) AS distinct_source_urls,
+            COUNT(DISTINCT auction_lot_id) AS lots_with_media,
+            SUM(CASE WHEN download_status = 'discovered' THEN 1 ELSE 0 END)
+                AS discovered,
+            SUM(CASE WHEN download_status = 'downloaded' THEN 1 ELSE 0 END)
+                AS downloaded,
+            SUM(CASE WHEN download_status = 'failed' THEN 1 ELSE 0 END)
+                AS failed,
+            SUM(CASE WHEN current_asset_id IS NOT NULL THEN 1 ELSE 0 END)
+                AS linked_to_archived_asset,
+            SUM(CASE WHEN instr(source_url, '?') > 0 THEN 1 ELSE 0 END)
+                AS urls_with_query_parameters
+        FROM lot_media_sources
+        GROUP BY media_type
+        ORDER BY media_type
+        """
+    ).fetchall()
+
+    if not rows:
+        print("  No media source rows found.")
+        return
+
+    for row in rows:
+        print(
+            "  {kind}: source_rows={rows}, distinct_urls={urls}, lots={lots}, "
+            "discovered={discovered}, downloaded={downloaded}, failed={failed}, "
+            "archived_links={archived}, urls_with_query_parameters={query}".format(
+                kind=row["media_type"],
+                rows=row["source_rows"],
+                urls=row["distinct_source_urls"],
+                lots=row["lots_with_media"],
+                discovered=row["discovered"],
+                downloaded=row["downloaded"],
+                failed=row["failed"],
+                archived=row["linked_to_archived_asset"],
+                query=row["urls_with_query_parameters"],
+            )
+        )
+
+    by_type = {str(row["media_type"]): int(row["distinct_source_urls"]) for row in rows}
+    if "photo" in by_type and "report" in by_type:
+        print(
+            "  Reference sample check: expected 43 photo URLs and 4 report URLs "
+            "for the previously supplied sample; observed "
+            f"{by_type['photo']} photo URL(s) and {by_type['report']} report URL(s)."
+        )
+        if by_type["photo"] != 43 or by_type["report"] != 4:
+            print("  NOTE: a different auction/lot scope can legitimately produce different totals.")
+
+
+def print_price_summary(connection: sqlite3.Connection, tables: set[str]) -> None:
+    print("\nPrice history summary:")
+    if "auction_lots" not in tables:
+        print("  auction_lots: MISSING")
+        return
+
+    lot_count = count_rows(connection, "auction_lots")
+    print(f"  auction lots: {lot_count}")
+
+    if "price_observations" in tables:
+        row = connection.execute(
+            """
+            SELECT
+                COUNT(*) AS observations,
+                COALESCE(SUM(CASE WHEN TRIM(highest_offer) IN ('0', '0.0', '0.00', '0.000')
+                         THEN 1 ELSE 0 END), 0) AS explicit_zero_observations,
+                COUNT(DISTINCT auction_lot_id) AS lots_with_api_price
+            FROM price_observations
+            """
+        ).fetchone()
+        without_price = connection.execute(
+            """
+            SELECT COUNT(*) FROM auction_lots AS lot
+            WHERE NOT EXISTS (
+                SELECT 1 FROM price_observations AS price
+                WHERE price.auction_lot_id = lot.id
+            )
+            """
+        ).fetchone()[0]
+        print(
+            f"  API highest_offer observations: {row['observations']}; "
+            f"explicit-zero observations: {row['explicit_zero_observations']}; "
+            f"lots with API price history: {row['lots_with_api_price']}; "
+            f"lots with no API price observation: {without_price}"
+        )
+
+    if "price_reference_observations" in tables:
+        row = connection.execute(
+            """
+            SELECT
+                COUNT(*) AS observations,
+                COALESCE(SUM(CASE WHEN minimum_price IS NOT NULL THEN 1 ELSE 0 END), 0)
+                    AS minimum_values,
+                COALESCE(SUM(CASE WHEN indicative_price IS NOT NULL THEN 1 ELSE 0 END), 0)
+                    AS indicative_values
+            FROM price_reference_observations
+            """
+        ).fetchone()
+        print(
+            "  seller price references: "
+            f"rows={row['observations']}, minimum values={row['minimum_values']}, "
+            f"indicative values={row['indicative_values']}"
+        )
+
+    if "lot_price_observations" in tables:
+        rows = connection.execute(
+            """
+            SELECT price_type, COUNT(*) AS observations,
+                   COUNT(DISTINCT auction_lot_id) AS lots
+            FROM lot_price_observations
+            GROUP BY price_type
+            ORDER BY price_type
+            """
+        ).fetchall()
+        for row in rows:
+            print(
+                f"  {row['price_type']}: {row['observations']} observation(s) "
+                f"across {row['lots']} lot(s)"
+            )
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("database", type=Path, help="Path to the SQLite archive database")
+    args = parser.parse_args()
+
+    if not args.database.is_file():
+        print(f"Database file not found: {args.database}", file=sys.stderr)
+        return 2
+
+    try:
+        connection = open_read_only(args.database)
+    except sqlite3.Error as exc:
+        print(f"Cannot open database read-only: {type(exc).__name__}: {exc}", file=sys.stderr)
+        return 2
+
+    errors = 0
+    with connection:
+        version = int(connection.execute("PRAGMA user_version").fetchone()[0])
+        integrity = str(connection.execute("PRAGMA integrity_check").fetchone()[0])
+        foreign_key_errors = connection.execute("PRAGMA foreign_key_check").fetchall()
+        tables = table_names(connection)
+
+        print("Exleasingcar Archive — local real-site validation report")
+        print(f"Database: {args.database}")
+        print(f"SQLite schema version: {version} (expected current: {EXPECTED_SCHEMA_VERSION})")
+        print(f"SQLite integrity_check: {integrity}")
+        print(f"Foreign-key violations: {len(foreign_key_errors)}")
+
+        if version != EXPECTED_SCHEMA_VERSION:
+            print("  WARNING: database schema is not at the current application version.")
+        if integrity != "ok":
+            errors += 1
+        if foreign_key_errors:
+            errors += 1
+
+        print("\nTable row counts:")
+        for table in TABLES:
+            if table in tables:
+                print(f"  {table}: {count_rows(connection, table)}")
+            else:
+                print(f"  {table}: not present")
+
+        print_media_summary(connection, tables)
+        print_price_summary(connection, tables)
+
+        if "auction_lots" in tables:
+            coverage = connection.execute(
+                """
+                SELECT
+                    COUNT(*) AS total_lots,
+                    COALESCE(SUM(CASE WHEN last_detail_attempted_at IS NOT NULL THEN 1 ELSE 0 END), 0)
+                        AS detail_attempted,
+                    COALESCE(SUM(CASE WHEN last_detail_checked_at IS NOT NULL THEN 1 ELSE 0 END), 0)
+                        AS detail_checked,
+                    COALESCE(SUM(CASE WHEN last_api_checked_at IS NOT NULL THEN 1 ELSE 0 END), 0)
+                        AS api_checked
+                FROM auction_lots
+                """
+            ).fetchone()
+            print("\nCollector coverage:")
+            print(
+                f"  lots={coverage['total_lots']}, "
+                f"detail_attempted={coverage['detail_attempted']}, "
+                f"detail_checked={coverage['detail_checked']}, "
+                f"api_checked={coverage['api_checked']}"
+            )
+
+    print("\nResult: " + ("CHECK FAILED" if errors else "STRUCTURAL CHECKS PASSED"))
+    print("This report is local-only and performs no website or Cloudflare requests.")
+    return 1 if errors else 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

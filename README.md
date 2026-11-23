@@ -1,6 +1,7 @@
 # Exleasingcar Archive
 
 `Локальный архив публичных данных Exleasingcar.`
+<<<<<<< HEAD
 
 ## GITHUB
 
@@ -55,3 +56,5 @@
     - git worktree remove "Путь" - удалить папку
     - git worktree prune - даляет устаревшие записи о Worktrees, которых больше нет на диске'
 
+=======
+>>>>>>> 86c54b5420ded9ec66a5f65e2c720d650a8f7c6e

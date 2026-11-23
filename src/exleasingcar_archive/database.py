@@ -1,15 +1,19 @@
+import math
 import re
 import sqlite3
 from collections.abc import Iterator
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from .models import AuctionCardMarker, PriceType, SaleType
 from .parsers import PriceObservation
+from .pdf_damage import PDFDamageObservation, PDFDamagePhotoReference
+from .pdf_fields import PDFExtractedField, PDFFieldProvenance, PDFFieldState
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 15
 DEFAULT_SOURCE = "ajax_update_car_form.v3.1.php"
 
 
@@ -56,6 +60,13 @@ CREATE TABLE IF NOT EXISTS auction_lots (
     listing_code_attribute TEXT,
     mileage_km INTEGER,
     sale_type TEXT,
+    collection_eligible INTEGER NOT NULL DEFAULT 1 CHECK (collection_eligible IN (0, 1)),
+    has_fixed_price INTEGER NOT NULL DEFAULT 0 CHECK (has_fixed_price IN (0, 1)),
+    monitoring_completed_at TEXT,
+    monitoring_completion_reason TEXT,
+    last_detail_checked_at TEXT,
+    last_detail_attempted_at TEXT,
+    last_api_checked_at TEXT,
     first_seen_at TEXT NOT NULL,
     last_seen_at TEXT NOT NULL,
     FOREIGN KEY (vehicle_id) REFERENCES vehicles(id) ON DELETE RESTRICT,
@@ -69,6 +80,7 @@ CREATE TABLE IF NOT EXISTS price_observations (
     id INTEGER PRIMARY KEY,
     auction_lot_id INTEGER NOT NULL,
     highest_offer TEXT NOT NULL,
+    currency TEXT NOT NULL DEFAULT 'EUR',
     observed_at TEXT NOT NULL,
     source TEXT NOT NULL,
     FOREIGN KEY (auction_lot_id) REFERENCES auction_lots(id) ON DELETE RESTRICT
@@ -98,6 +110,7 @@ CREATE TABLE IF NOT EXISTS price_reference_observations (
     auction_lot_id INTEGER NOT NULL,
     minimum_price TEXT,
     indicative_price TEXT,
+    currency TEXT NOT NULL DEFAULT 'EUR',
     observed_at TEXT NOT NULL,
     source TEXT NOT NULL,
     CHECK (minimum_price IS NOT NULL OR indicative_price IS NOT NULL),
@@ -114,7 +127,7 @@ CREATE TABLE IF NOT EXISTS lot_price_observations (
         price_type IN ('displayed_auction_price', 'fixed_price')
     ),
     amount TEXT NOT NULL,
-    currency TEXT,
+    currency TEXT DEFAULT 'EUR',
     raw_text TEXT NOT NULL,
     source_field TEXT NOT NULL,
     observed_at TEXT NOT NULL,
@@ -141,6 +154,147 @@ CREATE TABLE IF NOT EXISTS auction_markers (
 """
 
 
+MEDIA_ASSETS_SQL = """
+CREATE TABLE IF NOT EXISTS media_assets (
+    id INTEGER PRIMARY KEY,
+    sha256 TEXT NOT NULL UNIQUE,
+    object_key TEXT NOT NULL UNIQUE,
+    mime_type TEXT NOT NULL,
+    byte_size INTEGER NOT NULL CHECK (byte_size >= 0),
+    original_filename TEXT,
+    created_at TEXT NOT NULL
+)
+"""
+
+LOT_MEDIA_SOURCES_SQL = """
+CREATE TABLE IF NOT EXISTS lot_media_sources (
+    id INTEGER PRIMARY KEY,
+    auction_lot_id INTEGER NOT NULL,
+    media_type TEXT NOT NULL CHECK (media_type IN ('photo', 'report')),
+    source_url TEXT NOT NULL,
+    preview_url TEXT,
+    label TEXT,
+    source_order INTEGER NOT NULL DEFAULT 0 CHECK (source_order >= 0),
+    download_status TEXT NOT NULL DEFAULT 'discovered' CHECK (
+        download_status IN ('discovered', 'downloaded', 'failed')
+    ),
+    current_asset_id INTEGER,
+    first_seen_at TEXT NOT NULL,
+    last_seen_at TEXT NOT NULL,
+    last_attempted_at TEXT,
+    last_downloaded_at TEXT,
+    last_error TEXT,
+    FOREIGN KEY (auction_lot_id) REFERENCES auction_lots(id) ON DELETE RESTRICT,
+    FOREIGN KEY (current_asset_id) REFERENCES media_assets(id) ON DELETE RESTRICT,
+    UNIQUE (auction_lot_id, media_type, source_url)
+)
+"""
+
+MEDIA_ASSET_VERSIONS_SQL = """
+CREATE TABLE IF NOT EXISTS media_asset_versions (
+    id INTEGER PRIMARY KEY,
+    lot_media_source_id INTEGER NOT NULL,
+    media_asset_id INTEGER NOT NULL,
+    linked_at TEXT NOT NULL,
+    FOREIGN KEY (lot_media_source_id)
+        REFERENCES lot_media_sources(id) ON DELETE RESTRICT,
+    FOREIGN KEY (media_asset_id) REFERENCES media_assets(id) ON DELETE RESTRICT,
+    UNIQUE (lot_media_source_id, media_asset_id)
+)
+"""
+
+MEDIA_DERIVATIVES_SQL = """
+CREATE TABLE IF NOT EXISTS media_derivatives (
+    id INTEGER PRIMARY KEY,
+    source_asset_id INTEGER NOT NULL,
+    variant TEXT NOT NULL CHECK (variant IN ('card', 'gallery')),
+    transform_version TEXT NOT NULL,
+    settings_json TEXT NOT NULL,
+    status TEXT NOT NULL CHECK (status IN ('ready', 'unsupported', 'failed')),
+    derived_asset_id INTEGER,
+    width INTEGER,
+    height INTEGER,
+    last_attempted_at TEXT NOT NULL,
+    last_error TEXT,
+    FOREIGN KEY (source_asset_id) REFERENCES media_assets(id) ON DELETE RESTRICT,
+    FOREIGN KEY (derived_asset_id) REFERENCES media_assets(id) ON DELETE RESTRICT,
+    UNIQUE (source_asset_id, variant, transform_version, settings_json),
+    CHECK (
+        (status = 'ready' AND derived_asset_id IS NOT NULL
+         AND width > 0 AND height > 0 AND last_error IS NULL)
+        OR
+        (status IN ('unsupported', 'failed') AND derived_asset_id IS NULL
+         AND width IS NULL AND height IS NULL AND last_error IS NOT NULL)
+    )
+)
+"""
+
+
+
+PDF_FIELD_OBSERVATIONS_SQL = """
+CREATE TABLE IF NOT EXISTS pdf_field_observations (
+    id INTEGER PRIMARY KEY,
+    report_sha256 TEXT NOT NULL CHECK (
+        length(report_sha256) = 64 AND report_sha256 NOT GLOB '*[^0-9a-f]*'
+    ),
+    source_lot_id TEXT,
+    auction_lot_id INTEGER,
+    page_number INTEGER NOT NULL CHECK (page_number > 0),
+    field_key TEXT NOT NULL CHECK (length(trim(field_key)) > 0),
+    source_label TEXT NOT NULL CHECK (length(trim(source_label)) > 0),
+    raw_text TEXT NOT NULL,
+    normalized_text TEXT,
+    state TEXT NOT NULL CHECK (
+        state IN (
+            'value', 'blank', 'explicit_no', 'not_applicable', 'not_tested', 'unknown'
+        )
+    ),
+    parser_name TEXT NOT NULL CHECK (length(trim(parser_name)) > 0),
+    parser_version TEXT NOT NULL CHECK (length(trim(parser_version)) > 0),
+    extracted_at TEXT NOT NULL,
+    FOREIGN KEY (auction_lot_id) REFERENCES auction_lots(id) ON DELETE RESTRICT
+)
+"""
+
+
+PDF_DAMAGE_OBSERVATIONS_SQL = """
+CREATE TABLE IF NOT EXISTS pdf_damage_observations (
+    id INTEGER PRIMARY KEY,
+    report_sha256 TEXT NOT NULL CHECK (
+        length(report_sha256) = 64 AND report_sha256 NOT GLOB '*[^0-9a-f]*'
+    ),
+    source_lot_id TEXT,
+    auction_lot_id INTEGER,
+    item_number INTEGER NOT NULL CHECK (item_number > 0),
+    category TEXT NOT NULL CHECK (length(trim(category)) > 0),
+    component TEXT NOT NULL CHECK (length(trim(component)) > 0),
+    damage_description TEXT NOT NULL CHECK (length(trim(damage_description)) > 0),
+    page_number INTEGER NOT NULL CHECK (page_number > 0),
+    photo_page_number INTEGER,
+    photo_index INTEGER,
+    photo_caption TEXT,
+    photo_x0 REAL,
+    photo_top REAL,
+    photo_x1 REAL,
+    photo_bottom REAL,
+    parser_name TEXT NOT NULL CHECK (length(trim(parser_name)) > 0),
+    parser_version TEXT NOT NULL CHECK (length(trim(parser_version)) > 0),
+    extracted_at TEXT NOT NULL,
+    CHECK (
+        (photo_page_number IS NULL AND photo_index IS NULL AND photo_caption IS NULL
+         AND photo_x0 IS NULL AND photo_top IS NULL AND photo_x1 IS NULL
+         AND photo_bottom IS NULL)
+        OR
+        (photo_page_number > 0 AND photo_index > 0
+         AND photo_caption IS NOT NULL AND length(trim(photo_caption)) > 0
+         AND photo_x0 IS NOT NULL AND photo_top IS NOT NULL
+         AND photo_x1 > photo_x0 AND photo_bottom > photo_top)
+    ),
+    FOREIGN KEY (auction_lot_id) REFERENCES auction_lots(id) ON DELETE RESTRICT
+)
+"""
+
+
 class ArchiveDatabase:
     """SQLite storage for Exleasingcar Archive."""
 
@@ -162,7 +316,7 @@ class ArchiveDatabase:
             connection.close()
 
     def initialize(self) -> None:
-        """Create schema v6 or safely migrate older database versions."""
+        """Create schema v13 or safely migrate older database versions."""
         self.path.parent.mkdir(parents=True, exist_ok=True)
 
         with self._connect() as connection:
@@ -177,33 +331,29 @@ class ArchiveDatabase:
 
             if version == 0:
                 self._create_schema(connection)
-            elif version == 1:
-                self._migrate_v1_to_v2(connection)
-                self._migrate_v2_to_v3(connection)
-                self._migrate_v3_to_v4(connection)
-                self._migrate_v4_to_v5(connection)
-                self._migrate_v5_to_v6(connection)
-                self._create_indexes(connection)
-            elif version == 2:
-                self._migrate_v2_to_v3(connection)
-                self._migrate_v3_to_v4(connection)
-                self._migrate_v4_to_v5(connection)
-                self._migrate_v5_to_v6(connection)
-                self._create_indexes(connection)
-            elif version == 3:
-                self._migrate_v3_to_v4(connection)
-                self._migrate_v4_to_v5(connection)
-                self._migrate_v5_to_v6(connection)
-                self._create_indexes(connection)
-            elif version == 4:
-                self._migrate_v4_to_v5(connection)
-                self._migrate_v5_to_v6(connection)
-                self._create_indexes(connection)
-            elif version == 5:
-                self._migrate_v5_to_v6(connection)
-                self._create_indexes(connection)
             else:
-                # Idempotently ensure indexes exist for an already initialized DB.
+                # Apply every migration after the database's current schema.
+                # Keeping this as one ordered chain prevents older databases
+                # from skipping a later migration when a new schema is added.
+                migrations = (
+                    (1, self._migrate_v1_to_v2),
+                    (2, self._migrate_v2_to_v3),
+                    (3, self._migrate_v3_to_v4),
+                    (4, self._migrate_v4_to_v5),
+                    (5, self._migrate_v5_to_v6),
+                    (6, self._migrate_v6_to_v7),
+                    (7, self._migrate_v7_to_v8),
+                    (8, self._migrate_v8_to_v9),
+                    (9, self._migrate_v9_to_v10),
+                    (10, self._migrate_v10_to_v11),
+                    (11, self._migrate_v11_to_v12),
+                    (12, self._migrate_v12_to_v13),
+                    (13, self._migrate_v13_to_v14),
+                    (14, self._migrate_v14_to_v15),
+                )
+                for from_version, migration in migrations:
+                    if version <= from_version:
+                        migration(connection)
                 self._create_indexes(connection)
 
             connection.execute(
@@ -221,6 +371,12 @@ class ArchiveDatabase:
             PRICE_REFERENCE_OBSERVATIONS_SQL,
             LOT_PRICE_OBSERVATIONS_SQL,
             AUCTION_MARKERS_SQL,
+            MEDIA_ASSETS_SQL,
+            LOT_MEDIA_SOURCES_SQL,
+            MEDIA_ASSET_VERSIONS_SQL,
+            PDF_FIELD_OBSERVATIONS_SQL,
+            PDF_DAMAGE_OBSERVATIONS_SQL,
+            MEDIA_DERIVATIVES_SQL,
         ):
             connection.execute(statement)
         ArchiveDatabase._create_indexes(connection)
@@ -229,8 +385,20 @@ class ArchiveDatabase:
     def _create_indexes(connection: sqlite3.Connection) -> None:
         statements = (
             """
+            CREATE INDEX IF NOT EXISTS idx_auction_lots_detail_check
+            ON auction_lots(auction_id, last_detail_checked_at, id)
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_auction_lots_collection_eligible
+            ON auction_lots(collection_eligible, auction_id, last_seen_at)
+            """,
+            """
             CREATE INDEX IF NOT EXISTS idx_auction_lots_auction_vehicle
             ON auction_lots(auction_id, vehicle_id)
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_auction_lots_monitoring_active
+            ON auction_lots(auction_id, collection_eligible, monitoring_completed_at)
             """,
             """
             CREATE UNIQUE INDEX IF NOT EXISTS
@@ -262,6 +430,34 @@ class ArchiveDatabase:
             """
             CREATE INDEX IF NOT EXISTS idx_auction_markers_auction_present
             ON auction_markers(auction_id, is_present, marker_group)
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_lot_media_sources_lot_order
+            ON lot_media_sources(auction_lot_id, media_type, source_order, id)
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_media_asset_versions_source
+            ON media_asset_versions(lot_media_source_id, linked_at)
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_media_derivatives_source_variant
+            ON media_derivatives(source_asset_id, variant, transform_version)
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_pdf_field_observations_report_page
+            ON pdf_field_observations(report_sha256, page_number, id)
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_pdf_field_observations_lot
+            ON pdf_field_observations(auction_lot_id, id)
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_pdf_damage_observations_report
+            ON pdf_damage_observations(report_sha256, page_number, item_number, id)
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_pdf_damage_observations_lot
+            ON pdf_damage_observations(auction_lot_id, id)
             """,
         )
         for statement in statements:
@@ -416,6 +612,156 @@ class ArchiveDatabase:
     def _migrate_v5_to_v6(cls, connection: sqlite3.Connection) -> None:
         """Store the independent icons and labels shown on each auction card."""
         connection.execute(AUCTION_MARKERS_SQL)
+
+    @classmethod
+    def _migrate_v6_to_v7(cls, connection: sqlite3.Connection) -> None:
+        """Track successful detail-page checks independently from price changes."""
+        cls._add_column_if_missing(
+            connection, "auction_lots", "last_detail_checked_at", "TEXT"
+        )
+        cls._add_column_if_missing(
+            connection, "auction_lots", "last_detail_attempted_at", "TEXT"
+        )
+
+    @classmethod
+    def _migrate_v7_to_v8(cls, connection: sqlite3.Connection) -> None:
+        """Track the latest successful API response check for each auction lot."""
+        cls._add_column_if_missing(
+            connection, "auction_lots", "last_api_checked_at", "TEXT"
+        )
+
+    @classmethod
+    def _migrate_v8_to_v9(cls, connection: sqlite3.Connection) -> None:
+        """Record EUR explicitly on every monetary observation."""
+        cls._add_column_if_missing(
+            connection,
+            "price_observations",
+            "currency",
+            "TEXT NOT NULL DEFAULT 'EUR'",
+        )
+        cls._add_column_if_missing(
+            connection,
+            "price_reference_observations",
+            "currency",
+            "TEXT NOT NULL DEFAULT 'EUR'",
+        )
+        connection.execute(
+            """
+            UPDATE lot_price_observations
+            SET currency = 'EUR'
+            WHERE currency IS NULL OR TRIM(currency) = ''
+            """
+        )
+
+    @classmethod
+    def _migrate_v9_to_v10(cls, connection: sqlite3.Connection) -> None:
+        """Create lot-scoped media source and immutable asset registries."""
+        for statement in (
+            MEDIA_ASSETS_SQL,
+            LOT_MEDIA_SOURCES_SQL,
+            MEDIA_ASSET_VERSIONS_SQL,
+        ):
+            connection.execute(statement)
+
+    @classmethod
+    def _migrate_v10_to_v11(cls, connection: sqlite3.Connection) -> None:
+        """Add durable storage for extracted PDF field observations."""
+        connection.execute(PDF_FIELD_OBSERVATIONS_SQL)
+
+    @classmethod
+    def _migrate_v11_to_v12(cls, connection: sqlite3.Connection) -> None:
+        """Add separate storage for numbered PDF damage observations."""
+        connection.execute(PDF_DAMAGE_OBSERVATIONS_SQL)
+
+    @classmethod
+    def _migrate_v12_to_v13(cls, connection: sqlite3.Connection) -> None:
+        """Add source-linked image preview derivatives."""
+        connection.execute(MEDIA_DERIVATIVES_SQL)
+
+    @classmethod
+    def _migrate_v13_to_v14(cls, connection: sqlite3.Connection) -> None:
+        """Track current archive eligibility independently from auction mode."""
+        cls._add_column_if_missing(
+            connection,
+            "auction_lots",
+            "collection_eligible",
+            "INTEGER NOT NULL DEFAULT 1 CHECK (collection_eligible IN (0, 1))",
+        )
+        cls._add_column_if_missing(
+            connection,
+            "auction_lots",
+            "has_fixed_price",
+            "INTEGER NOT NULL DEFAULT 0 CHECK (has_fixed_price IN (0, 1))",
+        )
+        connection.execute(
+            """
+            UPDATE auction_lots
+            SET has_fixed_price = CASE WHEN EXISTS (
+                SELECT 1
+                FROM lot_price_observations AS price
+                WHERE price.auction_lot_id = auction_lots.id
+                  AND price.price_type = 'fixed_price'
+            ) THEN 1 ELSE 0 END
+            """
+        )
+        connection.execute(
+            """
+            UPDATE auction_lots
+            SET collection_eligible = CASE
+                WHEN sale_type = 'open_auction' THEN 1
+                WHEN has_fixed_price = 1 THEN 1
+                ELSE 0
+            END
+            """
+        )
+
+    @classmethod
+    def _migrate_v14_to_v15(cls, connection: sqlite3.Connection) -> None:
+        """Track conclusively completed open auctions without discarding history."""
+        cls._add_column_if_missing(
+            connection,
+            "auction_lots",
+            "monitoring_completed_at",
+            "TEXT",
+        )
+        cls._add_column_if_missing(
+            connection,
+            "auction_lots",
+            "monitoring_completion_reason",
+            "TEXT",
+        )
+        connection.execute(
+            """
+            UPDATE auction_lots
+            SET monitoring_completed_at = (
+                    SELECT event.observed_at
+                    FROM auction_events AS event
+                    WHERE event.id = (
+                        SELECT latest.id
+                        FROM auction_events AS latest
+                        WHERE latest.auction_lot_id = auction_lots.id
+                        ORDER BY latest.observed_at DESC, latest.id DESC
+                        LIMIT 1
+                    )
+                ),
+                monitoring_completion_reason = 'countdown_expired'
+            WHERE sale_type = 'open_auction'
+              AND EXISTS (
+                    SELECT 1
+                    FROM auction_events AS event
+                    WHERE event.id = (
+                        SELECT latest.id
+                        FROM auction_events AS latest
+                        WHERE latest.auction_lot_id = auction_lots.id
+                        ORDER BY latest.observed_at DESC, latest.id DESC
+                        LIMIT 1
+                    )
+                      AND event.remaining_seconds <= 0
+                      AND event.live_bidding = 0
+                      AND event.final_call_active = 0
+                )
+            """
+        )
 
     @staticmethod
     def _serialize_datetime(value: datetime | None) -> str:
@@ -637,6 +983,7 @@ class ArchiveDatabase:
         listing_code_attribute: str | None = None,
         mileage_km: int | None = None,
         sale_type: str | None = None,
+        collection_eligible: bool | None = None,
     ) -> int:
         if mileage_km is not None and (
             isinstance(mileage_km, bool)
@@ -644,6 +991,8 @@ class ArchiveDatabase:
             or mileage_km < 0
         ):
             raise ValueError("mileage_km must be a non-negative integer or None")
+        if collection_eligible is not None and not isinstance(collection_eligible, bool):
+            raise TypeError("collection_eligible must be bool or None")
         if auction_id is None:
             row = connection.execute(
                 "SELECT id FROM auction_lots "
@@ -660,7 +1009,8 @@ class ArchiveDatabase:
                         displayed_lot_reference = COALESCE(?, displayed_lot_reference),
                         listing_code_attribute = COALESCE(?, listing_code_attribute),
                         mileage_km = COALESCE(?, mileage_km),
-                        sale_type = COALESCE(?, sale_type)
+                        sale_type = COALESCE(?, sale_type),
+                        collection_eligible = COALESCE(?, collection_eligible)
                     WHERE id = ?
                     """,
                     (
@@ -670,6 +1020,7 @@ class ArchiveDatabase:
                         listing_code_attribute,
                         mileage_km,
                         sale_type,
+                        int(collection_eligible) if collection_eligible is not None else None,
                         lot_id,
                     ),
                 )
@@ -679,8 +1030,8 @@ class ArchiveDatabase:
                 INSERT INTO auction_lots (
                     vehicle_id, auction_id, displayed_lot_reference,
                     listing_code_attribute, mileage_km, sale_type,
-                    first_seen_at, last_seen_at
-                ) VALUES (?, NULL, ?, ?, ?, ?, ?, ?)
+                    collection_eligible, first_seen_at, last_seen_at
+                ) VALUES (?, NULL, ?, ?, ?, ?, COALESCE(?, 0), ?, ?)
                 """,
                 (
                     vehicle_id,
@@ -688,6 +1039,7 @@ class ArchiveDatabase:
                     listing_code_attribute,
                     mileage_km,
                     sale_type,
+                    int(collection_eligible) if collection_eligible is not None else None,
                     observed_at,
                     observed_at,
                 ),
@@ -698,8 +1050,8 @@ class ArchiveDatabase:
                 INSERT INTO auction_lots (
                     vehicle_id, auction_id, displayed_lot_reference,
                     listing_code_attribute, mileage_km, sale_type,
-                    first_seen_at, last_seen_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    collection_eligible, first_seen_at, last_seen_at
+                ) VALUES (?, ?, ?, ?, ?, ?, COALESCE(?, 0), ?, ?)
                 ON CONFLICT(vehicle_id, auction_id) DO UPDATE SET
                     first_seen_at = MIN(
                         auction_lots.first_seen_at, excluded.first_seen_at
@@ -718,7 +1070,11 @@ class ArchiveDatabase:
                     mileage_km = COALESCE(
                         excluded.mileage_km, auction_lots.mileage_km
                     ),
-                    sale_type = COALESCE(excluded.sale_type, auction_lots.sale_type)
+                    sale_type = COALESCE(excluded.sale_type, auction_lots.sale_type),
+                    collection_eligible = CASE
+                        WHEN ? IS NULL THEN auction_lots.collection_eligible
+                        ELSE excluded.collection_eligible
+                    END
                 """,
                 (
                     vehicle_id,
@@ -727,8 +1083,10 @@ class ArchiveDatabase:
                     listing_code_attribute,
                     mileage_km,
                     sale_type,
+                    int(collection_eligible) if collection_eligible is not None else None,
                     observed_at,
                     observed_at,
+                    int(collection_eligible) if collection_eligible is not None else None,
                 ),
             )
             row = connection.execute(
@@ -878,6 +1236,900 @@ class ArchiveDatabase:
                 last_registration_country_name=last_registration_country_name,
             )
 
+    def get_detail_check_order(
+        self,
+        exleasingcar_auction_id: str,
+        source_car_ids: set[str],
+        *,
+        recheck_after_days: int = 7,
+    ) -> list[str]:
+        """Refresh detail metadata weekly; API snapshots still flow on each catalogue run."""
+        auction_id = self._validate_identifier(
+            exleasingcar_auction_id, "exleasingcar_auction_id"
+        )
+        if isinstance(recheck_after_days, bool) or not isinstance(recheck_after_days, int):
+            raise TypeError("recheck_after_days must be an integer")
+        if recheck_after_days < 1:
+            raise ValueError("recheck_after_days must be at least one day")
+        car_ids = sorted(
+            {self._validate_identifier(car_id, "source_car_id") for car_id in source_car_ids}
+        )
+        if not car_ids:
+            return []
+        placeholders = ", ".join("?" for _ in car_ids)
+        cutoff = self._serialize_datetime(
+            datetime.now(timezone.utc) - timedelta(days=recheck_after_days)
+        )
+        with self._connect() as connection:
+            rows = connection.execute(
+                f"""
+                SELECT v.source_car_id
+                FROM auction_lots AS l
+                JOIN vehicles AS v ON v.id = l.vehicle_id
+                JOIN auctions AS a ON a.id = l.auction_id
+                WHERE a.exleasingcar_auction_id = ?
+                  AND v.source_car_id IN ({placeholders})
+                  AND NOT (
+                      l.sale_type = 'open_auction'
+                      AND l.monitoring_completed_at IS NOT NULL
+                  )
+                  AND (
+                      MAX(
+                          COALESCE(l.last_detail_checked_at, ''),
+                          COALESCE(l.last_detail_attempted_at, '')
+                      ) = ''
+                      OR MAX(
+                          COALESCE(l.last_detail_checked_at, ''),
+                          COALESCE(l.last_detail_attempted_at, '')
+                      ) <= ?
+                  )
+                ORDER BY
+                    CASE WHEN MAX(
+                        COALESCE(l.last_detail_checked_at, ''),
+                        COALESCE(l.last_detail_attempted_at, '')
+                    ) = '' THEN 0 ELSE 1 END,
+                    MAX(
+                        COALESCE(l.last_detail_checked_at, ''),
+                        COALESCE(l.last_detail_attempted_at, '')
+                    ),
+                    l.id
+                """,
+                (auction_id, *car_ids, cutoff),
+            ).fetchall()
+            existing_rows = connection.execute(
+                f"""
+                SELECT v.source_car_id
+                FROM auction_lots AS l
+                JOIN vehicles AS v ON v.id = l.vehicle_id
+                JOIN auctions AS a ON a.id = l.auction_id
+                WHERE a.exleasingcar_auction_id = ?
+                  AND v.source_car_id IN ({placeholders})
+                """,
+                (auction_id, *car_ids),
+            ).fetchall()
+        ordered = [str(row["source_car_id"]) for row in rows]
+        existing = {str(row["source_car_id"]) for row in existing_rows}
+        missing = sorted(set(car_ids) - existing)
+        return ordered + missing
+
+    def set_auction_lot_qualification(
+        self,
+        source_car_id: str,
+        exleasingcar_auction_id: str,
+        *,
+        sale_type: SaleType | str | None,
+        has_fixed_price: bool,
+        collection_eligible: bool,
+        checked_at: datetime | None = None,
+    ) -> bool:
+        """Persist the latest detail-page qualification for one auction lot."""
+        car_id = self._validate_identifier(source_car_id, "source_car_id")
+        auction_id = self._validate_identifier(
+            exleasingcar_auction_id, "exleasingcar_auction_id"
+        )
+        if sale_type is None:
+            normalized_sale_type = None
+        else:
+            try:
+                normalized_sale_type = SaleType(sale_type).value
+            except ValueError as exc:
+                raise ValueError(f"Unsupported sale_type: {sale_type!r}") from exc
+            if normalized_sale_type not in {
+                SaleType.OPEN_AUCTION.value,
+                SaleType.CLOSED_AUCTION.value,
+                SaleType.FIXED_PRICE.value,
+            }:
+                raise ValueError(f"Unsupported sale_type: {sale_type!r}")
+        if not isinstance(has_fixed_price, bool):
+            raise TypeError("has_fixed_price must be bool")
+        if not isinstance(collection_eligible, bool):
+            raise TypeError("collection_eligible must be bool")
+        timestamp = self._serialize_datetime(checked_at)
+        with self._connect() as connection:
+            cursor = connection.execute(
+                """
+                UPDATE auction_lots
+                SET sale_type = ?,
+                    has_fixed_price = ?,
+                    collection_eligible = ?,
+                    last_detail_checked_at = ?
+                WHERE vehicle_id = (
+                    SELECT id FROM vehicles WHERE source_car_id = ?
+                )
+                AND auction_id = (
+                    SELECT id FROM auctions WHERE exleasingcar_auction_id = ?
+                )
+                """,
+                (
+                    normalized_sale_type,
+                    int(has_fixed_price),
+                    int(collection_eligible),
+                    timestamp,
+                    car_id,
+                    auction_id,
+                ),
+            )
+            return cursor.rowcount > 0
+
+    def mark_open_auction_completed(
+        self,
+        source_car_id: str,
+        exleasingcar_auction_id: str,
+        *,
+        reason: str,
+        completed_at: datetime | None = None,
+    ) -> bool:
+        """Freeze monitoring after a conclusive terminal event, preserving history."""
+        car_id = self._validate_identifier(source_car_id, "source_car_id")
+        auction_id = self._validate_identifier(
+            exleasingcar_auction_id, "exleasingcar_auction_id"
+        )
+        allowed_reasons = {"countdown_expired", "api_terminal_status"}
+        if reason not in allowed_reasons:
+            raise ValueError("Unsupported auction completion reason")
+        timestamp = self._serialize_datetime(completed_at)
+        with self._connect() as connection:
+            cursor = connection.execute(
+                """
+                UPDATE auction_lots
+                SET monitoring_completed_at = COALESCE(monitoring_completed_at, ?),
+                    monitoring_completion_reason = COALESCE(
+                        monitoring_completion_reason, ?
+                    )
+                WHERE vehicle_id = (
+                    SELECT id FROM vehicles WHERE source_car_id = ?
+                )
+                  AND auction_id = (
+                    SELECT id FROM auctions WHERE exleasingcar_auction_id = ?
+                )
+                  AND sale_type = 'open_auction'
+                  AND collection_eligible = 1
+                """,
+                (timestamp, reason, car_id, auction_id),
+            )
+            return cursor.rowcount > 0
+
+    def get_completed_open_auction_lots(
+        self,
+        exleasingcar_auction_id: str,
+        source_car_ids: set[str],
+    ) -> set[str]:
+        """Return open lots whose final state has already been captured."""
+        auction_id = self._validate_identifier(
+            exleasingcar_auction_id, "exleasingcar_auction_id"
+        )
+        car_ids = sorted(
+            {self._validate_identifier(car_id, "source_car_id") for car_id in source_car_ids}
+        )
+        if not car_ids:
+            return set()
+        placeholders = ", ".join("?" for _ in car_ids)
+        with self._connect() as connection:
+            rows = connection.execute(
+                f"""
+                SELECT v.source_car_id
+                FROM auction_lots AS al
+                JOIN vehicles AS v ON v.id = al.vehicle_id
+                JOIN auctions AS a ON a.id = al.auction_id
+                WHERE a.exleasingcar_auction_id = ?
+                  AND v.source_car_id IN ({placeholders})
+                  AND al.sale_type = 'open_auction'
+                  AND al.monitoring_completed_at IS NOT NULL
+                """,
+                (auction_id, *car_ids),
+            ).fetchall()
+        return {str(row["source_car_id"]) for row in rows}
+
+    def get_collection_eligible_lots(
+        self,
+        exleasingcar_auction_id: str,
+        source_car_ids: set[str],
+    ) -> dict[str, str | None]:
+        """Return previously qualified lot IDs and their preserved bidding mode."""
+        auction_id = self._validate_identifier(
+            exleasingcar_auction_id, "exleasingcar_auction_id"
+        )
+        car_ids = sorted(
+            {self._validate_identifier(car_id, "source_car_id") for car_id in source_car_ids}
+        )
+        if not car_ids:
+            return {}
+        placeholders = ", ".join("?" for _ in car_ids)
+        with self._connect() as connection:
+            rows = connection.execute(
+                f"""
+                SELECT v.source_car_id, al.sale_type
+                FROM auction_lots AS al
+                JOIN vehicles AS v ON v.id = al.vehicle_id
+                JOIN auctions AS a ON a.id = al.auction_id
+                WHERE a.exleasingcar_auction_id = ?
+                  AND v.source_car_id IN ({placeholders})
+                  AND al.collection_eligible = 1
+                """,
+                (auction_id, *car_ids),
+            ).fetchall()
+        return {str(row["source_car_id"]): row["sale_type"] for row in rows}
+
+    def mark_detail_attempted(
+        self,
+        source_car_id: str,
+        exleasingcar_auction_id: str,
+        attempted_at: datetime | None = None,
+    ) -> bool:
+        """Record a detail-page attempt, including failures, to prevent starvation."""
+        car_id = self._validate_identifier(source_car_id, "source_car_id")
+        auction_id = self._validate_identifier(
+            exleasingcar_auction_id, "exleasingcar_auction_id"
+        )
+        timestamp = self._serialize_datetime(attempted_at)
+        with self._connect() as connection:
+            cursor = connection.execute(
+                """
+                UPDATE auction_lots
+                SET last_detail_attempted_at = ?
+                WHERE vehicle_id = (
+                    SELECT id FROM vehicles WHERE source_car_id = ?
+                )
+                AND auction_id = (
+                    SELECT id FROM auctions WHERE exleasingcar_auction_id = ?
+                )
+                """,
+                (timestamp, car_id, auction_id),
+            )
+            return cursor.rowcount > 0
+
+    def mark_detail_checked(
+        self,
+        source_car_id: str,
+        exleasingcar_auction_id: str,
+        checked_at: datetime | None = None,
+    ) -> bool:
+        """Record a successfully loaded detail page without creating price history."""
+        car_id = self._validate_identifier(source_car_id, "source_car_id")
+        auction_id = self._validate_identifier(
+            exleasingcar_auction_id, "exleasingcar_auction_id"
+        )
+        timestamp = self._serialize_datetime(checked_at)
+        with self._connect() as connection:
+            cursor = connection.execute(
+                """
+                UPDATE auction_lots
+                SET last_detail_checked_at = ?
+                WHERE vehicle_id = (
+                    SELECT id FROM vehicles WHERE source_car_id = ?
+                )
+                AND auction_id = (
+                    SELECT id FROM auctions WHERE exleasingcar_auction_id = ?
+                )
+                """,
+                (timestamp, car_id, auction_id),
+            )
+            return cursor.rowcount > 0
+
+    def mark_api_checked(
+        self,
+        source_car_id: str,
+        exleasingcar_auction_id: str,
+        checked_at: datetime | None = None,
+    ) -> bool:
+        """Record an API response check even when no price value was returned."""
+        car_id = self._validate_identifier(source_car_id, "source_car_id")
+        auction_id = self._validate_identifier(
+            exleasingcar_auction_id, "exleasingcar_auction_id"
+        )
+        timestamp = self._serialize_datetime(checked_at)
+        with self._connect() as connection:
+            cursor = connection.execute(
+                """
+                UPDATE auction_lots
+                SET last_api_checked_at = CASE
+                    WHEN last_api_checked_at IS NULL OR last_api_checked_at < ?
+                    THEN ?
+                    ELSE last_api_checked_at
+                END
+                WHERE vehicle_id = (
+                    SELECT id FROM vehicles WHERE source_car_id = ?
+                )
+                AND auction_id = (
+                    SELECT id FROM auctions WHERE exleasingcar_auction_id = ?
+                )
+                """,
+                (timestamp, timestamp, car_id, auction_id),
+            )
+            return cursor.rowcount > 0
+
+    @staticmethod
+    def _validate_media_url(value: str | None, field_name: str) -> str | None:
+        if value is None:
+            return None
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError(f"{field_name} cannot be empty")
+        normalized = value.strip()
+        parts = urlsplit(normalized)
+        if (
+            parts.scheme.casefold() != "https"
+            or (parts.hostname or "").casefold()
+            not in {"data.exleasingcar.com", "www.exleasingcar.com"}
+            or parts.username is not None
+            or parts.password is not None
+            or not parts.path
+        ):
+            raise ValueError(f"{field_name} must be an HTTPS Exleasingcar media URL")
+        return normalized
+
+    def upsert_lot_media_source(
+        self,
+        source_car_id: str,
+        exleasingcar_auction_id: str,
+        media_type: str,
+        source_url: str,
+        *,
+        preview_url: str | None = None,
+        label: str | None = None,
+        source_order: int = 0,
+        discovered_at: datetime | None = None,
+    ) -> int:
+        """Register a photo/report URL against an existing auction lot."""
+        car_id = self._validate_identifier(source_car_id, "source_car_id")
+        auction_external_id = self._validate_identifier(
+            exleasingcar_auction_id, "exleasingcar_auction_id"
+        )
+        if media_type not in {"photo", "report"}:
+            raise ValueError("media_type must be 'photo' or 'report'")
+        normalized_url = self._validate_media_url(source_url, "source_url")
+        normalized_preview_url = self._validate_media_url(
+            preview_url, "preview_url"
+        )
+        if isinstance(source_order, bool) or not isinstance(source_order, int):
+            raise TypeError("source_order must be an integer")
+        if source_order < 0:
+            raise ValueError("source_order cannot be negative")
+        if label is not None:
+            if not isinstance(label, str):
+                raise TypeError("label must be str or None")
+            label = label.strip()[:250] or None
+        timestamp = self._serialize_datetime(discovered_at)
+
+        with self._connect() as connection:
+            lot = connection.execute(
+                """
+                SELECT al.id
+                FROM auction_lots al
+                JOIN vehicles v ON v.id = al.vehicle_id
+                JOIN auctions a ON a.id = al.auction_id
+                WHERE v.source_car_id = ?
+                  AND a.exleasingcar_auction_id = ?
+                """,
+                (car_id, auction_external_id),
+            ).fetchone()
+            if lot is None:
+                raise ValueError(
+                    "Cannot register media for a vehicle/auction pair "
+                    "that is not already stored as a lot"
+                )
+            lot_id = int(lot["id"])
+            connection.execute(
+                """
+                INSERT INTO lot_media_sources (
+                    auction_lot_id, media_type, source_url, preview_url,
+                    label, source_order, download_status,
+                    first_seen_at, last_seen_at
+                ) VALUES (?, ?, ?, ?, ?, ?, 'discovered', ?, ?)
+                ON CONFLICT(auction_lot_id, media_type, source_url) DO UPDATE SET
+                    preview_url = COALESCE(
+                        excluded.preview_url, lot_media_sources.preview_url
+                    ),
+                    label = COALESCE(excluded.label, lot_media_sources.label),
+                    source_order = excluded.source_order,
+                    last_seen_at = MAX(
+                        lot_media_sources.last_seen_at, excluded.last_seen_at
+                    ),
+                    download_status = CASE
+                        WHEN lot_media_sources.current_asset_id IS NULL
+                        THEN 'discovered'
+                        ELSE 'downloaded'
+                    END,
+                    last_error = CASE
+                        WHEN lot_media_sources.current_asset_id IS NULL
+                        THEN NULL
+                        ELSE lot_media_sources.last_error
+                    END
+                """,
+                (
+                    lot_id,
+                    media_type,
+                    normalized_url,
+                    normalized_preview_url,
+                    label,
+                    source_order,
+                    timestamp,
+                    timestamp,
+                ),
+            )
+            row = connection.execute(
+                """
+                SELECT id FROM lot_media_sources
+                WHERE auction_lot_id = ? AND media_type = ? AND source_url = ?
+                """,
+                (lot_id, media_type, normalized_url),
+            ).fetchone()
+            if row is None:
+                raise RuntimeError("Failed to register lot media source")
+            return int(row["id"])
+
+    def get_pending_media_sources(
+        self,
+        limit: int = 20,
+        *,
+        include_downloaded: bool = False,
+    ) -> list[dict[str, object]]:
+        """Return a bounded list of lot-scoped media URLs awaiting download.
+
+        Downloaded sources are excluded by default. The refresh flag is
+        intended for an explicit pass that checks whether archived URLs changed.
+        """
+        if isinstance(limit, bool) or not isinstance(limit, int):
+            raise TypeError("limit must be an integer")
+        if not 1 <= limit <= 1000:
+            raise ValueError("limit must be between 1 and 1000")
+        if not isinstance(include_downloaded, bool):
+            raise TypeError("include_downloaded must be a boolean")
+
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT m.id AS media_source_id,
+                       m.media_type,
+                       m.source_url,
+                       m.preview_url,
+                       m.label,
+                       m.source_order,
+                       m.download_status,
+                       v.source_car_id,
+                       a.exleasingcar_auction_id AS auction_id
+                FROM lot_media_sources AS m
+                JOIN auction_lots AS al ON al.id = m.auction_lot_id
+                JOIN vehicles AS v ON v.id = al.vehicle_id
+                JOIN auctions AS a ON a.id = al.auction_id
+                WHERE al.collection_eligible = 1
+                  AND (
+                    (
+                        m.current_asset_id IS NULL
+                        AND m.download_status IN ('discovered', 'failed')
+                    )
+                    OR (? = 1 AND m.current_asset_id IS NOT NULL)
+                )
+                ORDER BY m.id
+                LIMIT ?
+                """,
+                (int(include_downloaded), limit),
+            )
+            return [dict(row) for row in rows]
+
+    def mark_media_source_attempted(
+        self,
+        media_source_id: int,
+        attempted_at: datetime | None = None,
+    ) -> bool:
+        if isinstance(media_source_id, bool) or not isinstance(media_source_id, int):
+            raise TypeError("media_source_id must be an integer")
+        timestamp = self._serialize_datetime(attempted_at)
+        with self._connect() as connection:
+            cursor = connection.execute(
+                """
+                UPDATE lot_media_sources
+                SET last_attempted_at = ?
+                WHERE id = ?
+                """,
+                (timestamp, media_source_id),
+            )
+            return cursor.rowcount > 0
+
+    def mark_media_source_failed(
+        self,
+        media_source_id: int,
+        error: str,
+        attempted_at: datetime | None = None,
+    ) -> bool:
+        if isinstance(media_source_id, bool) or not isinstance(media_source_id, int):
+            raise TypeError("media_source_id must be an integer")
+        if not isinstance(error, str) or not error.strip():
+            raise ValueError("error cannot be empty")
+        timestamp = self._serialize_datetime(attempted_at)
+        safe_error = error.strip()[:500]
+        with self._connect() as connection:
+            cursor = connection.execute(
+                """
+                UPDATE lot_media_sources
+                SET download_status = CASE
+                        WHEN current_asset_id IS NULL THEN 'failed'
+                        ELSE 'downloaded'
+                    END,
+                    last_attempted_at = ?,
+                    last_error = ?
+                WHERE id = ?
+                """,
+                (timestamp, safe_error, media_source_id),
+            )
+            return cursor.rowcount > 0
+
+    def register_media_asset_for_source(
+        self,
+        media_source_id: int,
+        *,
+        sha256: str,
+        object_key: str,
+        mime_type: str,
+        byte_size: int,
+        original_filename: str | None = None,
+        downloaded_at: datetime | None = None,
+    ) -> int:
+        """Attach an immutable, content-addressed object version to a lot source."""
+        if isinstance(media_source_id, bool) or not isinstance(media_source_id, int):
+            raise TypeError("media_source_id must be an integer")
+        if not isinstance(sha256, str) or not re.fullmatch(r"[0-9a-f]{64}", sha256):
+            raise ValueError("sha256 must be a lowercase 64-character hex digest")
+        if not isinstance(object_key, str) or not object_key.strip():
+            raise ValueError("object_key cannot be empty")
+        normalized_key = object_key.strip().replace("\\", "/")
+        if normalized_key.startswith("/") or any(
+            part in {".", ".."} for part in normalized_key.split("/")
+        ):
+            raise ValueError("object_key must be a safe relative object key")
+        if not isinstance(mime_type, str) or not mime_type.strip():
+            raise ValueError("mime_type cannot be empty")
+        if isinstance(byte_size, bool) or not isinstance(byte_size, int):
+            raise TypeError("byte_size must be an integer")
+        if byte_size < 0:
+            raise ValueError("byte_size cannot be negative")
+        if original_filename is not None and not isinstance(original_filename, str):
+            raise TypeError("original_filename must be str or None")
+        timestamp = self._serialize_datetime(downloaded_at)
+
+        with self._connect() as connection:
+            source = connection.execute(
+                "SELECT id FROM lot_media_sources WHERE id = ?",
+                (media_source_id,),
+            ).fetchone()
+            if source is None:
+                raise ValueError(f"Unknown media source ID: {media_source_id}")
+            connection.execute(
+                """
+                INSERT INTO media_assets (
+                    sha256, object_key, mime_type, byte_size,
+                    original_filename, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(sha256) DO NOTHING
+                """,
+                (
+                    sha256,
+                    normalized_key,
+                    mime_type.strip().lower(),
+                    byte_size,
+                    original_filename.strip()[:255] if original_filename else None,
+                    timestamp,
+                ),
+            )
+            asset = connection.execute(
+                "SELECT id, byte_size FROM media_assets WHERE sha256 = ?",
+                (sha256,),
+            ).fetchone()
+            if asset is None:
+                raise RuntimeError("Failed to register media asset")
+            if int(asset["byte_size"]) != byte_size:
+                raise ValueError("Existing SHA-256 asset has a conflicting byte size")
+            asset_id = int(asset["id"])
+            connection.execute(
+                """
+                INSERT INTO media_asset_versions (
+                    lot_media_source_id, media_asset_id, linked_at
+                ) VALUES (?, ?, ?)
+                ON CONFLICT(lot_media_source_id, media_asset_id) DO NOTHING
+                """,
+                (media_source_id, asset_id, timestamp),
+            )
+            connection.execute(
+                """
+                UPDATE lot_media_sources
+                SET current_asset_id = ?,
+                    download_status = 'downloaded',
+                    last_downloaded_at = ?,
+                    last_attempted_at = ?,
+                    last_error = NULL
+                WHERE id = ?
+                """,
+                (asset_id, timestamp, timestamp, media_source_id),
+            )
+            return asset_id
+
+
+    def get_media_asset_by_sha256(self, sha256: str) -> dict[str, object] | None:
+        """Return an already registered content-addressed media asset, if present."""
+        if (
+            not isinstance(sha256, str)
+            or len(sha256) != 64
+            or any(character not in "0123456789abcdef" for character in sha256)
+        ):
+            raise ValueError("sha256 must be a lowercase 64-character digest")
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT id, sha256, object_key, mime_type, byte_size, original_filename
+                FROM media_assets
+                WHERE sha256 = ?
+                """,
+                (sha256,),
+            ).fetchone()
+            return dict(row) if row is not None else None
+
+    def get_media_derivative(
+        self,
+        source_asset_id: int,
+        variant: str,
+        transform_version: str,
+        settings_json: str,
+    ) -> dict[str, object] | None:
+        """Return one derivative record for an original asset and exact transform."""
+        if (
+            isinstance(source_asset_id, bool)
+            or not isinstance(source_asset_id, int)
+            or source_asset_id <= 0
+        ):
+            raise ValueError("source_asset_id must be a positive integer")
+        if variant not in {"card", "gallery"}:
+            raise ValueError("variant must be 'card' or 'gallery'")
+        if not isinstance(transform_version, str) or not transform_version.strip():
+            raise ValueError("transform_version cannot be empty")
+        if not isinstance(settings_json, str) or not settings_json.strip():
+            raise ValueError("settings_json cannot be empty")
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT d.id, d.source_asset_id, d.variant, d.transform_version,
+                       d.settings_json, d.status, d.derived_asset_id,
+                       d.width, d.height, d.last_attempted_at, d.last_error,
+                       asset.sha256 AS derived_sha256,
+                       asset.object_key AS derived_object_key,
+                       asset.mime_type AS derived_mime_type,
+                       asset.byte_size AS derived_byte_size
+                FROM media_derivatives d
+                LEFT JOIN media_assets asset ON asset.id = d.derived_asset_id
+                WHERE d.source_asset_id = ?
+                  AND d.variant = ?
+                  AND d.transform_version = ?
+                  AND d.settings_json = ?
+                """,
+                (source_asset_id, variant, transform_version, settings_json),
+            ).fetchone()
+            return dict(row) if row is not None else None
+
+    def register_media_derivative(
+        self,
+        source_asset_id: int,
+        variant: str,
+        transform_version: str,
+        settings_json: str,
+        *,
+        status: str,
+        derived_sha256: str | None = None,
+        object_key: str | None = None,
+        mime_type: str | None = None,
+        byte_size: int | None = None,
+        width: int | None = None,
+        height: int | None = None,
+        error: str | None = None,
+        attempted_at: datetime | None = None,
+    ) -> int:
+        """Register a ready derivative or an isolated per-asset processing result."""
+        if (
+            isinstance(source_asset_id, bool)
+            or not isinstance(source_asset_id, int)
+            or source_asset_id <= 0
+        ):
+            raise ValueError("source_asset_id must be a positive integer")
+        if variant not in {"card", "gallery"}:
+            raise ValueError("variant must be 'card' or 'gallery'")
+        if not isinstance(transform_version, str) or not transform_version.strip():
+            raise ValueError("transform_version cannot be empty")
+        if len(transform_version) > 64:
+            raise ValueError("transform_version is too long")
+        if (
+            not isinstance(settings_json, str)
+            or not settings_json.strip()
+            or len(settings_json) > 1000
+        ):
+            raise ValueError("settings_json must be a non-empty string of at most 1000 characters")
+        if status not in {"ready", "unsupported", "failed"}:
+            raise ValueError("status must be 'ready', 'unsupported' or 'failed'")
+
+        normalized_key: str | None = None
+        normalized_mime: str | None = None
+        safe_error: str | None = None
+        if status == "ready":
+            if (
+                not isinstance(derived_sha256, str)
+                or len(derived_sha256) != 64
+                or any(character not in "0123456789abcdef" for character in derived_sha256)
+            ):
+                raise ValueError("derived_sha256 must be a lowercase 64-character digest")
+            if not isinstance(object_key, str) or not object_key.strip():
+                raise ValueError("object_key is required for a ready derivative")
+            normalized_key = object_key.strip().replace("\\\\", "/")
+            if normalized_key != (
+                f"archive/photo/{derived_sha256[:2]}/{derived_sha256}"
+            ):
+                raise ValueError("object_key must be a safe content-addressed photo key")
+            if not isinstance(mime_type, str) or mime_type.strip().lower() != "image/jpeg":
+                raise ValueError("derivative mime_type must be image/jpeg")
+            normalized_mime = "image/jpeg"
+            for name, value in (("byte_size", byte_size), ("width", width), ("height", height)):
+                if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+                    raise ValueError(f"{name} must be a positive integer")
+            if error is not None:
+                raise ValueError("error must be None for a ready derivative")
+        else:
+            if any(
+                value is not None
+                for value in (
+                    derived_sha256,
+                    object_key,
+                    mime_type,
+                    byte_size,
+                    width,
+                    height,
+                )
+            ):
+                raise ValueError("asset details must be omitted for a failed derivative")
+            if not isinstance(error, str) or not error.strip():
+                raise ValueError("error is required for an unsupported or failed derivative")
+            safe_error = error.strip()[:250]
+
+        timestamp = self._serialize_datetime(attempted_at)
+        with self._connect() as connection:
+            source = connection.execute(
+                "SELECT mime_type FROM media_assets WHERE id = ?",
+                (source_asset_id,),
+            ).fetchone()
+            if source is None:
+                raise ValueError("source media asset does not exist")
+            if not str(source["mime_type"]).lower().startswith("image/"):
+                raise ValueError("source media asset must be an image")
+
+            derived_asset_id: int | None = None
+            if status == "ready":
+                connection.execute(
+                    """
+                    INSERT INTO media_assets (
+                        sha256, object_key, mime_type, byte_size,
+                        original_filename, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(sha256) DO NOTHING
+                    """,
+                    (
+                        derived_sha256,
+                        normalized_key,
+                        normalized_mime,
+                        byte_size,
+                        f"{variant}.jpg",
+                        timestamp,
+                    ),
+                )
+                asset = connection.execute(
+                    """
+                    SELECT id, object_key, mime_type, byte_size
+                    FROM media_assets
+                    WHERE sha256 = ?
+                    """,
+                    (derived_sha256,),
+                ).fetchone()
+                if asset is None:
+                    raise RuntimeError("Failed to register derivative media asset")
+                if (
+                    str(asset["object_key"]) != normalized_key
+                    or str(asset["mime_type"]).lower() != normalized_mime
+                    or int(asset["byte_size"]) != byte_size
+                ):
+                    raise ValueError("Existing derivative asset metadata conflicts with its digest")
+                derived_asset_id = int(asset["id"])
+
+            connection.execute(
+                """
+                INSERT INTO media_derivatives (
+                    source_asset_id, variant, transform_version, settings_json,
+                    status, derived_asset_id, width, height,
+                    last_attempted_at, last_error
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(source_asset_id, variant, transform_version, settings_json)
+                DO UPDATE SET
+                    status = excluded.status,
+                    derived_asset_id = excluded.derived_asset_id,
+                    width = excluded.width,
+                    height = excluded.height,
+                    last_attempted_at = excluded.last_attempted_at,
+                    last_error = excluded.last_error
+                """,
+                (
+                    source_asset_id,
+                    variant,
+                    transform_version,
+                    settings_json,
+                    status,
+                    derived_asset_id,
+                    width if status == "ready" else None,
+                    height if status == "ready" else None,
+                    timestamp,
+                    safe_error,
+                ),
+            )
+            row = connection.execute(
+                """
+                SELECT id FROM media_derivatives
+                WHERE source_asset_id = ? AND variant = ?
+                  AND transform_version = ? AND settings_json = ?
+                """,
+                (source_asset_id, variant, transform_version, settings_json),
+            ).fetchone()
+            if row is None:
+                raise RuntimeError("Failed to register media derivative")
+            return int(row["id"])
+
+    def get_lot_media_sources(
+        self,
+        source_car_id: str,
+        exleasingcar_auction_id: str | None = None,
+    ) -> list[dict[str, object]]:
+        car_id = self._validate_identifier(source_car_id, "source_car_id")
+        parameters: list[str] = [car_id]
+        auction_filter = ""
+        if exleasingcar_auction_id is not None:
+            auction_filter = " AND a.exleasingcar_auction_id = ?"
+            parameters.append(
+                self._validate_identifier(
+                    exleasingcar_auction_id, "exleasingcar_auction_id"
+                )
+            )
+        with self._connect() as connection:
+            rows = connection.execute(
+                f"""
+                SELECT a.exleasingcar_auction_id AS auction_id,
+                       m.id AS media_source_id, m.media_type, m.source_url,
+                       m.preview_url, m.label, m.source_order, m.download_status,
+                       m.first_seen_at, m.last_seen_at, m.last_downloaded_at,
+                       m.last_error, asset.sha256, asset.object_key,
+                       asset.mime_type, asset.byte_size, asset.original_filename
+                FROM lot_media_sources m
+                JOIN auction_lots al ON al.id = m.auction_lot_id
+                JOIN vehicles v ON v.id = al.vehicle_id
+                LEFT JOIN auctions a ON a.id = al.auction_id
+                LEFT JOIN media_assets asset ON asset.id = m.current_asset_id
+                WHERE v.source_car_id = ? {auction_filter}
+                ORDER BY a.exleasingcar_auction_id, m.media_type,
+                         m.source_order, m.id
+                """,
+                tuple(parameters),
+            )
+            return [dict(row) for row in rows]
+
     def upsert_auction_lot(
         self,
         source_car_id: str,
@@ -887,6 +2139,7 @@ class ArchiveDatabase:
         listing_code_attribute: str | None = None,
         mileage_km: int | None = None,
         sale_type: SaleType | str | None = None,
+        collection_eligible: bool | None = True,
         observed_at: datetime | None = None,
     ) -> int:
         car_id = self._validate_identifier(source_car_id, "source_car_id")
@@ -925,6 +2178,7 @@ class ArchiveDatabase:
                 listing_code_attribute=listing_code_attribute,
                 mileage_km=mileage_km,
                 sale_type=normalized_sale_type,
+                collection_eligible=collection_eligible,
             )
 
     def record_price_observation(
@@ -977,8 +2231,8 @@ class ArchiveDatabase:
             connection.execute(
                 """
                 INSERT INTO price_observations (
-                    auction_lot_id, highest_offer, observed_at, source
-                ) VALUES (?, ?, ?, ?)
+                    auction_lot_id, highest_offer, currency, observed_at, source
+                ) VALUES (?, ?, 'EUR', ?, ?)
                 """,
                 (lot_id, price, timestamp, source),
             )
@@ -1032,21 +2286,21 @@ class ArchiveDatabase:
             )
             latest = connection.execute(
                 """
-                SELECT minimum_price, indicative_price
+                SELECT minimum_price, indicative_price, currency
                 FROM price_reference_observations
                 WHERE auction_lot_id = ? ORDER BY id DESC LIMIT 1
                 """,
                 (lot_id,),
             ).fetchone()
-            new_values = (minimum_value, indicative_value)
+            new_values = (minimum_value, indicative_value, "EUR")
             if latest is not None and tuple(latest) == new_values:
                 return False
             connection.execute(
                 """
                 INSERT INTO price_reference_observations (
-                    auction_lot_id, minimum_price, indicative_price,
+                    auction_lot_id, minimum_price, indicative_price, currency,
                     observed_at, source
-                ) VALUES (?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, 'EUR', ?, ?)
                 """,
                 (lot_id, minimum_value, indicative_value, timestamp, source),
             )
@@ -1081,6 +2335,12 @@ class ArchiveDatabase:
             raise ValueError("price.source_field cannot be empty")
         if price.currency is not None and not isinstance(price.currency, str):
             raise TypeError("price.currency must be str or None")
+        normalized_currency = (price.currency or "EUR").strip().upper()
+        if normalized_currency not in {"EUR", "€", "EURO"}:
+            raise ValueError(
+                f"Unsupported currency {price.currency!r}; Exleasingcar prices are EUR"
+            )
+        normalized_currency = "EUR"
         if not isinstance(source, str) or not source.strip():
             raise ValueError("source cannot be empty")
 
@@ -1130,7 +2390,7 @@ class ArchiveDatabase:
                 """,
                 (lot_id, price.price_type.value),
             ).fetchone()
-            new_values = (amount, price.currency, price.source_field)
+            new_values = (amount, normalized_currency, price.source_field)
             if latest is not None and tuple(latest) == new_values:
                 return False
 
@@ -1145,7 +2405,7 @@ class ArchiveDatabase:
                     lot_id,
                     price.price_type.value,
                     amount,
-                    price.currency,
+                    normalized_currency,
                     price.raw_text.strip(),
                     price.source_field.strip(),
                     timestamp,
@@ -1245,3 +2505,382 @@ class ArchiveDatabase:
                 ),
             )
         return True
+
+    def save_pdf_field_observations(
+        self,
+        fields: tuple[PDFExtractedField, ...],
+        *,
+        auction_lot_id: int | None = None,
+    ) -> tuple[int, ...]:
+        """Save one report's extracted fields without replacing earlier observations.
+
+        PDFFieldProvenance.lot_id is retained as the source's opaque lot
+        identifier. The optional auction_lot_id is a separate, local database
+        relationship and must refer to an already existing auction lot. It is
+        never inferred from the source identifier.
+        """
+        if not isinstance(fields, tuple) or any(
+            not isinstance(field, PDFExtractedField) for field in fields
+        ):
+            raise TypeError("fields must be a tuple of PDFExtractedField values")
+
+        if auction_lot_id is not None:
+            if isinstance(auction_lot_id, bool) or not isinstance(auction_lot_id, int):
+                raise TypeError("auction_lot_id must be an integer or None")
+            if auction_lot_id <= 0:
+                raise ValueError("auction_lot_id must be a positive integer")
+
+        if not fields:
+            return ()
+
+        rows: list[tuple[object, ...]] = []
+        report_hashes: set[str] = set()
+        for field in fields:
+            provenance = field.provenance
+            if not isinstance(provenance, PDFFieldProvenance):
+                raise TypeError("field provenance must be a PDFFieldProvenance")
+            if not isinstance(field.state, PDFFieldState):
+                raise TypeError("field state must be a PDFFieldState")
+
+            report_sha256 = provenance.report_sha256
+            if not isinstance(report_sha256, str):
+                raise TypeError("report_sha256 must be a string")
+            if re.fullmatch(r"[0-9a-fA-F]{64}", report_sha256) is None:
+                raise ValueError(
+                    "report_sha256 must contain exactly 64 hexadecimal characters"
+                )
+            report_sha256 = report_sha256.lower()
+            report_hashes.add(report_sha256)
+
+            for value, name in (
+                (field.key, "field key"),
+                (provenance.source_label, "source label"),
+                (provenance.parser_name, "parser name"),
+                (provenance.parser_version, "parser version"),
+            ):
+                if not isinstance(value, str):
+                    raise TypeError(f"{name} must be a string")
+                if not value.strip():
+                    raise ValueError(f"{name} cannot be empty")
+
+            if provenance.lot_id is not None:
+                if not isinstance(provenance.lot_id, str):
+                    raise TypeError("source lot_id must be a string or None")
+                if not provenance.lot_id.strip():
+                    raise ValueError("source lot_id cannot be empty")
+
+            if (
+                isinstance(provenance.page_number, bool)
+                or not isinstance(provenance.page_number, int)
+            ):
+                raise TypeError("page_number must be an integer")
+            if provenance.page_number <= 0:
+                raise ValueError("page_number must be positive")
+            if not isinstance(field.raw_text, str):
+                raise TypeError("raw_text must be a string")
+            if field.normalized_text is not None and not isinstance(
+                field.normalized_text, str
+            ):
+                raise TypeError("normalized_text must be a string or None")
+            if not isinstance(provenance.extracted_at, datetime):
+                raise TypeError("extracted_at must be a datetime")
+            timestamp = self._serialize_datetime(provenance.extracted_at)
+
+            rows.append(
+                (
+                    report_sha256,
+                    provenance.lot_id,
+                    auction_lot_id,
+                    provenance.page_number,
+                    field.key,
+                    provenance.source_label,
+                    field.raw_text,
+                    field.normalized_text,
+                    field.state.value,
+                    provenance.parser_name,
+                    provenance.parser_version,
+                    timestamp,
+                )
+            )
+
+        if len(report_hashes) != 1:
+            raise ValueError("all fields in a batch must belong to the same report")
+
+        inserted_ids: list[int] = []
+        with self._connect() as connection:
+            if auction_lot_id is not None:
+                lot = connection.execute(
+                    "SELECT id FROM auction_lots WHERE id = ?", (auction_lot_id,)
+                ).fetchone()
+                if lot is None:
+                    raise ValueError(
+                        f"auction_lot_id {auction_lot_id} does not refer to an existing lot"
+                    )
+
+            for row in rows:
+                cursor = connection.execute(
+                    """
+                    INSERT INTO pdf_field_observations (
+                        report_sha256, source_lot_id, auction_lot_id, page_number,
+                        field_key, source_label, raw_text, normalized_text, state,
+                        parser_name, parser_version, extracted_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    row,
+                )
+                inserted_ids.append(int(cursor.lastrowid))
+
+        return tuple(inserted_ids)
+
+    def get_pdf_field_observations(
+        self,
+        *,
+        report_sha256: str | None = None,
+        auction_lot_id: int | None = None,
+    ) -> list[dict[str, object]]:
+        """Read observations for a report, a confirmed lot, or their intersection."""
+        conditions: list[str] = []
+        parameters: list[str | int] = []
+
+        if report_sha256 is not None:
+            if not isinstance(report_sha256, str):
+                raise TypeError("report_sha256 must be a string or None")
+            if re.fullmatch(r"[0-9a-fA-F]{64}", report_sha256) is None:
+                raise ValueError(
+                    "report_sha256 must contain exactly 64 hexadecimal characters"
+                )
+            conditions.append("report_sha256 = ?")
+            parameters.append(report_sha256.lower())
+
+        if auction_lot_id is not None:
+            if isinstance(auction_lot_id, bool) or not isinstance(auction_lot_id, int):
+                raise TypeError("auction_lot_id must be an integer or None")
+            if auction_lot_id <= 0:
+                raise ValueError("auction_lot_id must be a positive integer")
+            conditions.append("auction_lot_id = ?")
+            parameters.append(auction_lot_id)
+
+        if not conditions:
+            raise ValueError("provide report_sha256, auction_lot_id, or both")
+
+        with self._connect() as connection:
+            observations = connection.execute(
+                f"""
+                SELECT id, report_sha256, source_lot_id, auction_lot_id,
+                       page_number, field_key, source_label, raw_text,
+                       normalized_text, state, parser_name, parser_version,
+                       extracted_at
+                FROM pdf_field_observations
+                WHERE {" AND ".join(conditions)}
+                ORDER BY id
+                """,
+                tuple(parameters),
+            ).fetchall()
+        return [dict(row) for row in observations]
+
+    def save_pdf_damage_observations(
+        self,
+        damages: tuple[PDFDamageObservation, ...],
+        *,
+        auction_lot_id: int | None = None,
+    ) -> tuple[int, ...]:
+        """Save numbered damage observations without replacing earlier extractions."""
+        if not isinstance(damages, tuple) or any(
+            not isinstance(damage, PDFDamageObservation) for damage in damages
+        ):
+            raise TypeError("damages must be a tuple of PDFDamageObservation values")
+
+        if auction_lot_id is not None:
+            if isinstance(auction_lot_id, bool) or not isinstance(auction_lot_id, int):
+                raise TypeError("auction_lot_id must be an integer or None")
+            if auction_lot_id <= 0:
+                raise ValueError("auction_lot_id must be a positive integer")
+
+        if not damages:
+            return ()
+
+        rows: list[tuple[object, ...]] = []
+        report_hashes: set[str] = set()
+        for damage in damages:
+            provenance = damage.provenance
+            if not isinstance(provenance, PDFFieldProvenance):
+                raise TypeError("damage provenance must be a PDFFieldProvenance")
+
+            report_sha256 = provenance.report_sha256
+            if not isinstance(report_sha256, str):
+                raise TypeError("report_sha256 must be a string")
+            if re.fullmatch(r"[0-9a-fA-F]{64}", report_sha256) is None:
+                raise ValueError(
+                    "report_sha256 must contain exactly 64 hexadecimal characters"
+                )
+            report_sha256 = report_sha256.lower()
+            report_hashes.add(report_sha256)
+
+            for value, name in (
+                (damage.category, "damage category"),
+                (damage.component, "damage component"),
+                (damage.description, "damage description"),
+                (provenance.source_label, "source label"),
+                (provenance.parser_name, "parser name"),
+                (provenance.parser_version, "parser version"),
+            ):
+                if not isinstance(value, str):
+                    raise TypeError(f"{name} must be a string")
+                if not value.strip():
+                    raise ValueError(f"{name} cannot be empty")
+
+            if provenance.lot_id is not None:
+                if not isinstance(provenance.lot_id, str):
+                    raise TypeError("source lot_id must be a string or None")
+                if not provenance.lot_id.strip():
+                    raise ValueError("source lot_id cannot be empty")
+
+            for value, name in (
+                (damage.item_number, "item_number"),
+                (provenance.page_number, "page_number"),
+            ):
+                if isinstance(value, bool) or not isinstance(value, int):
+                    raise TypeError(f"{name} must be an integer")
+                if value <= 0:
+                    raise ValueError(f"{name} must be positive")
+
+            if not isinstance(provenance.extracted_at, datetime):
+                raise TypeError("extracted_at must be a datetime")
+            timestamp = self._serialize_datetime(provenance.extracted_at)
+
+            photo = damage.photo
+            if photo is None:
+                photo_values: tuple[object, ...] = (None,) * 7
+            else:
+                if not isinstance(photo, PDFDamagePhotoReference):
+                    raise TypeError("photo must be a PDFDamagePhotoReference or None")
+                if (
+                    isinstance(photo.page_number, bool)
+                    or not isinstance(photo.page_number, int)
+                    or photo.page_number <= 0
+                ):
+                    raise ValueError("photo page_number must be a positive integer")
+                if (
+                    isinstance(photo.image_index, bool)
+                    or not isinstance(photo.image_index, int)
+                    or photo.image_index <= 0
+                ):
+                    raise ValueError("photo image_index must be a positive integer")
+                if not isinstance(photo.caption, str) or not photo.caption.strip():
+                    raise ValueError("photo caption cannot be empty")
+
+                coordinates = (photo.x0, photo.top, photo.x1, photo.bottom)
+                if any(
+                    isinstance(value, bool)
+                    or not isinstance(value, (int, float))
+                    or not math.isfinite(value)
+                    for value in coordinates
+                ):
+                    raise TypeError("photo coordinates must be finite numbers")
+                if photo.x1 <= photo.x0 or photo.bottom <= photo.top:
+                    raise ValueError("photo rectangle must have positive width and height")
+                photo_values = (
+                    photo.page_number,
+                    photo.image_index,
+                    photo.caption,
+                    float(photo.x0),
+                    float(photo.top),
+                    float(photo.x1),
+                    float(photo.bottom),
+                )
+
+            rows.append(
+                (
+                    report_sha256,
+                    provenance.lot_id,
+                    auction_lot_id,
+                    damage.item_number,
+                    damage.category,
+                    damage.component,
+                    damage.description,
+                    provenance.page_number,
+                    *photo_values,
+                    provenance.parser_name,
+                    provenance.parser_version,
+                    timestamp,
+                )
+            )
+
+        if len(report_hashes) != 1:
+            raise ValueError("all damage observations in a batch must belong to the same report")
+
+        inserted_ids: list[int] = []
+        with self._connect() as connection:
+            if auction_lot_id is not None:
+                lot = connection.execute(
+                    "SELECT id FROM auction_lots WHERE id = ?", (auction_lot_id,)
+                ).fetchone()
+                if lot is None:
+                    raise ValueError(
+                        f"auction_lot_id {auction_lot_id} does not refer to an existing lot"
+                    )
+
+            for row in rows:
+                cursor = connection.execute(
+                    """
+                    INSERT INTO pdf_damage_observations (
+                        report_sha256, source_lot_id, auction_lot_id, item_number,
+                        category, component, damage_description, page_number,
+                        photo_page_number, photo_index, photo_caption,
+                        photo_x0, photo_top, photo_x1, photo_bottom,
+                        parser_name, parser_version, extracted_at
+                    ) VALUES (
+                        ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                    )
+                    """,
+                    row,
+                )
+                inserted_ids.append(int(cursor.lastrowid))
+        return tuple(inserted_ids)
+
+    def get_pdf_damage_observations(
+        self,
+        *,
+        report_sha256: str | None = None,
+        auction_lot_id: int | None = None,
+    ) -> list[dict[str, object]]:
+        """Read damage observations for a report, a confirmed lot, or both."""
+        conditions: list[str] = []
+        parameters: list[str | int] = []
+
+        if report_sha256 is not None:
+            if not isinstance(report_sha256, str):
+                raise TypeError("report_sha256 must be a string or None")
+            if re.fullmatch(r"[0-9a-fA-F]{64}", report_sha256) is None:
+                raise ValueError(
+                    "report_sha256 must contain exactly 64 hexadecimal characters"
+                )
+            conditions.append("report_sha256 = ?")
+            parameters.append(report_sha256.lower())
+
+        if auction_lot_id is not None:
+            if isinstance(auction_lot_id, bool) or not isinstance(auction_lot_id, int):
+                raise TypeError("auction_lot_id must be an integer or None")
+            if auction_lot_id <= 0:
+                raise ValueError("auction_lot_id must be a positive integer")
+            conditions.append("auction_lot_id = ?")
+            parameters.append(auction_lot_id)
+
+        if not conditions:
+            raise ValueError("provide report_sha256, auction_lot_id, or both")
+
+        with self._connect() as connection:
+            observations = connection.execute(
+                f"""
+                SELECT id, report_sha256, source_lot_id, auction_lot_id,
+                       item_number, category, component, damage_description,
+                       page_number, photo_page_number, photo_index, photo_caption,
+                       photo_x0, photo_top, photo_x1, photo_bottom,
+                       parser_name, parser_version, extracted_at
+                FROM pdf_damage_observations
+                WHERE {" AND ".join(conditions)}
+                ORDER BY id
+                """,
+                tuple(parameters),
+            ).fetchall()
+        return [dict(row) for row in observations]
