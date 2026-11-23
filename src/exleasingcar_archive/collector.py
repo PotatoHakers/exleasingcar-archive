@@ -650,6 +650,40 @@ class ExleasingcarCollector:
 
         return completed_by_catalog
 
+    def _qualify_open_candidates_from_catalog(
+        self,
+        auction: AuctionContext,
+        catalog_lots: Mapping[str, tuple[ParsedLot, datetime]],
+        candidate_open_ids: set[str],
+        eligible_car_ids: set[str],
+        open_auction_car_ids: set[str],
+    ) -> None:
+        """Qualify known open lots when the catalogue shows a positive price."""
+        for car_id, (lot, observed_at) in catalog_lots.items():
+            if (
+                car_id not in candidate_open_ids
+                or car_id in eligible_car_ids
+                or lot.current_price is None
+                or lot.current_price.amount <= 0
+            ):
+                continue
+            promoted = self.database.set_auction_lot_qualification(
+                car_id,
+                auction.exleasingcar_auction_id,
+                sale_type=SaleType.OPEN_AUCTION,
+                has_fixed_price=False,
+                collection_eligible=True,
+                checked_at=observed_at,
+            )
+            if not promoted:
+                continue
+            eligible_car_ids.add(car_id)
+            open_auction_car_ids.add(car_id)
+            self.qualified_lots += 1
+            print(
+                f"  Open lot {car_id} qualified by its public catalogue price."
+            )
+
     def _upsert_catalog_lots(
         self,
         auction: AuctionContext,
@@ -1339,6 +1373,13 @@ class ExleasingcarCollector:
         open_auction_candidate_ids = self.database.get_open_auction_lot_ids(
             listing.exleasingcar_auction_id,
             set(all_lot_metadata),
+        )
+        self._qualify_open_candidates_from_catalog(
+            auction,
+            catalog_lot_observations,
+            open_auction_candidate_ids,
+            eligible_car_ids,
+            open_auction_car_ids,
         )
         self._persist_api_updates(
             auction,
