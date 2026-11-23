@@ -1,8 +1,7 @@
 from datetime import datetime, timedelta, timezone
 
-from exleasingcar_archive.auction_timing import project_remaining_seconds
-
 import pytest
+from exleasingcar_archive.auction_timing import project_remaining_seconds
 
 
 OBSERVED_AT = datetime(2026, 11, 23, 12, 0, tzinfo=timezone.utc)
