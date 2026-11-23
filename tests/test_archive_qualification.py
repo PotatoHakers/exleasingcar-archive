@@ -990,3 +990,259 @@ def test_single_public_bid_without_a_timer_stays_active(tmp_path) -> None:
     assert price == "8200"
     assert completion is None
     assert event_count == 0
+
+
+
+def test_open_auction_without_public_price_is_not_archived() -> None:
+    result = parse_vehicle_detail(
+        """
+        <div class="auto-block" car-id="car-unpriced">
+          <div class="bids active open bids_car-unpriced">
+            <input class="my_bid_car-unpriced" value="0">
+          </div>
+        </div>
+        """
+    )
+
+    assert result.sale_type is SaleType.OPEN_AUCTION
+    assert result.should_monitor is True
+    assert result.displayed_auction_price is None
+    assert result.should_archive is False
+
+
+def test_zero_displayed_price_and_zero_buy_now_are_not_qualifying_values() -> None:
+    open_result = parse_vehicle_detail(
+        """
+        <div class="auto-block" car-id="car-zero-price">
+          <div class="bids active open bids_car-zero-price">
+            <div class="current-price">Начальная цена: € 0</div>
+          </div>
+        </div>
+        """
+    )
+    fixed_result = parse_vehicle_detail(
+        """
+        <div class="auto-block" car-id="car-zero-fixed">
+          <div class="bids active closed fix bids_car-zero-fixed"></div>
+          <div class="fixed-price">
+            <input class="buy-offer" value="Купить сейчас за € 0">
+          </div>
+        </div>
+        """
+    )
+
+    assert open_result.displayed_auction_price is not None
+    assert open_result.displayed_auction_price.amount == Decimal(0)
+    assert open_result.should_archive is False
+    assert fixed_result.fixed_price is not None
+    assert fixed_result.fixed_price.amount == Decimal(0)
+    assert fixed_result.should_archive is False
+
+
+def test_open_lot_with_zero_offer_and_seller_references_stays_unqualified(tmp_path) -> None:
+    database = ArchiveDatabase(tmp_path / "archive.sqlite3")
+    database.initialize()
+    auction_id = "auction-zero-offer"
+    seed_candidate(database, "car-zero-offer", auction_id)
+    database.set_auction_lot_qualification(
+        "car-zero-offer",
+        auction_id,
+        sale_type=SaleType.OPEN_AUCTION,
+        has_fixed_price=False,
+        collection_eligible=False,
+    )
+    collector = ExleasingcarCollector(database, tmp_path / "raw", page_delay_seconds=0)
+    collector.recorder.responses.append(
+        CapturedApiResponse(
+            "https://www.exleasingcar.com/ajax_update_car_form.v3.1.php",
+            {
+                "car-zero-offer": {
+                    "highest_offer": 0,
+                    "text_minimali_kaina": 9000,
+                    "text_orientacine_kaina": 10000,
+                }
+            },
+            datetime.now(timezone.utc),
+        )
+    )
+
+    candidate_ids = database.get_open_auction_lot_ids(auction_id, {"car-zero-offer"})
+    collector._persist_api_updates(
+        AuctionContext(auction_id),
+        set(),
+        {"car-zero-offer": LotMetadata()},
+        open_auction_candidate_ids=candidate_ids,
+    )
+
+    with sqlite3.connect(database.path) as connection:
+        eligibility = connection.execute(
+            "SELECT collection_eligible FROM auction_lots"
+        ).fetchone()[0]
+        price_count = connection.execute(
+            "SELECT COUNT(*) FROM price_observations"
+        ).fetchone()[0]
+        reference_count = connection.execute(
+            "SELECT COUNT(*) FROM price_reference_observations"
+        ).fetchone()[0]
+        event_count = connection.execute(
+            "SELECT COUNT(*) FROM auction_events"
+        ).fetchone()[0]
+
+    assert eligibility == 0
+    assert price_count == 0
+    assert reference_count == 0
+    assert event_count == 0
+
+
+def test_positive_public_bid_qualifies_an_open_candidate(tmp_path) -> None:
+    database = ArchiveDatabase(tmp_path / "archive.sqlite3")
+    database.initialize()
+    auction_id = "auction-public-bid"
+    seed_candidate(database, "car-public-bid", auction_id)
+    database.set_auction_lot_qualification(
+        "car-public-bid",
+        auction_id,
+        sale_type=SaleType.OPEN_AUCTION,
+        has_fixed_price=False,
+        collection_eligible=False,
+    )
+    collector = ExleasingcarCollector(database, tmp_path / "raw", page_delay_seconds=0)
+    collector.recorder.responses.append(
+        CapturedApiResponse(
+            "https://www.exleasingcar.com/ajax_update_car_form.v3.1.php",
+            {
+                "car-public-bid": {
+                    "highest_offer": 12300,
+                    "text_minimali_kaina": 9000,
+                    "text_orientacine_kaina": 10000,
+                    "bid_status": "leading",
+                    "car_auction_time": {
+                        "type": "ongoing",
+                        "liveBidding": "1",
+                        "remainingSeconds": 300,
+                    },
+                }
+            },
+            datetime.now(timezone.utc),
+        )
+    )
+    eligible_ids: set[str] = set()
+    active_open_ids: set[str] = set()
+
+    collector._persist_api_updates(
+        AuctionContext(auction_id),
+        eligible_ids,
+        {"car-public-bid": LotMetadata()},
+        open_auction_car_ids=active_open_ids,
+        open_auction_candidate_ids={"car-public-bid"},
+    )
+
+    with sqlite3.connect(database.path) as connection:
+        eligibility = connection.execute(
+            "SELECT collection_eligible FROM auction_lots"
+        ).fetchone()[0]
+        prices = connection.execute(
+            "SELECT highest_offer FROM price_observations"
+        ).fetchall()
+
+    assert eligibility == 1
+    assert prices == [("12300",)]
+    assert eligible_ids == {"car-public-bid"}
+    assert active_open_ids == {"car-public-bid"}
+    assert collector.qualified_lots == 1
+
+
+def test_public_bid_appearing_after_first_catalogue_scan_qualifies_later(tmp_path) -> None:
+    database = ArchiveDatabase(tmp_path / "archive.sqlite3")
+    database.initialize()
+    auction_id = "auction-later-bid"
+    seed_candidate(database, "car-later-bid", auction_id)
+    database.set_auction_lot_qualification(
+        "car-later-bid",
+        auction_id,
+        sale_type=SaleType.OPEN_AUCTION,
+        has_fixed_price=False,
+        collection_eligible=False,
+    )
+    collector = ExleasingcarCollector(database, tmp_path / "raw", page_delay_seconds=0)
+    candidate_ids = {"car-later-bid"}
+    metadata = {"car-later-bid": LotMetadata()}
+    first_scan = datetime(2026, 11, 23, 10, 0, tzinfo=timezone.utc)
+    second_scan = datetime(2026, 11, 23, 10, 5, tzinfo=timezone.utc)
+
+    collector.recorder.responses.append(
+        CapturedApiResponse(
+            "https://www.exleasingcar.com/ajax_update_car_form.v3.1.php",
+            {"car-later-bid": {"highest_offer": 0}},
+            first_scan,
+        )
+    )
+    collector._persist_api_updates(
+        AuctionContext(auction_id),
+        set(),
+        metadata,
+        open_auction_candidate_ids=candidate_ids,
+    )
+
+    with sqlite3.connect(database.path) as connection:
+        first_eligibility = connection.execute(
+            "SELECT collection_eligible FROM auction_lots"
+        ).fetchone()[0]
+    assert first_eligibility == 0
+
+    collector.recorder.responses.append(
+        CapturedApiResponse(
+            "https://www.exleasingcar.com/ajax_update_car_form.v3.1.php",
+            {"car-later-bid": {"highest_offer": 10100}},
+            second_scan,
+        )
+    )
+    eligible_ids: set[str] = set()
+    collector._persist_api_updates(
+        AuctionContext(auction_id),
+        eligible_ids,
+        metadata,
+        open_auction_candidate_ids=candidate_ids,
+    )
+
+    with sqlite3.connect(database.path) as connection:
+        second_eligibility = connection.execute(
+            "SELECT collection_eligible FROM auction_lots"
+        ).fetchone()[0]
+        prices = connection.execute(
+            "SELECT highest_offer FROM price_observations ORDER BY id"
+        ).fetchall()
+
+    assert second_eligibility == 1
+    assert prices == [("10100",)]
+    assert eligible_ids == {"car-later-bid"}
+
+
+def test_qualification_is_preserved_when_same_mode_price_is_temporarily_hidden(
+    tmp_path,
+) -> None:
+    database = ArchiveDatabase(tmp_path / "archive.sqlite3")
+    database.initialize()
+    auction_id = "auction-qualified-history"
+    seed_candidate(database, "car-qualified-history", auction_id)
+    database.set_auction_lot_qualification(
+        "car-qualified-history",
+        auction_id,
+        sale_type=SaleType.OPEN_AUCTION,
+        has_fixed_price=False,
+        collection_eligible=True,
+    )
+
+    database.set_auction_lot_qualification(
+        "car-qualified-history",
+        auction_id,
+        sale_type=SaleType.OPEN_AUCTION,
+        has_fixed_price=False,
+        collection_eligible=False,
+    )
+
+    with sqlite3.connect(database.path) as connection:
+        eligibility = connection.execute(
+            "SELECT collection_eligible FROM auction_lots"
+        ).fetchone()[0]
+    assert eligibility == 1
