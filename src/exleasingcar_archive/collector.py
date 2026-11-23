@@ -35,7 +35,8 @@ from .metadata_parser import (
     parse_vehicle_media,
     parse_vehicle_metadata,
 )
-from .models import SaleType
+from .models import PriceType, SaleType, VehicleStatus
+from .parsers import ParsedLot, PriceObservation, parse_auction_list
 
 try:
     from playwright.sync_api import Error as PlaywrightError
@@ -567,6 +568,58 @@ class ExleasingcarCollector:
             self.events_inserted += summary.events_inserted
             self.events_unchanged += summary.events_unchanged
 
+    def _persist_catalog_lot_observations(
+        self,
+        auction: AuctionContext,
+        catalog_lots: Mapping[str, tuple[ParsedLot, datetime]],
+        open_auction_car_ids: set[str],
+        *,
+        completed_before_run: set[str],
+    ) -> set[str]:
+        """Save public catalogue prices and source-confirmed lot completion states."""
+        completed_by_catalog: set[str] = set()
+        for car_id, (lot, observed_at) in catalog_lots.items():
+            if car_id not in open_auction_car_ids or car_id in completed_before_run:
+                continue
+
+            if lot.current_price is not None and lot.current_price.amount > 0:
+                displayed_price = PriceObservation(
+                    price_type=PriceType.DISPLAYED_AUCTION_PRICE,
+                    amount=lot.current_price.amount,
+                    currency=lot.current_price.currency,
+                    raw_text=lot.current_price.raw_text,
+                    source_field=lot.current_price.source_field,
+                )
+                inserted = self.database.record_lot_price_observation(
+                    car_id,
+                    displayed_price,
+                    observed_at=observed_at,
+                    source="auction_catalog_html",
+                    exleasingcar_auction_id=auction.exleasingcar_auction_id,
+                )
+                self.lot_price_observations_checked += 1
+                self.lot_price_observations_inserted += int(inserted)
+                self.lot_price_observations_unchanged += int(not inserted)
+
+            if lot.status is VehicleStatus.COMPLETED:
+                self.database.record_auction_event(
+                    car_id,
+                    bid_status="completed",
+                    observed_at=observed_at,
+                    source="auction_catalog_html",
+                    exleasingcar_auction_id=auction.exleasingcar_auction_id,
+                )
+                self.database.mark_open_auction_completed(
+                    car_id,
+                    auction.exleasingcar_auction_id,
+                    reason="catalog_terminal_status",
+                    completed_at=observed_at,
+                )
+                completed_by_catalog.add(car_id)
+                print(f"  Lot {car_id} is marked as finished in the auction catalogue.")
+
+        return completed_by_catalog
+
     def _upsert_catalog_lots(
         self,
         auction: AuctionContext,
@@ -1097,6 +1150,7 @@ class ExleasingcarCollector:
         current_url: str | None = listing.source_url
         visited_urls: set[str] = set()
         all_lot_metadata: dict[str, LotMetadata] = {}
+        catalog_lot_observations: dict[str, tuple[ParsedLot, datetime]] = {}
         detail_urls: dict[str, str] = {}
         pages_processed = 0
         lots_seen = 0
@@ -1122,7 +1176,14 @@ class ExleasingcarCollector:
                 auction_dir / f"catalog_page_{pages_processed:03d}.html",
                 html,
             )
+            page_observed_at = datetime.now(timezone.utc)
             catalog = parse_auction_catalog_metadata(html, page.url)
+            page_status = parse_auction_list(html, page.url)
+            for parsed_lot in page_status.lots:
+                catalog_lot_observations[parsed_lot.source_car_id] = (
+                    parsed_lot,
+                    page_observed_at,
+                )
             if catalog.exleasingcar_auction_id != listing.exleasingcar_auction_id:
                 raise ValueError(
                     "Catalogue/auction mismatch: "
@@ -1220,11 +1281,21 @@ class ExleasingcarCollector:
 
         # Only API rows belonging to known or newly qualified lots are persisted.
         # Fixed-price-only lots keep seller references but not hidden-bid fields.
+        completed_before_api = self.database.get_completed_open_auction_lots(
+            listing.exleasingcar_auction_id,
+            eligible_car_ids,
+        )
         self._persist_api_updates(
             auction,
             eligible_car_ids,
             all_lot_metadata,
             open_auction_car_ids=open_auction_car_ids,
+        )
+        self._persist_catalog_lot_observations(
+            auction,
+            catalog_lot_observations,
+            open_auction_car_ids,
+            completed_before_run=completed_before_api,
         )
 
         coverage = _catalog_detail_coverage(
