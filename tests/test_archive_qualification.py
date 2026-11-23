@@ -772,3 +772,118 @@ def test_v14_migration_marks_only_conclusively_finished_open_auctions():
         (3, None, None),
         (4, None, None),
     ]
+
+
+def test_live_bidding_is_tracked_per_lot_in_the_same_auction(tmp_path) -> None:
+    database = ArchiveDatabase(tmp_path / "archive.sqlite3")
+    database.initialize()
+    auction_id = "auction-two-lots"
+    for car_id in ("car-ended", "car-active"):
+        seed_candidate(database, car_id, auction_id)
+        database.set_auction_lot_qualification(
+            car_id,
+            auction_id,
+            sale_type=SaleType.OPEN_AUCTION,
+            has_fixed_price=False,
+            collection_eligible=True,
+        )
+
+    collector = ExleasingcarCollector(database, tmp_path / "raw", page_delay_seconds=0)
+    first_seen = datetime(2026, 11, 23, 10, 0, tzinfo=timezone.utc)
+    second_seen = datetime(2026, 11, 23, 10, 5, tzinfo=timezone.utc)
+    collector.recorder.responses.extend(
+        (
+            CapturedApiResponse(
+                "https://www.exleasingcar.com/ajax_update_car_form.v3.1.php",
+                {
+                    "car-ended": {
+                        "car_auction_time": {
+                            "liveBidding": "0",
+                            "remainingSeconds": 0,
+                        }
+                    },
+                    "car-active": {
+                        "highest_offer": 13000,
+                        "car_auction_time": {
+                            "type": "ongoing",
+                            "liveBidding": "1",
+                            "endDate": "2026-11-23 10:10:00",
+                            "remainingSeconds": 240,
+                        },
+                    },
+                },
+                first_seen,
+            ),
+            CapturedApiResponse(
+                "https://www.exleasingcar.com/ajax_update_car_form.v3.1.php",
+                {
+                    "car-ended": {
+                        "highest_offer": 9000,
+                        "car_auction_time": {
+                            "liveBidding": "0",
+                            "remainingSeconds": 0,
+                        },
+                    },
+                    "car-active": {
+                        "highest_offer": 14500,
+                        "car_auction_time": {
+                            "type": "ongoing",
+                            "liveBidding": "1",
+                            "endDate": "2026-11-23 10:10:00",
+                            "remainingSeconds": 180,
+                        },
+                    },
+                },
+                second_seen,
+            ),
+        )
+    )
+
+    collector._persist_api_updates(
+        AuctionContext(auction_id),
+        {"car-ended", "car-active"},
+        {"car-ended": LotMetadata(), "car-active": LotMetadata()},
+        open_auction_car_ids={"car-ended", "car-active"},
+    )
+
+    with sqlite3.connect(database.path) as connection:
+        prices = connection.execute(
+            """
+            SELECT v.source_car_id, p.highest_offer
+            FROM price_observations AS p
+            JOIN auction_lots AS l ON l.id = p.auction_lot_id
+            JOIN vehicles AS v ON v.id = l.vehicle_id
+            ORDER BY v.source_car_id, p.id
+            """
+        ).fetchall()
+        countdowns = connection.execute(
+            """
+            SELECT v.source_car_id, e.remaining_seconds
+            FROM auction_events AS e
+            JOIN auction_lots AS l ON l.id = e.auction_lot_id
+            JOIN vehicles AS v ON v.id = l.vehicle_id
+            ORDER BY v.source_car_id, e.id
+            """
+        ).fetchall()
+        completion = connection.execute(
+            """
+            SELECT v.source_car_id, l.monitoring_completion_reason
+            FROM auction_lots AS l
+            JOIN vehicles AS v ON v.id = l.vehicle_id
+            ORDER BY v.source_car_id
+            """
+        ).fetchall()
+
+    assert prices == [("car-active", "13000"), ("car-active", "14500")]
+    assert countdowns == [
+        ("car-active", 240),
+        ("car-active", 180),
+        ("car-ended", 0),
+    ]
+    assert completion == [
+        ("car-active", None),
+        ("car-ended", "countdown_expired"),
+    ]
+    assert database.get_completed_open_auction_lots(
+        auction_id, {"car-ended", "car-active"}
+    ) == {"car-ended"}
