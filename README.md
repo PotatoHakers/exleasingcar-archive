@@ -4,7 +4,7 @@
 
 ## GITHUB
 
-   `- git branch - список веток
+   - git branch - список веток
     - git branch -r - список веток в удаленном репозитории
     - git branch -vv - посмотреть ветки и их связь
     (Показывает:
@@ -66,4 +66,4 @@
     - git worktree add --detach "C:/Users/mix123/projects/test-commit" abc123 - создать рабочу папку для конкретного коммита
     - git -C "Путь" status - проверить состояние папки
     - git worktree remove "Путь" - удалить папку
-    - git worktree prune - даляет устаревшие записи о Worktrees, которых больше нет на диске`
+    - git worktree prune - даляет устаревшие записи о Worktrees, которых больше нет на диске
