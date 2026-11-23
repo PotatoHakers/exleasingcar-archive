@@ -2443,12 +2443,15 @@ class ArchiveDatabase:
         final_call_value = self._serialize_bool(final_call_active)
         live_bidding_value = self._serialize_bool(live_bidding)
         timestamp = self._serialize_datetime(observed_at)
+        # The countdown belongs to this lot and changes even when the
+        # phase and end-time label stay the same.
         new_state = (
             auction_phase,
             bid_status,
             final_call_value,
             live_bidding_value,
             auction_end_at,
+            remaining_seconds,
         )
         if all(value is None for value in new_state):
             return False
@@ -2475,7 +2478,7 @@ class ArchiveDatabase:
             latest = connection.execute(
                 """
                 SELECT auction_phase, bid_status, final_call_active,
-                       live_bidding, auction_end_at
+                       live_bidding, auction_end_at, remaining_seconds
                 FROM auction_events
                 WHERE auction_lot_id = ? ORDER BY id DESC LIMIT 1
                 """,
