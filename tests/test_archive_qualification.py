@@ -1241,3 +1241,61 @@ def test_qualification_is_preserved_when_same_mode_price_is_temporarily_hidden(
             "SELECT collection_eligible FROM auction_lots"
         ).fetchone()[0]
     assert eligibility == 1
+
+
+
+def test_collector_keeps_unpriced_open_lot_out_of_archive(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(
+        "exleasingcar_archive.collector._wait_for_dynamic_content",
+        lambda page: None,
+    )
+    database = ArchiveDatabase(tmp_path / "archive.sqlite3")
+    database.initialize()
+    auction_id = "auction-unpriced"
+    seed_candidate(database, "car-unpriced", auction_id)
+    collector = ExleasingcarCollector(database, tmp_path / "raw", page_delay_seconds=0)
+    html = """
+    <h1>Example vehicle</h1>
+    <div class="auto-block" car-id="car-unpriced">
+      <div class="bids active open bids_car-unpriced">
+        <input class="my_bid_car-unpriced" value="0">
+      </div>
+      <div id="gallery-area">
+        <div class="gallery-thumbs">
+          <a onclick="change_thumb(this, 'https://data.exleasingcar.com/unpriced.jpg')">
+            <img src="https://data.exleasingcar.com/unpriced-thumb.jpg">
+          </a>
+        </div>
+      </div>
+    </div>
+    """
+
+    outcome = collector._enrich_vehicle_detail(
+        AuctionContext(auction_id),
+        "car-unpriced",
+        "https://www.exleasingcar.com/ru/auto-details/car-unpriced",
+        FakePage("car-unpriced", html),
+        datetime.now(timezone.utc),
+        tmp_path / "snapshot",
+    )
+
+    with sqlite3.connect(database.path) as connection:
+        lot = connection.execute(
+            "SELECT sale_type, collection_eligible FROM auction_lots"
+        ).fetchone()
+        media_count = connection.execute(
+            "SELECT COUNT(*) FROM lot_media_sources"
+        ).fetchone()[0]
+        price_count = connection.execute(
+            "SELECT COUNT(*) FROM lot_price_observations"
+        ).fetchone()[0]
+        vehicle = connection.execute(
+            "SELECT location_text, chassis_number FROM vehicles"
+        ).fetchone()
+
+    assert outcome == "excluded_unpriced"
+    assert lot == ("open_auction", 0)
+    assert media_count == 0
+    assert price_count == 0
+    assert vehicle == (None, None)
+    assert collector.excluded_unpriced_lots == 1
