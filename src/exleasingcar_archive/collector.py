@@ -1095,7 +1095,9 @@ class ExleasingcarCollector:
             elif parsed_detail.sale_type is SaleType.OPEN_AUCTION:
                 self.excluded_unpriced_lots += 1
                 outcome = "excluded_unpriced"
-                reason = "open auction has no positive displayed price or public bid yet"
+                reason = (
+                    "open auction has no positive displayed price or public bid yet"
+                )
             else:
                 self.excluded_unknown_lots += 1
                 outcome = "excluded_unknown"
