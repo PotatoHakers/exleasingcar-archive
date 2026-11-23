@@ -78,6 +78,7 @@ class CollectorSummary:
     lot_price_observations_unchanged: int
     qualified_lots: int
     lots_with_fixed_price: int
+    excluded_unpriced_lots: int
     excluded_closed_lots: int
     excluded_unknown_lots: int
 
@@ -438,6 +439,7 @@ class ExleasingcarCollector:
         self.sale_types_recognized = 0
         self.qualified_lots = 0
         self.lots_with_fixed_price = 0
+        self.excluded_unpriced_lots = 0
         self.excluded_closed_lots = 0
         self.excluded_unknown_lots = 0
         self.lot_price_observations_checked = 0
@@ -460,12 +462,12 @@ class ExleasingcarCollector:
         lot_metadata: Mapping[str, LotMetadata],
         *,
         open_auction_car_ids: set[str] | None = None,
+        open_auction_candidate_ids: set[str] | None = None,
     ) -> None:
-        """Persist offers until each open lot reaches its own final state.
+        """Persist qualified offers and promote open lots after their first public bid.
 
-        A finished lot is skipped without affecting other lots in the auction.
-        Fixed-price-only lots retain seller references, but hidden-bid and
-        auction-state fields are discarded.
+        Unqualified open lots are inspected for a positive public highest_offer,
+        but zero placeholders and seller reference prices are not persisted.
         """
         completed_before_run = self.database.get_completed_open_auction_lots(
             auction.exleasingcar_auction_id,
@@ -483,6 +485,7 @@ class ExleasingcarCollector:
                 if sale_type == SaleType.OPEN_AUCTION.value
             }
         ) - completed_before_run
+        candidate_open_ids = set(open_auction_candidate_ids or ())
         completed_during_run: set[str] = set()
 
         while self.api_cursor < len(self.recorder.responses):
@@ -494,6 +497,33 @@ class ExleasingcarCollector:
             except (TypeError, ValueError) as exc:
                 print(f"  Skipped malformed API response: {exc}")
                 continue
+
+            for car_id, update in updates.items():
+                if (
+                    car_id not in candidate_open_ids
+                    or car_id in eligible_car_ids
+                    or car_id in completed_before_run
+                    or car_id in completed_during_run
+                    or not update.has_positive_highest_offer
+                ):
+                    continue
+                promoted = self.database.set_auction_lot_qualification(
+                    car_id,
+                    auction.exleasingcar_auction_id,
+                    sale_type=SaleType.OPEN_AUCTION,
+                    has_fixed_price=False,
+                    collection_eligible=True,
+                    checked_at=captured.observed_at,
+                )
+                if promoted:
+                    eligible_car_ids.add(car_id)
+                    active_open_ids.add(car_id)
+                    if open_auction_car_ids is not None:
+                        open_auction_car_ids.add(car_id)
+                    self.qualified_lots += 1
+                    print(
+                        f"  Open lot {car_id} qualified after a positive public bid."
+                    )
 
             selected = filter_updates_for_catalog(updates, eligible_car_ids)
             selected = {
@@ -1026,8 +1056,21 @@ class ExleasingcarCollector:
             source_car_id=car_id,
             page_url=page.url,
         )
-        fixed_price_available = parsed_detail.fixed_price is not None
-        archive_eligible = parsed_detail.should_archive
+        fixed_price_available = (
+            parsed_detail.fixed_price is not None
+            and parsed_detail.fixed_price.amount > 0
+        )
+        previously_eligible = self.database.get_collection_eligible_lots(
+            auction.exleasingcar_auction_id,
+            {car_id},
+        )
+        current_sale_type = (
+            parsed_detail.sale_type.value if parsed_detail.sale_type is not None else None
+        )
+        archive_eligible = parsed_detail.should_archive or (
+            car_id in previously_eligible
+            and previously_eligible[car_id] == current_sale_type
+        )
         self.database.set_auction_lot_qualification(
             car_id,
             auction.exleasingcar_auction_id,
@@ -1047,10 +1090,14 @@ class ExleasingcarCollector:
                 self.excluded_closed_lots += 1
                 outcome = "excluded_closed"
                 reason = "closed bidding without a verified fixed price"
+            elif parsed_detail.sale_type is SaleType.OPEN_AUCTION:
+                self.excluded_unpriced_lots += 1
+                outcome = "excluded_unpriced"
+                reason = "open auction has no positive displayed price or public bid yet"
             else:
                 self.excluded_unknown_lots += 1
                 outcome = "excluded_unknown"
-                reason = "unknown or unpriced sale mode"
+                reason = "unknown sale mode and no verified fixed price"
             print(
                 f"  Lot {car_id} excluded from the archive: {reason}; "
                 "no detail metadata, price history or media URLs retained."
@@ -1091,7 +1138,7 @@ class ExleasingcarCollector:
             parsed_detail.displayed_auction_price,
             parsed_detail.fixed_price,
         ):
-            if price is None:
+            if price is None or price.amount <= 0:
                 continue
             inserted = self.database.record_lot_price_observation(
                 car_id,
@@ -1285,11 +1332,16 @@ class ExleasingcarCollector:
             listing.exleasingcar_auction_id,
             eligible_car_ids,
         )
+        open_auction_candidate_ids = self.database.get_open_auction_lot_ids(
+            listing.exleasingcar_auction_id,
+            set(all_lot_metadata),
+        )
         self._persist_api_updates(
             auction,
             eligible_car_ids,
             all_lot_metadata,
             open_auction_car_ids=open_auction_car_ids,
+            open_auction_candidate_ids=open_auction_candidate_ids,
         )
         self._persist_catalog_lot_observations(
             auction,
@@ -1474,6 +1526,7 @@ class ExleasingcarCollector:
             lot_price_observations_unchanged=self.lot_price_observations_unchanged,
             qualified_lots=self.qualified_lots,
             lots_with_fixed_price=self.lots_with_fixed_price,
+            excluded_unpriced_lots=self.excluded_unpriced_lots,
             excluded_closed_lots=self.excluded_closed_lots,
             excluded_unknown_lots=self.excluded_unknown_lots,
         )
