@@ -1039,7 +1039,9 @@ def test_zero_displayed_price_and_zero_buy_now_are_not_qualifying_values() -> No
     assert fixed_result.should_archive is False
 
 
-def test_open_lot_with_zero_offer_and_seller_references_stays_unqualified(tmp_path) -> None:
+def test_open_lot_with_zero_offer_and_seller_references_stays_unqualified(
+    tmp_path,
+) -> None:
     database = ArchiveDatabase(tmp_path / "archive.sqlite3")
     database.initialize()
     auction_id = "auction-zero-offer"
