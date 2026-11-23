@@ -1116,11 +1116,6 @@ def test_positive_public_bid_qualifies_an_open_candidate(tmp_path) -> None:
                     "text_minimali_kaina": 9000,
                     "text_orientacine_kaina": 10000,
                     "bid_status": "leading",
-                    "car_auction_time": {
-                        "type": "ongoing",
-                        "liveBidding": "1",
-                        "remainingSeconds": 300,
-                    },
                 }
             },
             datetime.now(timezone.utc),
