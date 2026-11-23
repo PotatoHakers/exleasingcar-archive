@@ -1065,7 +1065,9 @@ class ExleasingcarCollector:
             {car_id},
         )
         current_sale_type = (
-            parsed_detail.sale_type.value if parsed_detail.sale_type is not None else None
+            parsed_detail.sale_type.value
+            if parsed_detail.sale_type is not None
+            else None
         )
         archive_eligible = parsed_detail.should_archive or (
             car_id in previously_eligible
