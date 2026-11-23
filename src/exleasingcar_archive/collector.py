@@ -460,11 +460,11 @@ class ExleasingcarCollector:
         *,
         open_auction_car_ids: set[str] | None = None,
     ) -> None:
-        """Persist qualified offers until each open auction reaches a final state.
+        """Persist offers until each open lot reaches its own final state.
 
-        The final terminal response remains in history; later responses for that
-        lot are ignored. Fixed-price-only lots retain seller references, but
-        hidden-bid and auction-state fields are discarded.
+        A finished lot is skipped without affecting other lots in the auction.
+        Fixed-price-only lots retain seller references, but hidden-bid and
+        auction-state fields are discarded.
         """
         completed_before_run = self.database.get_completed_open_auction_lots(
             auction.exleasingcar_auction_id,
@@ -552,8 +552,8 @@ class ExleasingcarCollector:
                     completed_during_run.add(car_id)
                     active_open_ids.discard(car_id)
                     print(
-                        f"  Open auction {car_id} completed; "
-                        "final observation retained and further monitoring stopped."
+                        f"  Lot {car_id} bidding ended; "
+                        "final observation saved. Live monitoring stopped for this lot."
                     )
 
             self.api_cars_processed += summary.cars_processed
