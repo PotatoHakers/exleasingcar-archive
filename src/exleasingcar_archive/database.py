@@ -1488,7 +1488,10 @@ class ArchiveDatabase:
             exleasingcar_auction_id, "exleasingcar_auction_id"
         )
         car_ids = sorted(
-            {self._validate_identifier(car_id, "source_car_id") for car_id in source_car_ids}
+            {
+                self._validate_identifier(car_id, "source_car_id")
+                for car_id in source_car_ids
+            }
         )
         if not car_ids:
             return set()
