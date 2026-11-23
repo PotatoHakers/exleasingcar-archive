@@ -33,11 +33,17 @@ class ParsedVehicleDetail:
 
     @property
     def should_archive(self) -> bool:
-        """Archive public open auctions or any lot with a verified fixed price."""
-        return (
-            self.sale_type is SaleType.OPEN_AUCTION
-            or self.fixed_price is not None
+        """Archive lots only when a positive public price is visible."""
+        has_public_auction_price = (
+            self.displayed_auction_price is not None
+            and self.displayed_auction_price.amount > 0
         )
+        has_verified_fixed_price = (
+            self.fixed_price is not None and self.fixed_price.amount > 0
+        )
+        return (
+            self.sale_type is SaleType.OPEN_AUCTION and has_public_auction_price
+        ) or has_verified_fixed_price
 
 
 def detect_car_id(
