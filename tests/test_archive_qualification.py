@@ -1248,7 +1248,9 @@ def test_qualification_is_preserved_when_same_mode_price_is_temporarily_hidden(
 
 
 
-def test_collector_keeps_unpriced_open_lot_out_of_archive(tmp_path, monkeypatch) -> None:
+def test_collector_keeps_unpriced_open_lot_out_of_archive(
+    tmp_path, monkeypatch
+) -> None:
     monkeypatch.setattr(
         "exleasingcar_archive.collector._wait_for_dynamic_content",
         lambda page: None,
