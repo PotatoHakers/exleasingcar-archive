@@ -1,11 +1,10 @@
 # Exleasingcar Archive
 
 `Локальный архив публичных данных Exleasingcar.`
-<<<<<<< HEAD
 
 ## GITHUB
 
-'   - git branch - список веток
+   '- git branch - список веток
     - git branch -r - список веток в удаленном репозитории
     - git branch -vv - посмотреть ветки и их связь
     (Показывает:
@@ -48,6 +47,22 @@
     - git diff origin/master...HEAD - показывает изменения твоей ветки относительно общей точки, от которой она разошлась с origin/master
     - git branch -d feature/my-feature - удалить локальную ветку
     - git push origin --delete feature/my-feature - удалить удаленную ветку с github
+
+## STASH
+
+    - git stash list - посмотреть все сохранения
+    - git stash show -p - посмотреть сохраненный код
+    - git stash apply - вернуть сохранения сохранив Stash
+    - git stash pop - вернуть изменения и удалить Stash
+    - git stash drop - удалить конкретное сохранение
+    - git stash clear - удалить все соханения
+    - git stash branch - создать ветку и перенести в неё Stash
+    - git stash push -u -m "..." - сохранить изменения и новые файлы
+    - git pull - обновить текущую ветку
+    - git stash pop - вернуть свои именения
+
+## WORKTREE
+
     - git worktree list - посмотреть все рабочие папки
     - git worktree add (создаёт новую рабочую папку) -b (создаёт новую локальную ветку) feature/my-feature (название ветки) "Путь" origin/master (от какого коммита создать ветку) - создать отдельную рабочую папку
     - git worktree add "Путь" feature/my-feature - создать рабочую папку для уже существующей локальной ветки
@@ -55,6 +70,3 @@
     - git -C "Путь" status - проверить состояние папки
     - git worktree remove "Путь" - удалить папку
     - git worktree prune - даляет устаревшие записи о Worktrees, которых больше нет на диске'
-
-=======
->>>>>>> 86c54b5420ded9ec66a5f65e2c720d650a8f7c6e
