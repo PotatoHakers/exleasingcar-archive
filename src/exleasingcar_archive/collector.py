@@ -611,7 +611,12 @@ class ExleasingcarCollector:
                 updates = parse_car_update_response(captured.payload)
             except (TypeError, ValueError) as exc:
                 print(f"  Skipped malformed API response (kept in checkpoint): {exc}")
-                if page_id is not None and response_index is not None:
+                if deferred_update_id is not None:
+                    self.database.mark_catalog_api_lot_update_processed(
+                        deferred_update_id,
+                        observed_at=datetime.now(timezone.utc),
+                    )
+                elif page_id is not None and response_index is not None:
                     self.database.advance_catalog_api_response_cursor(
                         page_id, response_index
                     )
