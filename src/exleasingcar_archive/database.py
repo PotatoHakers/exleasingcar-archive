@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
+from typing import Any
 from urllib.parse import urlsplit
 
 from .models import AuctionCardMarker, PriceType, SaleType
