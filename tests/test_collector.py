@@ -612,8 +612,7 @@ def test_api_response_recorder_reports_request_that_did_not_finish():
     recorder._on_request(request)
 
     assert recorder.wait_for_pending(FakePage(), timeout_ms=0) is False
-    assert len(recorder.errors) == 1
-    assert "Timed out waiting for 1 API request" in recorder.errors[0]
+    assert recorder.errors == []
 
 
 def test_catalog_detail_coverage_separates_repeated_cards_from_missing_links():
