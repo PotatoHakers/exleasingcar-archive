@@ -1,7 +1,9 @@
+import json
 import math
 import re
 import sqlite3
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping, Sequence
+from typing import Any
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -14,7 +16,7 @@ from .parsers import PriceObservation
 from .pdf_damage import PDFDamageObservation, PDFDamagePhotoReference
 from .pdf_fields import PDFExtractedField, PDFFieldProvenance, PDFFieldState
 
-SCHEMA_VERSION = 16
+SCHEMA_VERSION = 17
 DEFAULT_SOURCE = "ajax_update_car_form.v3.1.php"
 
 
@@ -33,6 +35,21 @@ class CatalogScanProgress:
     started_at: str
     updated_at: str
     completed_at: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class CatalogScanPage:
+    """One completed catalogue page with its recoverable parsed data and API queue."""
+
+    page_id: int
+    scan_id: int
+    page_number: int
+    page_url: str
+    item_count: int
+    completed_at: str
+    page_data: Mapping[str, Any]
+    api_responses: tuple[Mapping[str, Any], ...]
+    api_responses_processed: int
 
 
 AUCTIONS_SQL = """
@@ -162,6 +179,9 @@ CREATE TABLE IF NOT EXISTS catalog_scan_pages (
     page_url TEXT NOT NULL,
     item_count INTEGER NOT NULL CHECK (item_count >= 0),
     completed_at TEXT NOT NULL,
+    page_data_json TEXT NOT NULL DEFAULT '{}',
+    api_responses_json TEXT NOT NULL DEFAULT '[]',
+    api_responses_processed INTEGER NOT NULL DEFAULT 0,
     FOREIGN KEY (scan_run_id) REFERENCES catalog_scan_runs(id) ON DELETE RESTRICT,
     UNIQUE (scan_run_id, page_number),
     UNIQUE (scan_run_id, page_url)
@@ -416,6 +436,7 @@ class ArchiveDatabase:
                     (13, self._migrate_v13_to_v14),
                     (14, self._migrate_v14_to_v15),
                     (15, self._migrate_v15_to_v16),
+                    (16, self._migrate_v16_to_v17),
                 )
                 for from_version, migration in migrations:
                     if version <= from_version:
@@ -790,6 +811,28 @@ class ArchiveDatabase:
                 ELSE 0
             END
             """
+        )
+
+    @classmethod
+    def _migrate_v16_to_v17(cls, connection: sqlite3.Connection) -> None:
+        """Store replayable parsed page data and API response queues per checkpoint."""
+        cls._add_column_if_missing(
+            connection,
+            "catalog_scan_pages",
+            "page_data_json",
+            "TEXT NOT NULL DEFAULT '{}'",
+        )
+        cls._add_column_if_missing(
+            connection,
+            "catalog_scan_pages",
+            "api_responses_json",
+            "TEXT NOT NULL DEFAULT '[]'",
+        )
+        cls._add_column_if_missing(
+            connection,
+            "catalog_scan_pages",
+            "api_responses_processed",
+            "INTEGER NOT NULL DEFAULT 0",
         )
 
     @classmethod
@@ -1394,6 +1437,8 @@ class ArchiveDatabase:
         next_page_url: str | None,
         next_page_number: int | None,
         item_count: int,
+        page_data: Mapping[str, Any] | None = None,
+        api_responses: Sequence[Mapping[str, Any]] = (),
         observed_at: datetime | None = None,
     ) -> bool:
         """Checkpoint one fully processed page and advance the saved cursor.
@@ -1426,6 +1471,56 @@ class ArchiveDatabase:
                 raise ValueError("next_page_number must be greater than page_number")
             if following_url == current_url:
                 raise ValueError("next_page_url cannot repeat the current page URL")
+
+        if page_data is None:
+            normalized_page_data: Mapping[str, Any] = {}
+        elif isinstance(page_data, Mapping):
+            normalized_page_data = page_data
+        else:
+            raise TypeError("page_data must be a mapping or None")
+        try:
+            page_data_json = json.dumps(
+                normalized_page_data,
+                ensure_ascii=False,
+                sort_keys=True,
+                allow_nan=False,
+            )
+        except (TypeError, ValueError) as exc:
+            raise ValueError("page_data must contain finite JSON-compatible values") from exc
+
+        if not isinstance(api_responses, Sequence) or isinstance(api_responses, (str, bytes)):
+            raise TypeError("api_responses must be a sequence of mappings")
+        normalized_api_responses: list[dict[str, Any]] = []
+        for response in api_responses:
+            if not isinstance(response, Mapping):
+                raise TypeError("each API response must be a mapping")
+            response_url = self._validate_catalog_page_url(
+                response.get("url"), "api_response.url"
+            )
+            payload = response.get("payload")
+            if not isinstance(payload, Mapping):
+                raise TypeError("API response payload must be a mapping")
+            response_observed_at = response.get("observed_at")
+            if not isinstance(response_observed_at, datetime):
+                raise TypeError("API response observed_at must be a datetime")
+            normalized_api_responses.append(
+                {
+                    "url": response_url,
+                    "payload": payload,
+                    "observed_at": self._serialize_datetime(response_observed_at),
+                }
+            )
+        try:
+            api_responses_json = json.dumps(
+                normalized_api_responses,
+                ensure_ascii=False,
+                sort_keys=True,
+                allow_nan=False,
+            )
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                "API response payloads must contain finite JSON-compatible values"
+            ) from exc
 
         timestamp = self._serialize_datetime(observed_at)
         with self._connect() as connection:
@@ -1486,10 +1581,19 @@ class ArchiveDatabase:
             connection.execute(
                 """
                 INSERT INTO catalog_scan_pages (
-                    scan_run_id, page_number, page_url, item_count, completed_at
-                ) VALUES (?, ?, ?, ?, ?)
+                    scan_run_id, page_number, page_url, item_count, completed_at,
+                    page_data_json, api_responses_json, api_responses_processed
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, 0)
                 """,
-                (scan_id, page_number, current_url, item_count, timestamp),
+                (
+                    scan_id,
+                    page_number,
+                    current_url,
+                    item_count,
+                    timestamp,
+                    page_data_json,
+                    api_responses_json,
+                ),
             )
             pages_completed = int(scan["pages_completed"]) + 1
             connection.execute(
@@ -1508,6 +1612,204 @@ class ArchiveDatabase:
                 ),
             )
             return True
+
+
+    def has_completed_catalog_scan(
+        self,
+        exleasingcar_auction_id: str,
+        scan_type: str = "bootstrap",
+    ) -> bool:
+        """Return whether the auction already has a completed scan of this type."""
+        auction_id = self._validate_identifier(
+            exleasingcar_auction_id, "exleasingcar_auction_id"
+        )
+        scan_kind = self._validate_identifier(scan_type, "scan_type")
+        if scan_kind not in {"bootstrap", "routine", "prestart"}:
+            raise ValueError("scan_type must be bootstrap, routine, or prestart")
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT 1
+                FROM catalog_scan_runs AS runs
+                JOIN auctions ON auctions.id = runs.auction_id
+                WHERE auctions.exleasingcar_auction_id = ?
+                  AND runs.scan_type = ?
+                  AND runs.status = 'completed'
+                LIMIT 1
+                """,
+                (auction_id, scan_kind),
+            ).fetchone()
+        return row is not None
+
+    @staticmethod
+    def _catalog_scan_page_from_row(row: sqlite3.Row) -> CatalogScanPage:
+        try:
+            page_data = json.loads(str(row["page_data_json"]))
+            api_responses = json.loads(str(row["api_responses_json"]))
+        except (TypeError, ValueError) as exc:
+            raise RuntimeError(
+                f"Invalid persisted catalogue page data for page {row['page_number']}"
+            ) from exc
+        if not isinstance(page_data, Mapping) or not isinstance(api_responses, list):
+            raise RuntimeError(
+                f"Invalid persisted catalogue page shape for page {row['page_number']}"
+            )
+        if any(not isinstance(item, Mapping) for item in api_responses):
+            raise RuntimeError(
+                f"Invalid API response queue for page {row['page_number']}"
+            )
+        processed = int(row["api_responses_processed"])
+        if processed < 0 or processed > len(api_responses):
+            raise RuntimeError(
+                f"Invalid API response cursor for page {row['page_number']}"
+            )
+        return CatalogScanPage(
+            page_id=int(row["id"]),
+            scan_id=int(row["scan_run_id"]),
+            page_number=int(row["page_number"]),
+            page_url=str(row["page_url"]),
+            item_count=int(row["item_count"]),
+            completed_at=str(row["completed_at"]),
+            page_data=page_data,
+            api_responses=tuple(api_responses),
+            api_responses_processed=processed,
+        )
+
+    def get_catalog_scan_pages(self, scan_id: int) -> tuple[CatalogScanPage, ...]:
+        """Load all completed pages so a restarted collector can rebuild its work set."""
+        if isinstance(scan_id, bool) or not isinstance(scan_id, int) or scan_id < 1:
+            raise ValueError("scan_id must be a positive integer")
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT id, scan_run_id, page_number, page_url, item_count,
+                       completed_at, page_data_json, api_responses_json,
+                       api_responses_processed
+                FROM catalog_scan_pages
+                WHERE scan_run_id = ?
+                ORDER BY page_number, id
+                """,
+                (scan_id,),
+            ).fetchall()
+        return tuple(self._catalog_scan_page_from_row(row) for row in rows)
+
+    def get_pending_catalog_api_pages(
+        self,
+        exleasingcar_auction_id: str,
+    ) -> tuple[CatalogScanPage, ...]:
+        """Return pages with captured API responses that have not all been consumed."""
+        auction_id = self._validate_identifier(
+            exleasingcar_auction_id, "exleasingcar_auction_id"
+        )
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT pages.id, pages.scan_run_id, pages.page_number, pages.page_url,
+                       pages.item_count, pages.completed_at, pages.page_data_json,
+                       pages.api_responses_json, pages.api_responses_processed
+                FROM catalog_scan_pages AS pages
+                JOIN catalog_scan_runs AS runs ON runs.id = pages.scan_run_id
+                JOIN auctions ON auctions.id = runs.auction_id
+                WHERE auctions.exleasingcar_auction_id = ?
+                  AND pages.api_responses_processed < 1000000000
+                  AND pages.api_responses_json != '[]'
+                ORDER BY pages.completed_at, pages.id
+                """,
+                (auction_id,),
+            ).fetchall()
+        result = []
+        for row in rows:
+            page = self._catalog_scan_page_from_row(row)
+            if page.api_responses_processed < len(page.api_responses):
+                result.append(page)
+        return tuple(result)
+
+    def advance_catalog_api_response_cursor(
+        self,
+        page_id: int,
+        expected_response_index: int,
+        *,
+        observed_at: datetime | None = None,
+    ) -> bool:
+        """Mark exactly one stored API response consumed using compare-and-swap."""
+        for value, name in (
+            (page_id, "page_id"),
+            (expected_response_index, "expected_response_index"),
+        ):
+            if isinstance(value, bool) or not isinstance(value, int):
+                raise TypeError(f"{name} must be an integer")
+            if value < (1 if name == "page_id" else 0):
+                raise ValueError(f"{name} is out of range")
+        timestamp = self._serialize_datetime(observed_at)
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                """
+                SELECT api_responses_processed, api_responses_json
+                FROM catalog_scan_pages
+                WHERE id = ?
+                """,
+                (page_id,),
+            ).fetchone()
+            if row is None:
+                raise KeyError(f"Unknown catalogue page id: {page_id}")
+            try:
+                responses = json.loads(str(row["api_responses_json"]))
+            except (TypeError, ValueError) as exc:
+                raise RuntimeError("Invalid persisted API response queue") from exc
+            if not isinstance(responses, list):
+                raise RuntimeError("Invalid persisted API response queue")
+            current = int(row["api_responses_processed"])
+            if current > expected_response_index:
+                return False
+            if current < expected_response_index:
+                raise ValueError("API response cursor moved; reload the pending page")
+            if current >= len(responses):
+                return False
+            connection.execute(
+                """
+                UPDATE catalog_scan_pages
+                SET api_responses_processed = api_responses_processed + 1,
+                    completed_at = completed_at
+                WHERE id = ? AND api_responses_processed = ?
+                """,
+                (page_id, expected_response_index),
+            )
+            return True
+
+    def get_auction_lot_sale_types(
+        self,
+        exleasingcar_auction_id: str,
+        source_car_ids: set[str],
+    ) -> dict[str, str | None]:
+        """Return known sale modes, including NULL for unclassified catalogue lots."""
+        auction_id = self._validate_identifier(
+            exleasingcar_auction_id, "exleasingcar_auction_id"
+        )
+        car_ids = sorted(
+            {self._validate_identifier(car_id, "source_car_id") for car_id in source_car_ids}
+        )
+        if not car_ids:
+            return {}
+        placeholders = ", ".join("?" for _ in car_ids)
+        with self._connect() as connection:
+            rows = connection.execute(
+                f"""
+                SELECT vehicles.source_car_id, auction_lots.sale_type
+                FROM auction_lots
+                JOIN vehicles ON vehicles.id = auction_lots.vehicle_id
+                JOIN auctions ON auctions.id = auction_lots.auction_id
+                WHERE auctions.exleasingcar_auction_id = ?
+                  AND vehicles.source_car_id IN ({placeholders})
+                """,
+                (auction_id, *car_ids),
+            ).fetchall()
+        return {
+            str(row["source_car_id"]): (
+                str(row["sale_type"]) if row["sale_type"] is not None else None
+            )
+            for row in rows
+        }
 
     def complete_catalog_scan(
         self,
