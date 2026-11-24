@@ -941,6 +941,19 @@ def test_catalogue_scan_resumes_api_and_detail_data_after_a_run_budget_pause(
             collection_eligible=True,
             checked_at=detail_observed_at,
         )
+        second_collector.recorder.responses.append(
+            CapturedApiResponse(
+                url="https://www.exleasingcar.com/ajax_update_car_form.v3.1.php",
+                payload={
+                    "car-1": {
+                        "highest_offer": "11000",
+                        "user_offer": "123456",
+                        "actual_car_price": "654321",
+                    }
+                },
+                observed_at=observed_at,
+            )
+        )
         return "open_auction"
 
     monkeypatch.setattr(
@@ -975,15 +988,16 @@ def test_catalogue_scan_resumes_api_and_detail_data_after_a_run_budget_pause(
     import sqlite3
 
     with sqlite3.connect(database.path) as connection:
-        stored_price = connection.execute(
+        stored_prices = connection.execute(
             """
             SELECT highest_offer
             FROM price_observations
             JOIN auction_lots ON auction_lots.id = price_observations.auction_lot_id
             JOIN vehicles ON vehicles.id = auction_lots.vehicle_id
             WHERE vehicles.source_car_id = 'car-1'
+            ORDER BY price_observations.id
             """
-        ).fetchone()
+        ).fetchall()
         stored_detail_check = connection.execute(
             """
             SELECT last_detail_checked_at
@@ -993,8 +1007,16 @@ def test_catalogue_scan_resumes_api_and_detail_data_after_a_run_budget_pause(
             """
         ).fetchone()[0]
 
-    assert stored_price == ("10000",)
+    assert stored_prices == [("10000",), ("11000",)]
     assert stored_detail_check is not None
+
+    saved_api_responses = database.get_catalog_scan_pages(completed.scan_id)[0].api_responses
+    assert len(saved_api_responses) == 2
+    assert all(
+        "user_offer" not in response["payload"]["car-1"]
+        and "actual_car_price" not in response["payload"]["car-1"]
+        for response in saved_api_responses
+    )
 
 
 def test_collector_cli_exposes_safe_run_wide_limits():
