@@ -563,11 +563,13 @@ class ExleasingcarCollector:
         *,
         open_auction_car_ids: set[str] | None = None,
         open_auction_candidate_ids: set[str] | None = None,
+        run_budget: RunBudget | None = None,
     ) -> None:
-        """Persist qualified offers and promote open lots after their first public bid.
+        """Persist queued public API snapshots without losing deferred responses.
 
-        Unqualified open lots are inspected for a positive public highest_offer,
-        but zero placeholders and seller reference prices are not persisted.
+        API bodies are checkpointed with their catalogue page. Each response is
+        consumed only after its observations are stored. Unknown sale modes and
+        exhausted live-lot budgets leave the response queued for a later run.
         """
         completed_before_run = self.database.get_completed_open_auction_lots(
             auction.exleasingcar_auction_id,
@@ -588,25 +590,73 @@ class ExleasingcarCollector:
         candidate_open_ids = set(open_auction_candidate_ids or ())
         completed_during_run: set[str] = set()
 
-        while self.api_cursor < len(self.recorder.responses):
-            captured = self.recorder.responses[self.api_cursor]
-            self.api_cursor += 1
+        def process_response(
+            captured: CapturedApiResponse,
+            *,
+            page_id: int | None,
+            response_index: int | None,
+        ) -> bool:
+            """Process one response; False means it must remain in the durable queue."""
             self.api_responses_seen += 1
             try:
                 updates = parse_car_update_response(captured.payload)
             except (TypeError, ValueError) as exc:
-                print(f"  Skipped malformed API response: {exc}")
-                continue
+                print(f"  Skipped malformed API response (kept in checkpoint): {exc}")
+                if page_id is not None and response_index is not None:
+                    self.database.advance_catalog_api_response_cursor(
+                        page_id, response_index
+                    )
+                else:
+                    self.api_cursor += 1
+                return True
 
-            for car_id, update in updates.items():
-                if (
-                    car_id not in candidate_open_ids
-                    or car_id in eligible_car_ids
-                    or car_id in completed_before_run
-                    or car_id in completed_during_run
-                    or not update.has_positive_highest_offer
-                ):
-                    continue
+            catalog_response_ids = set(updates) & set(lot_metadata)
+            sale_types = self.database.get_auction_lot_sale_types(
+                auction.exleasingcar_auction_id,
+                catalog_response_ids,
+            )
+            unclassified_ids = {
+                car_id
+                for car_id in catalog_response_ids
+                if car_id in sale_types and sale_types[car_id] is None
+            }
+            if unclassified_ids:
+                print(
+                    "  API response deferred until sale modes are known for: "
+                    + ", ".join(sorted(unclassified_ids))
+                )
+                return False
+
+            promotable_ids = {
+                car_id
+                for car_id, update in updates.items()
+                if car_id in candidate_open_ids
+                and car_id not in eligible_car_ids
+                and car_id not in completed_before_run
+                and car_id not in completed_during_run
+                and update.has_positive_highest_offer
+            }
+            eligible_updates = {
+                car_id
+                for car_id in updates
+                if car_id in eligible_car_ids
+                and car_id not in completed_before_run
+                and car_id not in completed_during_run
+            }
+            live_lot_ids = (
+                (eligible_updates & active_open_ids) | promotable_ids
+            )
+            if run_budget is not None and live_lot_ids:
+                blocked = run_budget.try_consume(live_lots=len(live_lot_ids))
+                if blocked is not None:
+                    print(
+                        "  API response deferred by the per-run live-lot budget "
+                        f"({blocked.value})."
+                    )
+                    return False
+
+            for car_id in sorted(promotable_ids):
+                update = updates[car_id]
                 promoted = self.database.set_auction_lot_qualification(
                     car_id,
                     auction.exleasingcar_auction_id,
@@ -632,17 +682,16 @@ class ExleasingcarCollector:
                 if car_id not in completed_before_run
                 and car_id not in completed_during_run
             }
-            if not selected:
-                continue
 
-            completed_updates = {
-                car_id: update.completion_reason
-                for car_id, update in selected.items()
-                if car_id in active_open_ids
-                and update.completion_reason is not None
-            }
+            if selected:
+                completed_updates = {
+                    car_id: update.completion_reason
+                    for car_id, update in selected.items()
+                    if car_id in active_open_ids
+                    and update.completion_reason is not None
+                }
 
-            selected = {
+                selected = {
                     car_id: (
                         update
                         if car_id in active_open_ids
@@ -661,42 +710,87 @@ class ExleasingcarCollector:
                     for car_id, update in selected.items()
                 }
 
-            summary = store_car_updates(
-                self.database,
-                selected,
-                auction,
-                observed_at=captured.observed_at,
-                lot_metadata={
-                    car_id: lot_metadata[car_id]
-                    for car_id in selected
-                    if car_id in lot_metadata
-                },
-            )
-            for car_id, reason in completed_updates.items():
-                completed = self.database.mark_open_auction_completed(
-                    car_id,
-                    auction.exleasingcar_auction_id,
-                    reason=reason,
-                    completed_at=captured.observed_at,
+                summary = store_car_updates(
+                    self.database,
+                    selected,
+                    auction,
+                    observed_at=captured.observed_at,
+                    lot_metadata={
+                        car_id: lot_metadata[car_id]
+                        for car_id in selected
+                        if car_id in lot_metadata
+                    },
                 )
-                if completed:
-                    completed_during_run.add(car_id)
-                    active_open_ids.discard(car_id)
-                    print(
-                        f"  Lot {car_id} bidding ended; "
-                        "final observation saved. Live monitoring stopped for this lot."
+                for car_id, reason in completed_updates.items():
+                    completed = self.database.mark_open_auction_completed(
+                        car_id,
+                        auction.exleasingcar_auction_id,
+                        reason=reason,
+                        completed_at=captured.observed_at,
                     )
+                    if completed:
+                        completed_during_run.add(car_id)
+                        active_open_ids.discard(car_id)
+                        print(
+                            f"  Lot {car_id} bidding ended; "
+                            "final observation saved. Live monitoring stopped for this lot."
+                        )
 
-            self.api_cars_processed += summary.cars_processed
-            self.prices_checked += summary.prices_checked
-            self.prices_inserted += summary.prices_inserted
-            self.prices_unchanged += summary.prices_unchanged
-            self.price_references_checked += summary.price_references_checked
-            self.price_references_inserted += summary.price_references_inserted
-            self.price_references_unchanged += summary.price_references_unchanged
-            self.events_checked += summary.events_checked
-            self.events_inserted += summary.events_inserted
-            self.events_unchanged += summary.events_unchanged
+                self.api_cars_processed += summary.cars_processed
+                self.prices_checked += summary.prices_checked
+                self.prices_inserted += summary.prices_inserted
+                self.prices_unchanged += summary.prices_unchanged
+                self.price_references_checked += summary.price_references_checked
+                self.price_references_inserted += summary.price_references_inserted
+                self.price_references_unchanged += summary.price_references_unchanged
+                self.events_checked += summary.events_checked
+                self.events_inserted += summary.events_inserted
+                self.events_unchanged += summary.events_unchanged
+
+            # Advance only after the database observations have committed. If
+            # this write fails, the exact response is replayed idempotently.
+            if page_id is not None and response_index is not None:
+                self.database.advance_catalog_api_response_cursor(
+                    page_id, response_index
+                )
+            else:
+                self.api_cursor += 1
+            return True
+
+        pending_pages = self.database.get_pending_catalog_api_pages(
+            auction.exleasingcar_auction_id
+        )
+        if pending_pages:
+            # Durable queues take precedence over in-memory capture, including
+            # responses left behind by a previous interrupted collector run.
+            for stored_page in pending_pages:
+                for response_index in range(stored_page.api_responses_processed,
+                                            len(stored_page.api_responses)):
+                    stored_response = stored_page.api_responses[response_index]
+                    captured = CapturedApiResponse(
+                        url=str(stored_response["url"]),
+                        payload=stored_response["payload"],
+                        observed_at=_restore_catalog_page_datetime(
+                            str(stored_response["observed_at"])
+                        ),
+                    )
+                    if not process_response(
+                        captured,
+                        page_id=stored_page.page_id,
+                        response_index=response_index,
+                    ):
+                        return
+        else:
+            # Keep the direct recorder path for isolated parser/ingestion tests
+            # and older callers that do not have a persisted scan checkpoint.
+            while self.api_cursor < len(self.recorder.responses):
+                captured = self.recorder.responses[self.api_cursor]
+                if not process_response(
+                    captured,
+                    page_id=None,
+                    response_index=None,
+                ):
+                    return
 
     def _persist_catalog_lot_observations(
         self,
