@@ -1651,7 +1651,7 @@ class ArchiveDatabase:
                 f"Invalid persisted catalogue page data for page {row['page_number']}"
             ) from exc
         if not isinstance(page_data, Mapping) or not isinstance(api_responses, list):
-            raise RuntimeError(
+            raise TypeError(
                 f"Invalid persisted catalogue page shape for page {row['page_number']}"
             )
         if any(not isinstance(item, Mapping) for item in api_responses):
@@ -1754,7 +1754,7 @@ class ArchiveDatabase:
             except (TypeError, ValueError) as exc:
                 raise RuntimeError("Invalid persisted API response queue") from exc
             if not isinstance(responses, list):
-                raise RuntimeError("Invalid persisted API response queue")
+                raise TypeError("Invalid persisted API response queue")
             current = int(row["api_responses_processed"])
             if current > expected_response_index:
                 return False
