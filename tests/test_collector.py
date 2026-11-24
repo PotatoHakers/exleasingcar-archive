@@ -1129,6 +1129,7 @@ def test_unknown_sale_mode_does_not_block_public_updates_for_known_lots(tmp_path
     assert unknown_lot == (None, 0)
     assert eligible_ids == {"car-open"}
     assert database.get_pending_catalog_api_pages(auction_id) == ()
+    assert database.get_pending_catalog_api_lot_updates(auction_id) == ()
 
     # The public snapshot remains available for audit, but its unclassified
     # lot was not used to qualify or price the archive record.
@@ -1137,3 +1138,49 @@ def test_unknown_sale_mode_does_not_block_public_updates_for_known_lots(tmp_path
     assert saved_page.api_responses[0]["payload"]["car-unknown"] == {
         "highest_offer": "8000"
     }
+
+    # Once detail enrichment establishes the auction mode, the isolated public
+    # payload is replayed without needing to refetch the original catalogue page.
+    database.set_auction_lot_qualification(
+        "car-unknown",
+        auction_id,
+        sale_type=SaleType.OPEN_AUCTION,
+        has_fixed_price=False,
+        collection_eligible=False,
+        checked_at=observed_at,
+    )
+    collector._persist_api_updates(
+        AuctionContext(auction_id),
+        eligible_ids,
+        {
+            "car-unknown": LotMetadata(),
+            "car-open": LotMetadata(),
+        },
+        open_auction_car_ids={"car-open"},
+        open_auction_candidate_ids={"car-unknown"},
+    )
+
+    with sqlite3.connect(database.path) as connection:
+        updated_prices = connection.execute(
+            """
+            SELECT vehicles.source_car_id, price_observations.highest_offer
+            FROM price_observations
+            JOIN auction_lots
+              ON auction_lots.id = price_observations.auction_lot_id
+            JOIN vehicles ON vehicles.id = auction_lots.vehicle_id
+            ORDER BY vehicles.source_car_id
+            """
+        ).fetchall()
+        updated_unknown_lot = connection.execute(
+            """
+            SELECT sale_type, collection_eligible
+            FROM auction_lots
+            JOIN vehicles ON vehicles.id = auction_lots.vehicle_id
+            WHERE vehicles.source_car_id = 'car-unknown'
+            """
+        ).fetchone()
+
+    assert updated_prices == [("car-open", "10000"), ("car-unknown", "8000")]
+    assert updated_unknown_lot == (SaleType.OPEN_AUCTION.value, 1)
+    assert "car-unknown" in eligible_ids
+    assert database.get_pending_catalog_api_lot_updates(auction_id) == ()
