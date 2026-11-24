@@ -214,7 +214,7 @@ def test_price_can_return_to_previous_value(tmp_path):
     assert rows == [("18300",), ("18400",), ("18300",)]
 
 
-def test_auction_event_ignores_timer_only_change(tmp_path):
+def test_auction_event_records_timer_changes_and_deduplicates_repeats(tmp_path):
     database = ArchiveDatabase(tmp_path / "test_archive.sqlite3")
     database.initialize()
 
@@ -227,7 +227,7 @@ def test_auction_event_ignores_timer_only_change(tmp_path):
         observed_at=UTC_FIRST,
         exleasingcar_auction_id="210547",
     )
-    assert not database.record_auction_event(
+    assert database.record_auction_event(
         "19702473",
         auction_phase="final-call",
         final_call_active=True,
@@ -236,13 +236,22 @@ def test_auction_event_ignores_timer_only_change(tmp_path):
         observed_at=UTC_SECOND,
         exleasingcar_auction_id="210547",
     )
+    assert not database.record_auction_event(
+        "19702473",
+        auction_phase="final-call",
+        final_call_active=True,
+        live_bidding=False,
+        remaining_seconds=15,
+        observed_at=UTC_THIRD,
+        exleasingcar_auction_id="210547",
+    )
 
     with sqlite3.connect(database.path) as connection:
         rows = connection.execute(
             "SELECT auction_phase, remaining_seconds FROM auction_events"
         ).fetchall()
 
-    assert rows == [("final-call", 20)]
+    assert rows == [("final-call", 20), ("final-call", 15)]
 
 
 def test_auction_state_change_creates_event(tmp_path):

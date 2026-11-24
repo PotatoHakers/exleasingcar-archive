@@ -9,7 +9,8 @@ from exleasingcar_archive.collector import CapturedApiResponse, ExleasingcarColl
 from exleasingcar_archive.database import SCHEMA_VERSION, ArchiveDatabase
 from exleasingcar_archive.detail_parser import parse_vehicle_detail
 from exleasingcar_archive.ingestion import AuctionContext, LotMetadata
-from exleasingcar_archive.models import SaleType
+from exleasingcar_archive.models import PriceType, SaleType, VehicleStatus
+from exleasingcar_archive.parsers import ParsedLot, PriceObservation
 
 
 class FakePage:
@@ -772,3 +773,220 @@ def test_v14_migration_marks_only_conclusively_finished_open_auctions():
         (3, None, None),
         (4, None, None),
     ]
+
+
+def test_live_bidding_is_tracked_per_lot_in_the_same_auction(tmp_path) -> None:
+    database = ArchiveDatabase(tmp_path / "archive.sqlite3")
+    database.initialize()
+    auction_id = "auction-two-lots"
+    for car_id in ("car-ended", "car-active"):
+        seed_candidate(database, car_id, auction_id)
+        database.set_auction_lot_qualification(
+            car_id,
+            auction_id,
+            sale_type=SaleType.OPEN_AUCTION,
+            has_fixed_price=False,
+            collection_eligible=True,
+        )
+
+    collector = ExleasingcarCollector(database, tmp_path / "raw", page_delay_seconds=0)
+    first_seen = datetime(2026, 11, 23, 10, 0, tzinfo=timezone.utc)
+    second_seen = datetime(2026, 11, 23, 10, 5, tzinfo=timezone.utc)
+    collector.recorder.responses.extend(
+        (
+            CapturedApiResponse(
+                "https://www.exleasingcar.com/ajax_update_car_form.v3.1.php",
+                {
+                    "car-ended": {
+                        "car_auction_time": {
+                            "liveBidding": "0",
+                            "remainingSeconds": 0,
+                        }
+                    },
+                    "car-active": {
+                        "highest_offer": 13000,
+                        "car_auction_time": {
+                            "type": "ongoing",
+                            "liveBidding": "1",
+                            "endDate": "2026-11-23 10:10:00",
+                            "remainingSeconds": 240,
+                        },
+                    },
+                },
+                first_seen,
+            ),
+            CapturedApiResponse(
+                "https://www.exleasingcar.com/ajax_update_car_form.v3.1.php",
+                {
+                    "car-ended": {
+                        "highest_offer": 9000,
+                        "car_auction_time": {
+                            "liveBidding": "0",
+                            "remainingSeconds": 0,
+                        },
+                    },
+                    "car-active": {
+                        "highest_offer": 14500,
+                        "car_auction_time": {
+                            "type": "ongoing",
+                            "liveBidding": "1",
+                            "endDate": "2026-11-23 10:10:00",
+                            "remainingSeconds": 180,
+                        },
+                    },
+                },
+                second_seen,
+            ),
+        )
+    )
+
+    collector._persist_api_updates(
+        AuctionContext(auction_id),
+        {"car-ended", "car-active"},
+        {"car-ended": LotMetadata(), "car-active": LotMetadata()},
+        open_auction_car_ids={"car-ended", "car-active"},
+    )
+
+    with sqlite3.connect(database.path) as connection:
+        prices = connection.execute(
+            """
+            SELECT v.source_car_id, p.highest_offer
+            FROM price_observations AS p
+            JOIN auction_lots AS l ON l.id = p.auction_lot_id
+            JOIN vehicles AS v ON v.id = l.vehicle_id
+            ORDER BY v.source_car_id, p.id
+            """
+        ).fetchall()
+        countdowns = connection.execute(
+            """
+            SELECT v.source_car_id, e.remaining_seconds
+            FROM auction_events AS e
+            JOIN auction_lots AS l ON l.id = e.auction_lot_id
+            JOIN vehicles AS v ON v.id = l.vehicle_id
+            ORDER BY v.source_car_id, e.id
+            """
+        ).fetchall()
+        completion = connection.execute(
+            """
+            SELECT v.source_car_id, l.monitoring_completion_reason
+            FROM auction_lots AS l
+            JOIN vehicles AS v ON v.id = l.vehicle_id
+            ORDER BY v.source_car_id
+            """
+        ).fetchall()
+
+    assert prices == [("car-active", "13000"), ("car-active", "14500")]
+    assert countdowns == [
+        ("car-active", 240),
+        ("car-active", 180),
+        ("car-ended", 0),
+    ]
+    assert completion == [
+        ("car-active", None),
+        ("car-ended", "countdown_expired"),
+    ]
+    assert database.get_completed_open_auction_lots(
+        auction_id, {"car-ended", "car-active"}
+    ) == {"car-ended"}
+
+
+def test_completed_catalogue_lot_keeps_its_displayed_price_without_a_bid_or_timer(
+    tmp_path,
+) -> None:
+    database = ArchiveDatabase(tmp_path / "archive.sqlite3")
+    database.initialize()
+    auction_id = "auction-no-bid-finished"
+    seed_candidate(database, "car-no-bid", auction_id)
+    database.set_auction_lot_qualification(
+        "car-no-bid",
+        auction_id,
+        sale_type=SaleType.OPEN_AUCTION,
+        has_fixed_price=False,
+        collection_eligible=True,
+    )
+    collector = ExleasingcarCollector(database, tmp_path / "raw", page_delay_seconds=0)
+    observed_at = datetime(2026, 11, 23, 12, 0, tzinfo=timezone.utc)
+    catalogue_lot = ParsedLot(
+        source_car_id="car-no-bid",
+        title="Example vehicle",
+        source_url=None,
+        status=VehicleStatus.COMPLETED,
+        raw_status="Аукцион закончился!",
+        is_hot_bid=False,
+        current_price=PriceObservation(
+            price_type=PriceType.CURRENT_PRICE,
+            amount=Decimal(7000),
+            currency="EUR",
+            raw_text="7 000 EUR",
+            source_field="maximum_bid_car-no-bid",
+        ),
+    )
+
+    collector._persist_catalog_lot_observations(
+        AuctionContext(auction_id),
+        {"car-no-bid": (catalogue_lot, observed_at)},
+        {"car-no-bid"},
+        completed_before_run=set(),
+    )
+
+    with sqlite3.connect(database.path) as connection:
+        price = connection.execute(
+            "SELECT price_type, amount, source FROM lot_price_observations"
+        ).fetchone()
+        completion = connection.execute(
+            """
+            SELECT monitoring_completion_reason
+            FROM auction_lots
+            """
+        ).fetchone()[0]
+        event = connection.execute(
+            "SELECT bid_status, source FROM auction_events"
+        ).fetchone()
+
+    assert price == ("displayed_auction_price", "7000", "auction_catalog_html")
+    assert completion == "catalog_terminal_status"
+    assert event == ("completed", "auction_catalog_html")
+
+
+def test_single_public_bid_without_a_timer_stays_active(tmp_path) -> None:
+    database = ArchiveDatabase(tmp_path / "archive.sqlite3")
+    database.initialize()
+    auction_id = "auction-one-bid-no-timer"
+    seed_candidate(database, "car-one-bid", auction_id)
+    database.set_auction_lot_qualification(
+        "car-one-bid",
+        auction_id,
+        sale_type=SaleType.OPEN_AUCTION,
+        has_fixed_price=False,
+        collection_eligible=True,
+    )
+    collector = ExleasingcarCollector(database, tmp_path / "raw", page_delay_seconds=0)
+    collector.recorder.responses.append(
+        CapturedApiResponse(
+            "https://www.exleasingcar.com/ajax_update_car_form.v3.1.php",
+            {"car-one-bid": {"highest_offer": "8200"}},
+            datetime(2026, 11, 23, 12, 0, tzinfo=timezone.utc),
+        )
+    )
+
+    collector._persist_api_updates(
+        AuctionContext(auction_id),
+        {"car-one-bid"},
+        {"car-one-bid": LotMetadata()},
+        open_auction_car_ids={"car-one-bid"},
+    )
+
+    with sqlite3.connect(database.path) as connection:
+        price = connection.execute(
+            "SELECT highest_offer FROM price_observations"
+        ).fetchone()[0]
+        completion = connection.execute(
+            "SELECT monitoring_completed_at FROM auction_lots"
+        ).fetchone()[0]
+        event_count = connection.execute(
+            "SELECT COUNT(*) FROM auction_events"
+        ).fetchone()[0]
+
+    assert price == "8200"
+    assert completion is None
+    assert event_count == 0

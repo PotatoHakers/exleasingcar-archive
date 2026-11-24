@@ -31,7 +31,7 @@ class ParsedCarUpdate:
 
     @property
     def completion_reason(self) -> str | None:
-        """Return only a source-confirmed terminal state; never infer from a date alone."""
+        """Return a source-confirmed end state for this lot, not its parent auction."""
         if self.final_call_active or self.live_bidding is True:
             return None
         terminal_values = {"closed", "completed", "ended", "finished"}
