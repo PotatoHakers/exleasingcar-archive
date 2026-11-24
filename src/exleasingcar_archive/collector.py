@@ -16,6 +16,7 @@ import time
 from collections.abc import Mapping
 from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timezone
+from decimal import Decimal
 from pathlib import Path
 from typing import Any
 from urllib.parse import urljoin
@@ -24,6 +25,7 @@ from bs4 import BeautifulSoup, Tag
 
 from .api_parser import parse_car_update_response
 from .database import ArchiveDatabase
+from .scheduler import RunBudget, RunBudgetReason, RunLimits
 from .detail_parser import parse_vehicle_detail
 from .ingestion import AuctionContext, LotMetadata, store_car_updates
 from .metadata_parser import (
@@ -314,6 +316,104 @@ def _lot_metadata(lot: ParsedAuctionLotMetadata) -> LotMetadata:
         listing_code_attribute=lot.listing_code_attribute,
         mileage_km=lot.mileage_km,
     )
+
+
+def _serialize_catalog_page_data(
+    catalog_lots: tuple[ParsedAuctionLotMetadata, ...],
+    status_lots: tuple[ParsedLot, ...],
+    detail_urls: Mapping[str, str],
+    observed_at: datetime,
+) -> dict[str, Any]:
+    """Keep only parsed public fields needed to rebuild a scan after restart."""
+    serialized_status_lots = []
+    for lot in status_lots:
+        price = lot.current_price
+        serialized_status_lots.append(
+            {
+                "source_car_id": lot.source_car_id,
+                "title": lot.title,
+                "source_url": lot.source_url,
+                "status": lot.status.value,
+                "raw_status": lot.raw_status,
+                "is_hot_bid": lot.is_hot_bid,
+                "current_price": (
+                    {
+                        "price_type": price.price_type.value,
+                        "amount": str(price.amount),
+                        "currency": price.currency,
+                        "raw_text": price.raw_text,
+                        "source_field": price.source_field,
+                    }
+                    if price is not None
+                    else None
+                ),
+            }
+        )
+    return {
+        "observed_at": observed_at.astimezone(timezone.utc)
+        .isoformat(timespec="microseconds")
+        .replace("+00:00", "Z"),
+        "lots_seen": len(catalog_lots),
+        "catalog_lot_metadata": [asdict(lot) for lot in catalog_lots],
+        "catalog_lots": serialized_status_lots,
+        "detail_urls": dict(detail_urls),
+    }
+
+
+def _restore_catalog_page_datetime(value: str) -> datetime:
+    normalized = value.replace("Z", "+00:00")
+    parsed = datetime.fromisoformat(normalized)
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise ValueError("Persisted catalogue page timestamp must be timezone-aware")
+    return parsed.astimezone(timezone.utc)
+
+
+def _restore_catalog_page_data(
+    page_data: Mapping[str, Any],
+) -> tuple[
+    tuple[ParsedAuctionLotMetadata, ...],
+    tuple[ParsedLot, ...],
+    dict[str, str],
+    datetime,
+    int,
+]:
+    """Rebuild typed page observations from the JSON checkpoint."""
+    observed_at = _restore_catalog_page_datetime(str(page_data["observed_at"]))
+    metadata = tuple(
+        ParsedAuctionLotMetadata(**item)
+        for item in page_data.get("catalog_lot_metadata", [])
+    )
+    restored_lots = []
+    for item in page_data.get("catalog_lots", []):
+        raw_price = item.get("current_price")
+        price = None
+        if raw_price is not None:
+            price = PriceObservation(
+                price_type=PriceType(raw_price["price_type"]),
+                amount=Decimal(str(raw_price["amount"])),
+                currency=raw_price.get("currency"),
+                raw_text=str(raw_price["raw_text"]),
+                source_field=str(raw_price["source_field"]),
+            )
+        restored_lots.append(
+            ParsedLot(
+                source_car_id=str(item["source_car_id"]),
+                title=item.get("title"),
+                source_url=item.get("source_url"),
+                status=VehicleStatus(item["status"]),
+                raw_status=item.get("raw_status"),
+                is_hot_bid=bool(item["is_hot_bid"]),
+                current_price=price,
+            )
+        )
+    detail_urls = {
+        str(car_id): str(url)
+        for car_id, url in page_data.get("detail_urls", {}).items()
+    }
+    lots_seen = int(page_data.get("lots_seen", len(metadata)))
+    if lots_seen < 0:
+        raise ValueError("Persisted catalogue lots_seen cannot be negative")
+    return metadata, tuple(restored_lots), detail_urls, observed_at, lots_seen
 
 
 def _wait_for_dynamic_content(page: Any, timeout_ms: int = 7_000) -> None:
