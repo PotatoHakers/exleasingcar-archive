@@ -1143,8 +1143,14 @@ def test_catalog_scan_rejects_invalid_types_urls_and_counts(tmp_path):
         database.start_or_resume_catalog_scan(
             "210547", "unknown", "https://www.exleasingcar.com/auction-210547"
         )
-    with pytest.raises(ValueError, match="HTTP"):
-        database.start_or_resume_catalog_scan("210547", "bootstrap", "/auction-210547")
+    with pytest.raises(ValueError, match="HTTPS Exleasingcar"):
+        database.start_or_resume_catalog_scan(
+            "210547", "bootstrap", "https://example.com/auction-210547"
+        )
+    with pytest.raises(ValueError, match="HTTPS Exleasingcar"):
+        database.start_or_resume_catalog_scan(
+            "210547", "bootstrap", "http://www.exleasingcar.com/auction-210547"
+        )
 
     scan = database.start_or_resume_catalog_scan(
         "210547",
