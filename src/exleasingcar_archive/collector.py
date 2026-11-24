@@ -1581,6 +1581,7 @@ class ExleasingcarCollector:
         all_lot_metadata: dict[str, LotMetadata] = {}
         catalog_lot_observations: dict[str, tuple[ParsedLot, datetime]] = {}
         detail_urls: dict[str, str] = {}
+        lot_page_ids: dict[str, int] = {}
         lots_seen = 0
         saved_pages = self.database.get_catalog_scan_pages(scan.scan_id)
         for saved_page in saved_pages:
@@ -1593,6 +1594,9 @@ class ExleasingcarCollector:
             ) = _restore_catalog_page_data(saved_page.page_data)
             all_lot_metadata.update(
                 {item.source_car_id: _lot_metadata(item) for item in page_metadata}
+            )
+            lot_page_ids.update(
+                {item.source_car_id: saved_page.page_id for item in page_metadata}
             )
             catalog_lot_observations.update(
                 {
@@ -1620,6 +1624,9 @@ class ExleasingcarCollector:
             ) = _restore_catalog_page_data(pending_page.page_data)
             all_lot_metadata.update(
                 {item.source_car_id: _lot_metadata(item) for item in page_metadata}
+            )
+            lot_page_ids.update(
+                {item.source_car_id: pending_page.page_id for item in page_metadata}
             )
             catalog_lot_observations.update(
                 {
@@ -1683,6 +1690,7 @@ class ExleasingcarCollector:
             )
             details_attempted += 1
             attempted_detail_ids.add(car_id)
+            detail_response_start = len(self.recorder.responses)
             qualification = self._enrich_vehicle_detail(
                 auction,
                 car_id,
@@ -1691,6 +1699,25 @@ class ExleasingcarCollector:
                 observed_at,
                 auction_dir,
             )
+            detail_api_responses = self.recorder.responses[detail_response_start:]
+            if detail_api_responses:
+                page_id = lot_page_ids.get(car_id)
+                if page_id is None:
+                    raise RuntimeError(
+                        "Cannot persist API responses from detail page "
+                        f"{car_id}: no catalogue checkpoint owns this lot"
+                    )
+                self.database.append_catalog_api_responses(
+                    page_id,
+                    tuple(
+                        {
+                            "url": captured.url,
+                            "payload": captured.payload,
+                            "observed_at": captured.observed_at,
+                        }
+                        for captured in detail_api_responses
+                    ),
+                )
             if qualification is None:
                 failed_detail_ids.append(car_id)
             else:
