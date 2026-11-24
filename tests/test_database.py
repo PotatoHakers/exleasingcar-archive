@@ -1323,8 +1323,8 @@ def test_catalogue_api_response_cursor_can_be_resumed_after_partial_processing(
     assert len(resumed) == 1
     assert resumed[0].api_responses_processed == 1
 
-    with pytest.raises(ValueError, match="cursor moved"):
-        database.advance_catalog_api_response_cursor(page.page_id, 0)
+    # Repeating a previously consumed cursor is idempotent.
+    assert not database.advance_catalog_api_response_cursor(page.page_id, 0)
 
     assert database.advance_catalog_api_response_cursor(page.page_id, 1)
     assert database.advance_catalog_api_response_cursor(page.page_id, 2)
