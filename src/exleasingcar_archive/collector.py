@@ -2162,9 +2162,7 @@ def main() -> None:
     except (TypeError, ValueError) as exc:
         raise SystemExit(f"Invalid per-run collection limit: {exc}") from exc
 
-    lock_file = args.lock_file or args.database.with_name(
-        args.database.name + ".collector.lock"
-    )
+    lock_file = args.lock_file or DEFAULT_DATABASE.parent / "collector.lock"
     try:
         with CollectorProcessLock(lock_file):
             print("Effective run limits:")
