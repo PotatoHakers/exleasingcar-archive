@@ -692,7 +692,7 @@ def parse_vehicle_media(
 
     # Current Exleasingcar detail pages expose each full-size original through
     # change_thumb(this, 'https://data.exleasingcar.com/...-normal_*.jpg').
-    for anchor in soup.select("#gallery-area .gallery-thumbs a[onclick]"):
+    for anchor in soup.select("#gallery-area a[onclick]"):
         onclick = str(anchor.get("onclick") or "")
         raw_url = _onclick_url(onclick, "change_thumb")
         if raw_url is None:
@@ -708,7 +708,7 @@ def parse_vehicle_media(
 
     # Fallback for page variants that put full-size URLs directly in the
     # Highslide gallery. Relative browser-save paths are intentionally skipped.
-    for anchor in soup.select("#gallery-area .highslide-gallery a.highslide[href]"):
+    for anchor in soup.select("#gallery-area a.highslide[href]"):
         image = anchor.find("img")
         preview_url = (
             str(image.get("src"))
