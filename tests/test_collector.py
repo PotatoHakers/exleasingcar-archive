@@ -751,9 +751,9 @@ def test_catalogue_scan_resumes_api_and_detail_data_after_a_run_budget_pause(
 ):
     from datetime import datetime, timezone
 
+    from exleasingcar_archive import collector as collector_module
     from exleasingcar_archive.collector import CapturedApiResponse
     from exleasingcar_archive.database import ArchiveDatabase
-    from exleasingcar_archive.ingestion import AuctionContext
     from exleasingcar_archive.metadata_parser import (
         ParsedAuctionCatalogMetadata,
         ParsedAuctionListing,
