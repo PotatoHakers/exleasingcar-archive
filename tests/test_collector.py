@@ -386,8 +386,8 @@ def test_collector_defaults_to_bounded_detail_batch_for_selected_auction():
     assert args.max_detail_pages == 30
 
 
-def test_api_response_recorder_captures_body_on_response_before_navigation():
-    from exleasingcar_archive.collector import ApiResponseRecorder
+def test_api_response_recorder_retries_body_read_after_request_finished():
+    from exleasingcar_archive.collector import ApiResponseRecorder, PlaywrightError
 
     class FakeContext:
         def __init__(self):
@@ -410,8 +410,12 @@ def test_api_response_recorder_captures_body_on_response_before_navigation():
         def __init__(self, request):
             self.request = request
             self.headers = {"content-type": "application/json"}
+            self.body_calls = 0
 
         def body(self):
+            self.body_calls += 1
+            if self.body_calls == 1:
+                raise PlaywrightError("response body is not ready yet")
             return b'{"car-1": {"highest_offer": "12500"}}'
 
     request = FakeRequest()
@@ -427,15 +431,19 @@ def test_api_response_recorder_captures_body_on_response_before_navigation():
     context.handlers["request"](request)
     assert recorder.pending_requests
 
-    # The response body is consumed before requestfinished / next navigation.
+    # The early read may fail transiently; it must not be reported as final.
     context.handlers["response"](response)
+    assert response.body_calls == 1
+    assert recorder.responses == []
+    assert recorder.errors == []
+
+    # Retry once the browser confirms that the response body has finished.
+    context.handlers["requestfinished"](request)
+    assert response.body_calls == 2
+    assert recorder.pending_requests == {}
     assert len(recorder.responses) == 1
     assert recorder.responses[0].payload["car-1"]["highest_offer"] == "12500"
     assert recorder.errors == []
-
-    context.handlers["requestfinished"](request)
-    assert recorder.pending_requests == {}
-    assert len(recorder.responses) == 1
 
 
 def test_api_response_recorder_reports_non_json_http_response():
@@ -475,14 +483,15 @@ def test_api_response_recorder_reports_non_json_http_response():
 
     context.handlers["request"](request)
     context.handlers["response"](response)
+    assert recorder.errors == []
     context.handlers["requestfinished"](request)
 
     assert recorder.responses == []
     assert len(recorder.errors) == 1
-    assert "content-type=text/html" in recorder.errors[0]
+    assert "content-type=text/html" in recorder.errors
 
 
-def test_api_response_recorder_does_not_duplicate_abort_after_response_error():
+def test_api_response_recorder_reports_abort_after_response_headers_once():
     from exleasingcar_archive.collector import ApiResponseRecorder
 
     class FakeContext:
@@ -526,7 +535,8 @@ def test_api_response_recorder_does_not_duplicate_abort_after_response_error():
     assert recorder.pending_requests == {}
     assert recorder.responses == []
     assert len(recorder.errors) == 1
-    assert "content-type=text/html" in recorder.errors[0]
+    assert "API request failed before its response body could be captured" in recorder.errors[0]
+    assert "net::ERR_ABORTED" in recorder.errors[0]
 
 
 def test_api_response_recorder_reports_failed_request():
