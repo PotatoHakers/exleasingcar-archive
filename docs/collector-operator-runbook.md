@@ -8,10 +8,12 @@ validation to a future private runtime. It does not enable a schedule.
 - The collector remains manually started.
 - Each CLI invocation takes an OS-level, non-blocking process lock. A second
   invocation using the same lock path exits without opening the browser.
-- The lock file is kept next to the selected database by default:
-  `<database-name>.collector.lock`. The operating system releases the lock
-  when the owning process exits; the file itself is not a stale-process marker
-  and should not be deleted while a collector may be running.
+- The default lock file is `data/collector.lock`, shared by all CLI runs in
+  this checkout even when a temporary validation database is selected. Use
+  `--lock-file` only when a deliberately separate runtime is required. The
+  operating system releases the lock when the owning process exits; the file
+  itself is not a stale-process marker and should not be deleted while a
+  collector may be running.
 - The database, Chromium profile, and raw files remain local. Do not put them
   in Git, GitHub Actions artifacts, or a public/shared folder.
 - HTML snapshots stay disabled by default.
