@@ -38,6 +38,7 @@ from .metadata_parser import (
 )
 from .models import PriceType, SaleType, VehicleStatus
 from .parsers import ParsedLot, PriceObservation, parse_auction_list
+from .process_lock import CollectorAlreadyRunning, CollectorProcessLock
 from .scheduler import RunBudget, RunLimits
 
 try:
@@ -2071,6 +2072,11 @@ def build_argument_parser() -> argparse.ArgumentParser:
         )
     )
     parser.add_argument("--database", type=Path, default=DEFAULT_DATABASE)
+    parser.add_argument(
+        "--lock-file",
+        type=Path,
+        help="Collector lock path (default: next to the database)",
+    )
     parser.add_argument("--profile-dir", type=Path, default=DEFAULT_PROFILE_DIR)
     parser.add_argument("--raw-dir", type=Path, default=DEFAULT_RAW_DIR)
     parser.add_argument(
@@ -2156,27 +2162,39 @@ def main() -> None:
     except (TypeError, ValueError) as exc:
         raise SystemExit(f"Invalid per-run collection limit: {exc}") from exc
 
-    collector = ExleasingcarCollector(
-        ArchiveDatabase(args.database),
-        args.raw_dir,
-        page_delay_seconds=args.page_delay,
-        save_html_snapshots=args.save_html_snapshots,
-    )
-    summary = collector.run(
-        auction_list_url=args.auction_list_url,
-        profile_dir=args.profile_dir,
-        max_auctions=args.max_auctions,
-        auction_id=args.auction_id,
-        max_detail_pages=args.max_detail_pages,
-        run_limits=run_limits,
-    )
-    print("\nCollection completed")
-    for field, value in asdict(summary).items():
-        print(f"  {field}: {value}")
-    if collector.recorder.errors:
-        print("API response capture warnings:")
-        for message in collector.recorder.errors[:20]:
-            print(f"  {message}")
+    lock_file = args.lock_file or DEFAULT_DATABASE.parent / "collector.lock"
+    try:
+        with CollectorProcessLock(lock_file):
+            print("Effective run limits:")
+            print(f"  max_duration_seconds: {run_limits.max_duration_seconds}")
+            print(f"  max_catalog_pages: {run_limits.max_catalog_pages}")
+            print(f"  max_live_lots: {run_limits.max_live_lots}")
+            print(f"  max_detail_pages: {run_limits.max_detail_pages}")
+            print(f"  process_lock: {lock_file}")
+
+            collector = ExleasingcarCollector(
+                ArchiveDatabase(args.database),
+                args.raw_dir,
+                page_delay_seconds=args.page_delay,
+                save_html_snapshots=args.save_html_snapshots,
+            )
+            summary = collector.run(
+                auction_list_url=args.auction_list_url,
+                profile_dir=args.profile_dir,
+                max_auctions=args.max_auctions,
+                auction_id=args.auction_id,
+                max_detail_pages=args.max_detail_pages,
+                run_limits=run_limits,
+            )
+            print("\nCollection completed")
+            for field, value in asdict(summary).items():
+                print(f"  {field}: {value}")
+            if collector.recorder.errors:
+                print("API response capture warnings:")
+                for message in collector.recorder.errors[:20]:
+                    print(f"  {message}")
+    except CollectorAlreadyRunning as exc:
+        raise SystemExit(str(exc)) from exc
 
 
 if __name__ == "__main__":
