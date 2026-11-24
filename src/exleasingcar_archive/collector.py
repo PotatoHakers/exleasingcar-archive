@@ -25,9 +25,9 @@ from bs4 import BeautifulSoup, Tag
 
 from .api_parser import parse_car_update_response
 from .database import ArchiveDatabase
-from .scheduler import RunBudget, RunLimits
 from .detail_parser import parse_vehicle_detail
 from .ingestion import AuctionContext, LotMetadata, store_car_updates
+from .scheduler import RunBudget, RunLimits
 from .metadata_parser import (
     ParsedAuctionListing,
     ParsedAuctionLotMetadata,
