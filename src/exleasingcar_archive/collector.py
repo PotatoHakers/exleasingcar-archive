@@ -1632,6 +1632,7 @@ class ExleasingcarCollector:
         lot_page_ids: dict[str, int] = {}
         lots_seen = 0
         saved_pages = self.database.get_catalog_scan_pages(scan.scan_id)
+        restored_page_ids = {saved_page.page_id for saved_page in saved_pages}
         for saved_page in saved_pages:
             (
                 page_metadata,
@@ -1664,8 +1665,9 @@ class ExleasingcarCollector:
         for pending_page in self.database.get_pending_catalog_api_pages(
             listing.exleasingcar_auction_id
         ):
-            if pending_page.scan_id == scan.scan_id:
+            if pending_page.page_id in restored_page_ids:
                 continue
+            restored_page_ids.add(pending_page.page_id)
             (
                 page_metadata,
                 parsed_lots,
@@ -1681,6 +1683,40 @@ class ExleasingcarCollector:
             )
             lot_page_ids.update(
                 {item.source_car_id: pending_page.page_id for item in page_metadata}
+            )
+            catalog_lot_observations.update(
+                {
+                    item.source_car_id: (item, page_observed_at)
+                    for item in parsed_lots
+                }
+            )
+            detail_urls.update(saved_detail_urls)
+            lots_seen += page_lots_seen
+
+        # Deferred API lot rows can outlive their original bulk-response cursor.
+        # Rehydrate their old page metadata and detail URLs even when those lots
+        # no longer appear in the latest catalogue listing.
+        for deferred_page in self.database.get_catalog_deferred_api_pages(
+            listing.exleasingcar_auction_id
+        ):
+            if deferred_page.page_id in restored_page_ids:
+                continue
+            restored_page_ids.add(deferred_page.page_id)
+            (
+                page_metadata,
+                parsed_lots,
+                saved_detail_urls,
+                page_observed_at,
+                page_lots_seen,
+            ) = _restore_catalog_page_data(
+                deferred_page.page_data,
+                fallback_observed_at=deferred_page.completed_at,
+            )
+            all_lot_metadata.update(
+                {item.source_car_id: _lot_metadata(item) for item in page_metadata}
+            )
+            lot_page_ids.update(
+                {item.source_car_id: deferred_page.page_id for item in page_metadata}
             )
             catalog_lot_observations.update(
                 {
