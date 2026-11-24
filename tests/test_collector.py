@@ -267,6 +267,7 @@ def test_detail_enrichment_persists_fixed_sale_type_and_price(tmp_path, monkeypa
 
     from exleasingcar_archive.collector import ExleasingcarCollector
     from exleasingcar_archive.database import ArchiveDatabase
+    from exleasingcar_archive.ingestion import AuctionContext
 
     html = """
     <div class="auto-block" car-id="19694139">
