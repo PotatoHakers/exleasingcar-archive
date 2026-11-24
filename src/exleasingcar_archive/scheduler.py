@@ -65,14 +65,16 @@ class CollectionWorkItem:
     estimated_seconds: int = 1
 
     def __post_init__(self) -> None:
-        if not self.work_id.strip():
-            raise ValueError("work_id cannot be empty")
+        if not isinstance(self.work_id, str) or not self.work_id.strip():
+            raise ValueError("work_id must be a non-empty string")
         if not isinstance(self.work_type, WorkType):
             raise TypeError("work_type must be a WorkType")
-        if not self.auction_id.strip():
-            raise ValueError("auction_id cannot be empty")
-        if self.target_id is not None and not self.target_id.strip():
-            raise ValueError("target_id cannot be empty when supplied")
+        if not isinstance(self.auction_id, str) or not self.auction_id.strip():
+            raise ValueError("auction_id must be a non-empty string")
+        if self.target_id is not None and (
+            not isinstance(self.target_id, str) or not self.target_id.strip()
+        ):
+            raise ValueError("target_id must be a non-empty string when supplied")
         if not isinstance(self.due_at, datetime) or self.due_at.tzinfo is None:
             raise ValueError("due_at must be a timezone-aware datetime")
         if self.due_at.utcoffset() is None:
