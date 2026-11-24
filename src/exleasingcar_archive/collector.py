@@ -656,7 +656,6 @@ class ExleasingcarCollector:
                     return False
 
             for car_id in sorted(promotable_ids):
-                update = updates[car_id]
                 promoted = self.database.set_auction_lot_qualification(
                     car_id,
                     auction.exleasingcar_auction_id,
