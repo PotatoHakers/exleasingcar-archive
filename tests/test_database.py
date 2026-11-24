@@ -1245,7 +1245,18 @@ def test_catalogue_page_checkpoint_persists_page_data_and_api_responses_atomical
     api_responses = (
         {
             "url": "https://www.exleasingcar.com/ajax_update_car_form.v3.1.php",
-            "payload": {"car-1": {"highest_offer": "12000"}},
+            "payload": {
+                "car-1": {
+                    "highest_offer": "12000",
+                    "user_offer": "14500",
+                    "actual_car_price": "99999",
+                    "car_auction_time": {
+                        "type": "final-call",
+                        "image": "final-call-active",
+                        "private_account_label": "do-not-store",
+                    },
+                }
+            },
             "observed_at": response_time,
         },
     )
@@ -1267,7 +1278,13 @@ def test_catalogue_page_checkpoint_persists_page_data_and_api_responses_atomical
     assert pages[0].page_data == page_data
     assert pages[0].api_responses_processed == 0
     assert pages[0].api_responses[0]["payload"] == {
-        "car-1": {"highest_offer": "12000"}
+        "car-1": {
+            "highest_offer": "12000",
+            "car_auction_time": {
+                "type": "final-call",
+                "image": "final-call-active",
+            },
+        }
     }
     assert pages[0].api_responses[0]["observed_at"] == (
         response_time.isoformat(timespec="microseconds").replace("+00:00", "Z")
@@ -1330,6 +1347,62 @@ def test_catalogue_api_response_cursor_can_be_resumed_after_partial_processing(
     assert database.advance_catalog_api_response_cursor(page.page_id, 2)
     assert database.get_pending_catalog_api_pages("210547") == ()
 
+
+
+
+def test_detail_api_responses_append_to_existing_queue_without_resetting_cursor(
+    tmp_path,
+):
+    database = ArchiveDatabase(tmp_path / "catalogue-api-append.sqlite3")
+    database.initialize()
+    page_url = "https://www.exleasingcar.com/auction-210547?page=1"
+    api_url = "https://www.exleasingcar.com/ajax_update_car_form.v3.1.php"
+    scan = database.start_or_resume_catalog_scan("210547", "bootstrap", page_url)
+
+    assert database.record_catalog_page_completed(
+        scan.scan_id,
+        1,
+        page_url,
+        next_page_url=None,
+        next_page_number=None,
+        item_count=1,
+        page_data={"lots_seen": 1},
+        api_responses=(
+            {
+                "url": api_url,
+                "payload": {"car-1": {"highest_offer": "10000"}},
+                "observed_at": UTC_FIRST,
+            },
+        ),
+    )
+    page = database.get_catalog_scan_pages(scan.scan_id)[0]
+    assert database.advance_catalog_api_response_cursor(page.page_id, 0)
+
+    detail_response = {
+        "url": api_url,
+        "payload": {
+            "car-1": {
+                "highest_offer": "11000",
+                "user_offer": "777777",
+                "actual_car_price": "888888",
+            }
+        },
+        "observed_at": UTC_SECOND,
+    }
+    assert database.append_catalog_api_responses(page.page_id, (detail_response,)) == 1
+    # A crash/retry that repeats the exact same capture does not enqueue it twice.
+    assert database.append_catalog_api_responses(page.page_id, (detail_response,)) == 0
+
+    pending = database.get_pending_catalog_api_pages("210547")
+    assert len(pending) == 1
+    assert pending[0].api_responses_processed == 1
+    assert len(pending[0].api_responses) == 2
+    assert pending[0].api_responses[1]["payload"] == {
+        "car-1": {"highest_offer": "11000"}
+    }
+
+    assert database.advance_catalog_api_response_cursor(page.page_id, 1)
+    assert database.get_pending_catalog_api_pages("210547") == ()
 
 def test_catalogue_page_checkpoint_rejects_non_json_or_untrusted_api_data(tmp_path):
     database = ArchiveDatabase(tmp_path / "catalogue-api-validation.sqlite3")
