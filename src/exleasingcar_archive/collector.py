@@ -1408,6 +1408,7 @@ class ExleasingcarCollector:
         snapshot_dir: Path,
         *,
         max_detail_pages: int,
+        run_budget: RunBudget | None = None,
     ) -> tuple[int, int, int]:
         if not listing.source_url:
             print(f"Auction {listing.exleasingcar_auction_id}: no source URL; skipped")
@@ -1426,43 +1427,77 @@ class ExleasingcarCollector:
         auction_dir = snapshot_dir / f"auction_{_safe_component(listing.exleasingcar_auction_id)}"
         auction_dir.mkdir(parents=True, exist_ok=True)
 
-        current_url: str | None = listing.source_url
-        visited_urls: set[str] = set()
-        all_lot_metadata: dict[str, LotMetadata] = {}
-        catalog_lot_observations: dict[str, tuple[ParsedLot, datetime]] = {}
-        detail_urls: dict[str, str] = {}
+        scan_type = (
+            "bootstrap"
+            if not self.database.has_completed_catalog_scan(
+                listing.exleasingcar_auction_id,
+                "bootstrap",
+            )
+            else "routine"
+        )
+        scan = self.database.start_or_resume_catalog_scan(
+            listing.exleasingcar_auction_id,
+            scan_type,
+            listing.source_url,
+            observed_at=datetime.now(timezone.utc),
+        )
+
         pages_processed = 0
-        lots_seen = 0
         details_processed = 0
         details_attempted = 0
         failed_detail_ids: list[str] = []
         attempted_detail_ids: set[str] = set()
         observed_at = datetime.now(timezone.utc)
 
-        while current_url and current_url not in visited_urls:
-            visited_urls.add(current_url)
+        # A resumed run must remember URLs that have already been checkpointed,
+        # otherwise fallback pagination links could send it back to page one.
+        visited_urls = {
+            saved_page.page_url
+            for saved_page in self.database.get_catalog_scan_pages(scan.scan_id)
+        }
+        current_url = scan.next_page_url
+        page_number = scan.next_page_number
+
+        while current_url is not None and page_number is not None:
+            if run_budget is not None:
+                blocked = run_budget.try_consume(catalog_pages=1)
+                if blocked is not None:
+                    print(
+                        f"  Catalogue scan paused before page {page_number}: "
+                        f"{blocked.value}."
+                    )
+                    break
+
+            response_start = len(self.recorder.responses)
+            error_start = len(self.recorder.errors)
             try:
                 page.goto(current_url, wait_until="domcontentloaded", timeout=45_000)
                 _wait_for_dynamic_content(page)
-                self.recorder.wait_for_pending(page)
+                if not self.recorder.wait_for_pending(page):
+                    print(
+                        "  Catalogue page left uncheckpointed because its API "
+                        "response(s) did not finish before the capture deadline."
+                    )
+                    break
             except PlaywrightError as exc:
                 print(f"  Catalogue page failed ({current_url}): {exc}")
                 break
 
+            if len(self.recorder.errors) > error_start:
+                print(
+                    "  Catalogue page left uncheckpointed because an API response "
+                    "could not be captured safely."
+                )
+                break
+
             html = page.content()
-            pages_processed += 1
             self._save_html(
-                auction_dir / f"catalog_page_{pages_processed:03d}.html",
+                auction_dir / f"catalog_page_{page_number:03d}.html",
                 html,
             )
             page_observed_at = datetime.now(timezone.utc)
             catalog = parse_auction_catalog_metadata(html, page.url)
             page_status = parse_auction_list(html, page.url)
-            for parsed_lot in page_status.lots:
-                catalog_lot_observations[parsed_lot.source_car_id] = (
-                    parsed_lot,
-                    page_observed_at,
-                )
             if catalog.exleasingcar_auction_id != listing.exleasingcar_auction_id:
                 raise ValueError(
                     "Catalogue/auction mismatch: "
@@ -1470,15 +1505,10 @@ class ExleasingcarCollector:
                     f"received {catalog.exleasingcar_auction_id!r}"
                 )
 
-            page_lot_metadata = self._upsert_catalog_lots(
-                auction,
-                catalog.lots,
-                observed_at,
-            )
-            all_lot_metadata.update(page_lot_metadata)
-            lots_seen += len(catalog.lots)
-            detail_urls.update(extract_vehicle_detail_urls(html, page.url))
-
+            # Persist parsed lot rows before committing the page cursor. If the
+            # process stops here, the page is replayed and these upserts are safe.
+            self._upsert_catalog_lots(auction, catalog.lots, page_observed_at)
+            page_detail_urls = extract_vehicle_detail_urls(html, page.url)
             pagination = parse_catalog_pagination(html, page.url)
             next_url = pagination.next_page_url
             if next_url is None:
@@ -1486,22 +1516,127 @@ class ExleasingcarCollector:
                     candidate
                     for candidate in pagination.page_urls
                     if candidate not in visited_urls
+                    and candidate != current_url
                 ]
                 next_url = next_candidates[0] if next_candidates else None
+
+            next_number = page_number + 1 if next_url is not None else None
+            page_data = _serialize_catalog_page_data(
+                catalog.lots,
+                page_status.lots,
+                page_detail_urls,
+                page_observed_at,
+            )
+            captured_responses = self.recorder.responses[response_start:]
+            api_response_rows = tuple(
+                {
+                    "url": captured.url,
+                    "payload": captured.payload,
+                    "observed_at": captured.observed_at,
+                }
+                for captured in captured_responses
+            )
+
+            # Page metadata, parsed lot/detail references, captured API payloads,
+            # and the next-page cursor are committed atomically in SQLite.
+            self.database.record_catalog_page_completed(
+                scan.scan_id,
+                page_number,
+                current_url,
+                next_page_url=next_url,
+                next_page_number=next_number,
+                item_count=len(catalog.lots),
+                page_data=page_data,
+                api_responses=api_response_rows,
+                observed_at=page_observed_at,
+            )
+            visited_urls.add(current_url)
+            pages_processed += 1
             current_url = next_url
+            page_number = next_number
 
             if self.page_delay_seconds:
                 time.sleep(self.page_delay_seconds)
 
-        # API responses remain in memory until each lot has been qualified.
+        progress = self.database.get_catalog_scan_progress(scan.scan_id)
         if (
-            listing.vehicle_count is not None
+            progress is not None
+            and progress.status == "in_progress"
+            and progress.next_page_url is None
+            and progress.next_page_number is None
+            and progress.pages_completed > 0
+        ):
+            self.database.complete_catalog_scan(
+                scan.scan_id,
+                observed_at=datetime.now(timezone.utc),
+            )
+            progress = self.database.get_catalog_scan_progress(scan.scan_id)
+
+        # Rebuild every in-memory work set from the durable page payloads. This
+        # is what makes detail URLs and status/price observations survive a
+        # process restart between catalogue pages.
+        all_lot_metadata: dict[str, LotMetadata] = {}
+        catalog_lot_observations: dict[str, tuple[ParsedLot, datetime]] = {}
+        detail_urls: dict[str, str] = {}
+        lots_seen = 0
+        saved_pages = self.database.get_catalog_scan_pages(scan.scan_id)
+        for saved_page in saved_pages:
+            (
+                page_metadata,
+                parsed_lots,
+                saved_detail_urls,
+                page_observed_at,
+                page_lots_seen,
+            ) = _restore_catalog_page_data(saved_page.page_data)
+            all_lot_metadata.update(
+                {item.source_car_id: _lot_metadata(item) for item in page_metadata}
+            )
+            catalog_lot_observations.update(
+                {
+                    item.source_car_id: (item, page_observed_at)
+                    for item in parsed_lots
+                }
+            )
+            detail_urls.update(saved_detail_urls)
+            lots_seen += page_lots_seen
+
+        # Older unfinished API queues may belong to a previous scan generation.
+        # Rehydrate those page references too so deferred snapshots are not lost
+        # merely because a lot disappeared from the latest catalogue.
+        for pending_page in self.database.get_pending_catalog_api_pages(
+            listing.exleasingcar_auction_id
+        ):
+            if pending_page.scan_id == scan.scan_id:
+                continue
+            (
+                page_metadata,
+                parsed_lots,
+                saved_detail_urls,
+                page_observed_at,
+                page_lots_seen,
+            ) = _restore_catalog_page_data(pending_page.page_data)
+            all_lot_metadata.update(
+                {item.source_car_id: _lot_metadata(item) for item in page_metadata}
+            )
+            catalog_lot_observations.update(
+                {
+                    item.source_car_id: (item, page_observed_at)
+                    for item in parsed_lots
+                }
+            )
+            detail_urls.update(saved_detail_urls)
+            lots_seen += page_lots_seen
+
+        if (
+            progress is not None
+            and progress.status == "completed"
+            and listing.vehicle_count is not None
             and listing.vehicle_count > len(all_lot_metadata)
         ):
             print(
                 f"  WARNING: auction list reports {listing.vehicle_count} vehicles, "
                 f"but only {len(all_lot_metadata)} unique lot IDs were found. "
-                "Catalog may be incomplete."
+                "The completed catalogue scan may still be incomplete."
             )
 
         ordered_car_ids = self.database.get_detail_check_order(
@@ -1509,7 +1644,8 @@ class ExleasingcarCollector:
             set(detail_urls),
         )
         detail_items = [
-            (car_id, detail_urls[car_id]) for car_id in ordered_car_ids
+            (car_id, detail_urls[car_id])
+            for car_id in ordered_car_ids
             if car_id in detail_urls
         ]
         previously_eligible = self.database.get_collection_eligible_lots(
@@ -1526,7 +1662,17 @@ class ExleasingcarCollector:
             detail_items = []
         elif max_detail_pages > 0:
             detail_items = detail_items[:max_detail_pages]
+
         for car_id, detail_url in detail_items:
+            if run_budget is not None:
+                blocked = run_budget.try_consume(detail_pages=1)
+                if blocked is not None:
+                    print(
+                        f"  Detail enrichment paused before lot {car_id}: "
+                        f"{blocked.value}."
+                    )
+                    break
+
             self.database.mark_detail_attempted(
                 car_id,
                 listing.exleasingcar_auction_id,
@@ -1558,8 +1704,8 @@ class ExleasingcarCollector:
             if self.page_delay_seconds:
                 time.sleep(self.page_delay_seconds)
 
-        # Only API rows belonging to known or newly qualified lots are persisted.
-        # Fixed-price-only lots keep seller references but not hidden-bid fields.
+        # Only known open lots can be promoted by a positive public API bid.
+        # Unknown sale modes stay queued until detail enrichment classifies them.
         completed_before_api = self.database.get_completed_open_auction_lots(
             listing.exleasingcar_auction_id,
             eligible_car_ids,
@@ -1581,6 +1727,7 @@ class ExleasingcarCollector:
             all_lot_metadata,
             open_auction_car_ids=open_auction_car_ids,
             open_auction_candidate_ids=open_auction_candidate_ids,
+            run_budget=run_budget,
         )
         self._persist_catalog_lot_observations(
             auction,
@@ -1598,9 +1745,15 @@ class ExleasingcarCollector:
 
         print(
             f"Auction {listing.exleasingcar_auction_id}: "
-            f"{pages_processed} page(s), {lots_seen} lot card(s), "
+            f"{pages_processed} page(s) processed this run, "
+            f"{lots_seen} persisted lot card(s), "
             f"{details_processed} detail page(s)"
         )
+        if progress is not None and progress.status != "completed":
+            print(
+                f"  Catalogue scan remains resumable at "
+                f"page {progress.next_page_number}: {progress.next_page_url}"
+            )
         print(
             f"  Catalogue IDs: {coverage.unique_lot_ids} unique, "
             f"{coverage.repeated_card_occurrences} repeated card appearance(s)"
@@ -1619,7 +1772,8 @@ class ExleasingcarCollector:
             print("  Detail pages not processed: " + ", ".join(failed_detail_ids))
         if unattempted_detail_ids:
             print(
-                "  Detail pages deferred by weekly refresh or --max-detail-pages: "
+                "  Detail pages deferred by weekly refresh, per-auction limit, "
+                "or run budget: "
                 + ", ".join(unattempted_detail_ids)
             )
         return pages_processed, lots_seen, details_processed
