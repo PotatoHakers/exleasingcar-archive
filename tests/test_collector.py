@@ -999,7 +999,7 @@ def test_catalogue_scan_resumes_api_and_detail_data_after_a_run_budget_pause(
             JOIN auction_lots ON auction_lots.id = price_observations.auction_lot_id
             JOIN vehicles ON vehicles.id = auction_lots.vehicle_id
             WHERE vehicles.source_car_id = 'car-1'
-            ORDER BY price_observations.id
+            ORDER BY price_observations.observed_at, price_observations.id
             """
         ).fetchall()
         stored_detail_check = connection.execute(
