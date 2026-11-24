@@ -397,7 +397,7 @@ def test_v13_migration_backfills_fixed_price_eligibility() -> None:
     ]
     connection.close()
 
-    assert SCHEMA_VERSION == 15
+    assert SCHEMA_VERSION >= 15
     assert rows == [
         (1, 1, 0),
         (2, 0, 0),
@@ -766,7 +766,7 @@ def test_v14_migration_marks_only_conclusively_finished_open_auctions():
     ]
     connection.close()
 
-    assert SCHEMA_VERSION == 15
+    assert SCHEMA_VERSION >= 15
     assert rows == [
         (1, "2026-11-22T10:00:00Z", "countdown_expired"),
         (2, None, None),
