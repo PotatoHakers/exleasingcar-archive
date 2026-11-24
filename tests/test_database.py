@@ -1569,13 +1569,21 @@ def test_schema_v16_migrates_catalogue_page_payload_columns(tmp_path):
         }
         integrity_errors = connection.execute("PRAGMA foreign_key_check").fetchall()
 
-    assert version == SCHEMA_VERSION == 17
+    assert version == SCHEMA_VERSION == 18
     assert {
         "page_data_json",
         "api_responses_json",
         "api_responses_processed",
     }.issubset(columns)
     assert integrity_errors == []
+    with sqlite3.connect(database.path) as connection:
+        deferred_table = connection.execute(
+            """
+            SELECT COUNT(*) FROM sqlite_master
+            WHERE type = 'table' AND name = 'catalog_deferred_api_lots'
+            """
+        ).fetchone()[0]
+    assert deferred_table == 1
     with sqlite3.connect(database.path) as connection:
         deferred_table = connection.execute(
             """
