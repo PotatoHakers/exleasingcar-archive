@@ -1428,6 +1428,96 @@ class ArchiveDatabase:
         with self._connect() as connection:
             return self._catalog_scan_progress(connection, scan_id)
 
+    @staticmethod
+    def _public_catalog_api_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
+        """Keep parser-required public auction fields; drop account-specific values.
+
+        The source response can include user_offer and actual_car_price. Those
+        values are account-specific and must never be persisted in the archive's
+        durable response queue.
+        """
+        public_car_fields = {
+            "car_id",
+            "highest_offer",
+            "text_minimali_kaina",
+            "text_orientacine_kaina",
+            "bid_status",
+            "aukciono_tipas",
+            "liko_s",
+        }
+        public_time_fields = {
+            "type",
+            "image",
+            "laikas",
+            "remainingSeconds",
+            "endDate",
+            "liveBidding",
+        }
+        result: dict[str, Any] = {}
+        for raw_car_id, raw_car_data in payload.items():
+            car_id = str(raw_car_id)
+            if raw_car_data is None:
+                result[car_id] = None
+                continue
+            if not isinstance(raw_car_data, Mapping):
+                # Preserve the key while discarding unexpected/non-object data.
+                result[car_id] = None
+                continue
+            safe_data = {
+                key: raw_car_data[key]
+                for key in public_car_fields
+                if key in raw_car_data
+            }
+            if "car_auction_time" in raw_car_data:
+                raw_time = raw_car_data["car_auction_time"]
+                if isinstance(raw_time, Mapping):
+                    safe_data["car_auction_time"] = {
+                        key: raw_time[key]
+                        for key in public_time_fields
+                        if key in raw_time
+                    }
+                else:
+                    safe_data["car_auction_time"] = None
+            result[car_id] = safe_data
+        return result
+
+    @classmethod
+    def _normalize_catalog_api_responses(
+        cls,
+        api_responses: Sequence[Mapping[str, Any]],
+    ) -> list[dict[str, Any]]:
+        if not isinstance(api_responses, Sequence) or isinstance(
+            api_responses, (str, bytes)
+        ):
+            raise TypeError("api_responses must be a sequence of mappings")
+        normalized: list[dict[str, Any]] = []
+        for response in api_responses:
+            if not isinstance(response, Mapping):
+                raise TypeError("each API response must be a mapping")
+            response_url = cls._validate_catalog_page_url(
+                response.get("url"), "api_response.url"
+            )
+            payload = response.get("payload")
+            if not isinstance(payload, Mapping):
+                raise TypeError("API response payload must be a mapping")
+            observed_at = response.get("observed_at")
+            if not isinstance(observed_at, datetime):
+                raise TypeError("API response observed_at must be a datetime")
+            normalized.append(
+                {
+                    "url": response_url,
+                    "payload": cls._public_catalog_api_payload(payload),
+                    "observed_at": cls._serialize_datetime(observed_at),
+                }
+            )
+        try:
+            json.dumps(normalized, ensure_ascii=False, sort_keys=True, allow_nan=False)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                "API response payloads must contain finite JSON-compatible values"
+            ) from exc
+        return normalized
+
     def record_catalog_page_completed(
         self,
         scan_id: int,
@@ -1488,39 +1578,15 @@ class ArchiveDatabase:
         except (TypeError, ValueError) as exc:
             raise ValueError("page_data must contain finite JSON-compatible values") from exc
 
-        if not isinstance(api_responses, Sequence) or isinstance(api_responses, (str, bytes)):
-            raise TypeError("api_responses must be a sequence of mappings")
-        normalized_api_responses: list[dict[str, Any]] = []
-        for response in api_responses:
-            if not isinstance(response, Mapping):
-                raise TypeError("each API response must be a mapping")
-            response_url = self._validate_catalog_page_url(
-                response.get("url"), "api_response.url"
-            )
-            payload = response.get("payload")
-            if not isinstance(payload, Mapping):
-                raise TypeError("API response payload must be a mapping")
-            response_observed_at = response.get("observed_at")
-            if not isinstance(response_observed_at, datetime):
-                raise TypeError("API response observed_at must be a datetime")
-            normalized_api_responses.append(
-                {
-                    "url": response_url,
-                    "payload": payload,
-                    "observed_at": self._serialize_datetime(response_observed_at),
-                }
-            )
-        try:
-            api_responses_json = json.dumps(
-                normalized_api_responses,
-                ensure_ascii=False,
-                sort_keys=True,
-                allow_nan=False,
-            )
-        except (TypeError, ValueError) as exc:
-            raise ValueError(
-                "API response payloads must contain finite JSON-compatible values"
-            ) from exc
+        normalized_api_responses = self._normalize_catalog_api_responses(
+            api_responses
+        )
+        api_responses_json = json.dumps(
+            normalized_api_responses,
+            ensure_ascii=False,
+            sort_keys=True,
+            allow_nan=False,
+        )
 
         timestamp = self._serialize_datetime(observed_at)
         with self._connect() as connection:
@@ -1722,6 +1788,81 @@ class ArchiveDatabase:
             if page.api_responses_processed < len(page.api_responses):
                 result.append(page)
         return tuple(result)
+
+    def append_catalog_api_responses(
+        self,
+        page_id: int,
+        api_responses: Sequence[Mapping[str, Any]],
+    ) -> int:
+        """Durably append API responses triggered by detail enrichment.
+
+        Responses are stored on the catalogue page that introduced the lot so
+        they remain associated with its auction and are replayable after a
+        process restart. Exact duplicate envelopes are ignored.
+        """
+        if isinstance(page_id, bool) or not isinstance(page_id, int) or page_id < 1:
+            raise ValueError("page_id must be a positive integer")
+        normalized = self._normalize_catalog_api_responses(api_responses)
+        if not normalized:
+            return 0
+
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                """
+                SELECT api_responses_json, api_responses_processed
+                FROM catalog_scan_pages
+                WHERE id = ?
+                """,
+                (page_id,),
+            ).fetchone()
+            if row is None:
+                raise KeyError(f"Unknown catalogue page id: {page_id}")
+            try:
+                existing = json.loads(str(row["api_responses_json"]))
+            except (TypeError, ValueError) as exc:
+                raise RuntimeError("Invalid persisted API response queue") from exc
+            if not isinstance(existing, list) or any(
+                not isinstance(item, Mapping) for item in existing
+            ):
+                raise TypeError("Invalid persisted API response queue")
+
+            existing_signatures = {
+                json.dumps(item, ensure_ascii=False, sort_keys=True, allow_nan=False)
+                for item in existing
+            }
+            appended = []
+            for item in normalized:
+                signature = json.dumps(
+                    item,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    allow_nan=False,
+                )
+                if signature in existing_signatures:
+                    continue
+                existing_signatures.add(signature)
+                appended.append(item)
+            if not appended:
+                return 0
+
+            connection.execute(
+                """
+                UPDATE catalog_scan_pages
+                SET api_responses_json = ?
+                WHERE id = ?
+                """,
+                (
+                    json.dumps(
+                        [*existing, *appended],
+                        ensure_ascii=False,
+                        sort_keys=True,
+                        allow_nan=False,
+                    ),
+                    page_id,
+                ),
+            )
+            return len(appended)
 
     def advance_catalog_api_response_cursor(
         self,
