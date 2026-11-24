@@ -1711,7 +1711,6 @@ class ArchiveDatabase:
                 JOIN catalog_scan_runs AS runs ON runs.id = pages.scan_run_id
                 JOIN auctions ON auctions.id = runs.auction_id
                 WHERE auctions.exleasingcar_auction_id = ?
-                  AND pages.api_responses_processed < 1000000000
                   AND pages.api_responses_json != '[]'
                 ORDER BY pages.completed_at, pages.id
                 """,
@@ -1728,8 +1727,6 @@ class ArchiveDatabase:
         self,
         page_id: int,
         expected_response_index: int,
-        *,
-        observed_at: datetime | None = None,
     ) -> bool:
         """Mark exactly one stored API response consumed using compare-and-swap."""
         for value, name in (
@@ -1740,7 +1737,6 @@ class ArchiveDatabase:
                 raise TypeError(f"{name} must be an integer")
             if value < (1 if name == "page_id" else 0):
                 raise ValueError(f"{name} is out of range")
-        timestamp = self._serialize_datetime(observed_at)
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             row = connection.execute(
@@ -1769,8 +1765,7 @@ class ArchiveDatabase:
             connection.execute(
                 """
                 UPDATE catalog_scan_pages
-                SET api_responses_processed = api_responses_processed + 1,
-                    completed_at = completed_at
+                SET api_responses_processed = api_responses_processed + 1
                 WHERE id = ? AND api_responses_processed = ?
                 """,
                 (page_id, expected_response_index),
