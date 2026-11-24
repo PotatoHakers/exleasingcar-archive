@@ -749,6 +749,7 @@ def test_catalogue_scan_resumes_api_and_detail_data_after_a_run_budget_pause(
     monkeypatch,
     tmp_path,
 ):
+    import sqlite3
     from datetime import datetime, timedelta, timezone
 
     from exleasingcar_archive import collector as collector_module
@@ -989,7 +990,6 @@ def test_catalogue_scan_resumes_api_and_detail_data_after_a_run_budget_pause(
     assert completed.pages_completed == 2
     assert database.get_pending_catalog_api_pages("210547") == ()
 
-    import sqlite3
 
     with sqlite3.connect(database.path) as connection:
         stored_prices = connection.execute(
