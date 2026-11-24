@@ -2043,6 +2043,39 @@ class ArchiveDatabase:
             )
             return max(0, cursor.rowcount)
 
+    def get_catalog_deferred_api_pages(
+        self,
+        exleasingcar_auction_id: str,
+    ) -> tuple[CatalogScanPage, ...]:
+        """Return checkpoint pages that still own unprocessed deferred lot updates.
+
+        Unlike get_pending_catalog_api_pages(), this includes entries whose sale
+        mode is still unknown so their saved detail URL and lot metadata can be
+        restored even after the lot disappears from the current catalogue.
+        """
+        auction_id = self._validate_identifier(
+            exleasingcar_auction_id, "exleasingcar_auction_id"
+        )
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT DISTINCT pages.id, pages.scan_run_id, pages.page_number,
+                       pages.page_url, pages.item_count, pages.completed_at,
+                       pages.page_data_json, pages.api_responses_json,
+                       pages.api_responses_processed
+                FROM catalog_scan_pages AS pages
+                JOIN catalog_scan_runs AS runs ON runs.id = pages.scan_run_id
+                JOIN auctions ON auctions.id = runs.auction_id
+                JOIN catalog_deferred_api_lots AS deferred
+                  ON deferred.page_id = pages.id
+                WHERE auctions.exleasingcar_auction_id = ?
+                  AND deferred.processed_at IS NULL
+                ORDER BY pages.completed_at, pages.id
+                """,
+                (auction_id,),
+            ).fetchall()
+        return tuple(self._catalog_scan_page_from_row(row) for row in rows)
+
     def get_pending_catalog_api_lot_updates(
         self,
         exleasingcar_auction_id: str,
