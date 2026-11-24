@@ -40,6 +40,8 @@ def test_database_initialization_creates_current_schema(tmp_path):
         "pdf_field_observations",
         "pdf_damage_observations",
         "media_derivatives",
+        "catalog_scan_runs",
+        "catalog_scan_pages",
     }.issubset(tables)
 
 
@@ -946,4 +948,256 @@ def test_v12_database_migrates_media_derivatives(tmp_path):
         row[2] == "media_assets" and row[3] == "derived_asset_id"
         for row in foreign_keys
     )
+    assert integrity_errors == []
+
+
+
+def test_catalog_scan_progress_resumes_from_the_last_completed_page(tmp_path):
+    database = ArchiveDatabase(tmp_path / "catalog-scan.sqlite3")
+    database.initialize()
+
+    first_url = "https://www.exleasingcar.com/auction-210547?page=1"
+    second_url = "https://www.exleasingcar.com/auction-210547?page=2"
+    scan = database.start_or_resume_catalog_scan(
+        "210547",
+        "bootstrap",
+        first_url,
+        observed_at=UTC_FIRST,
+    )
+
+    assert scan.status == "in_progress"
+    assert scan.next_page_url == first_url
+    assert scan.next_page_number == 1
+    assert scan.pages_completed == 0
+
+    assert database.record_catalog_page_completed(
+        scan.scan_id,
+        1,
+        first_url,
+        next_page_url=second_url,
+        next_page_number=2,
+        item_count=24,
+        observed_at=UTC_FIRST,
+    )
+    progress = database.get_catalog_scan_progress(scan.scan_id)
+    assert progress is not None
+    assert progress.next_page_url == second_url
+    assert progress.next_page_number == 2
+    assert progress.pages_completed == 1
+
+    # A restarted process receives the existing generation and saved cursor.
+    resumed = database.start_or_resume_catalog_scan(
+        "210547",
+        "bootstrap",
+        first_url,
+        observed_at=UTC_SECOND,
+    )
+    assert resumed.scan_id == scan.scan_id
+    assert resumed.initial_page_url == first_url
+    assert resumed.next_page_url == second_url
+    assert resumed.next_page_number == 2
+
+    # Replaying a page already checkpointed is idempotent.
+    assert not database.record_catalog_page_completed(
+        scan.scan_id,
+        1,
+        first_url,
+        next_page_url=second_url,
+        next_page_number=2,
+        item_count=24,
+        observed_at=UTC_SECOND,
+    )
+
+    assert database.record_catalog_page_completed(
+        scan.scan_id,
+        2,
+        second_url,
+        next_page_url=None,
+        next_page_number=None,
+        item_count=11,
+        observed_at=UTC_THIRD,
+    )
+    final_progress = database.get_catalog_scan_progress(scan.scan_id)
+    assert final_progress is not None
+    assert final_progress.next_page_url is None
+    assert final_progress.next_page_number is None
+    assert final_progress.pages_completed == 2
+    assert final_progress.status == "in_progress"
+
+    assert database.complete_catalog_scan(scan.scan_id, observed_at=UTC_THIRD)
+    assert not database.complete_catalog_scan(scan.scan_id, observed_at=UTC_THIRD)
+    completed = database.get_catalog_scan_progress(scan.scan_id)
+    assert completed is not None
+    assert completed.status == "completed"
+    assert completed.completed_at is not None
+
+    # A new scheduled pass starts a new scan generation only after completion.
+    next_scan = database.start_or_resume_catalog_scan(
+        "210547",
+        "routine",
+        first_url,
+        observed_at=UTC_THIRD,
+    )
+    assert next_scan.scan_id != scan.scan_id
+    assert next_scan.status == "in_progress"
+    assert next_scan.pages_completed == 0
+
+
+def test_catalog_scan_cannot_be_completed_while_a_page_is_pending(tmp_path):
+    database = ArchiveDatabase(tmp_path / "catalog-scan.sqlite3")
+    database.initialize()
+    first_url = "https://www.exleasingcar.com/auction-210547?page=1"
+    second_url = "https://www.exleasingcar.com/auction-210547?page=2"
+    scan = database.start_or_resume_catalog_scan("210547", "routine", first_url)
+
+    with pytest.raises(ValueError, match="pages remain"):
+        database.complete_catalog_scan(scan.scan_id)
+
+    database.record_catalog_page_completed(
+        scan.scan_id,
+        1,
+        first_url,
+        next_page_url=second_url,
+        next_page_number=2,
+        item_count=10,
+    )
+    with pytest.raises(ValueError, match="pages remain"):
+        database.complete_catalog_scan(scan.scan_id)
+
+    progress = database.get_catalog_scan_progress(scan.scan_id)
+    assert progress is not None
+    assert progress.status == "in_progress"
+    assert progress.pages_completed == 1
+    assert progress.next_page_url == second_url
+
+
+def test_catalog_scan_rejects_skipped_pages_and_repeated_pagination_urls(tmp_path):
+    database = ArchiveDatabase(tmp_path / "catalog-scan.sqlite3")
+    database.initialize()
+    first_url = "https://www.exleasingcar.com/auction-210547?page=1"
+    second_url = "https://www.exleasingcar.com/auction-210547?page=2"
+    scan = database.start_or_resume_catalog_scan("210547", "bootstrap", first_url)
+
+    with pytest.raises(ValueError, match="saved catalogue cursor"):
+        database.record_catalog_page_completed(
+            scan.scan_id,
+            2,
+            second_url,
+            next_page_url=None,
+            next_page_number=None,
+            item_count=10,
+        )
+
+    with pytest.raises(ValueError, match="repeat the current page"):
+        database.record_catalog_page_completed(
+            scan.scan_id,
+            1,
+            first_url,
+            next_page_url=first_url,
+            next_page_number=2,
+            item_count=10,
+        )
+
+    database.record_catalog_page_completed(
+        scan.scan_id,
+        1,
+        first_url,
+        next_page_url=second_url,
+        next_page_number=2,
+        item_count=10,
+    )
+    with pytest.raises(ValueError, match="already checkpointed"):
+        database.record_catalog_page_completed(
+            scan.scan_id,
+            2,
+            second_url,
+            next_page_url=first_url,
+            next_page_number=3,
+            item_count=9,
+        )
+
+    progress = database.get_catalog_scan_progress(scan.scan_id)
+    assert progress is not None
+    assert progress.next_page_url == second_url
+    assert progress.next_page_number == 2
+    assert progress.pages_completed == 1
+
+
+def test_only_one_incomplete_catalog_scan_can_exist_per_auction(tmp_path):
+    database = ArchiveDatabase(tmp_path / "catalog-scan.sqlite3")
+    database.initialize()
+    first_url = "https://www.exleasingcar.com/auction-210547?page=1"
+
+    scan = database.start_or_resume_catalog_scan("210547", "bootstrap", first_url)
+    with pytest.raises(RuntimeError, match="unfinished catalogue scan"):
+        database.start_or_resume_catalog_scan("210547", "routine", first_url)
+
+    resumed = database.start_or_resume_catalog_scan("210547", "bootstrap", first_url)
+    assert resumed.scan_id == scan.scan_id
+
+
+def test_catalog_scan_rejects_invalid_types_urls_and_counts(tmp_path):
+    database = ArchiveDatabase(tmp_path / "catalog-scan.sqlite3")
+    database.initialize()
+    with pytest.raises(ValueError, match="scan_type"):
+        database.start_or_resume_catalog_scan(
+            "210547", "unknown", "https://www.exleasingcar.com/auction-210547"
+        )
+    with pytest.raises(ValueError, match="HTTPS Exleasingcar"):
+        database.start_or_resume_catalog_scan(
+            "210547", "bootstrap", "https://example.com/auction-210547"
+        )
+    with pytest.raises(ValueError, match="HTTPS Exleasingcar"):
+        database.start_or_resume_catalog_scan(
+            "210547", "bootstrap", "http://www.exleasingcar.com/auction-210547"
+        )
+
+    scan = database.start_or_resume_catalog_scan(
+        "210547",
+        "bootstrap",
+        "https://www.exleasingcar.com/auction-210547?page=1",
+    )
+    with pytest.raises(ValueError, match="item_count"):
+        database.record_catalog_page_completed(
+            scan.scan_id,
+            1,
+            scan.next_page_url,
+            next_page_url=None,
+            next_page_number=None,
+            item_count=-1,
+        )
+
+
+def test_schema_v15_migrates_to_v16_without_touching_archive_rows(tmp_path):
+    database = ArchiveDatabase(tmp_path / "legacy-v15.sqlite3")
+    database.initialize()
+    database.upsert_auction(
+        "210547",
+        source_auction_name="BCA DE 3.3",
+        observed_at=UTC_FIRST,
+    )
+
+    with sqlite3.connect(database.path) as connection:
+        connection.execute("DROP TABLE catalog_scan_pages")
+        connection.execute("DROP TABLE catalog_scan_runs")
+        connection.execute("PRAGMA user_version = 15")
+
+    database.initialize()
+
+    with sqlite3.connect(database.path) as connection:
+        version = connection.execute("PRAGMA user_version").fetchone()[0]
+        auction = connection.execute(
+            "SELECT exleasingcar_auction_id, source_auction_name FROM auctions"
+        ).fetchone()
+        tables = {
+            row[0]
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'"
+            )
+        }
+        integrity_errors = connection.execute("PRAGMA foreign_key_check").fetchall()
+
+    assert version == SCHEMA_VERSION == 16
+    assert auction == ("210547", "BCA DE 3.3")
+    assert {"catalog_scan_runs", "catalog_scan_pages"}.issubset(tables)
     assert integrity_errors == []
