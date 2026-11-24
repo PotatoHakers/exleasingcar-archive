@@ -1197,7 +1197,7 @@ def test_schema_v15_migrates_to_v16_without_touching_archive_rows(tmp_path):
         }
         integrity_errors = connection.execute("PRAGMA foreign_key_check").fetchall()
 
-    assert version == SCHEMA_VERSION == 17
+    assert version == SCHEMA_VERSION == 18
     assert auction == ("210547", "BCA DE 3.3")
     assert {"catalog_scan_runs", "catalog_scan_pages"}.issubset(tables)
     assert integrity_errors == []
@@ -1450,6 +1450,87 @@ def test_catalogue_page_checkpoint_rejects_non_json_or_untrusted_api_data(tmp_pa
     assert progress.pages_completed == 0
 
 
+
+def test_deferred_api_lot_updates_are_sanitized_and_wait_for_known_sale_type(
+    tmp_path,
+):
+    database = ArchiveDatabase(tmp_path / "deferred-api-lots.sqlite3")
+    database.initialize()
+    auction_id = "auction-deferred-api"
+    page_url = "https://www.exleasingcar.com/auction-deferred-api?page=1"
+    api_url = "https://www.exleasingcar.com/ajax_update_car_form.v3.1.php"
+    scan = database.start_or_resume_catalog_scan(auction_id, "bootstrap", page_url)
+    database.upsert_vehicle("car-unknown")
+    database.upsert_auction_lot(
+        "car-unknown",
+        auction_id,
+        sale_type=None,
+        collection_eligible=False,
+    )
+
+    assert database.record_catalog_page_completed(
+        scan.scan_id,
+        1,
+        page_url,
+        next_page_url=None,
+        next_page_number=None,
+        item_count=1,
+        page_data={},
+    )
+    response = {
+        "url": api_url,
+        "payload": {
+            "car-unknown": {
+                "highest_offer": "9000",
+                "user_offer": "99999",
+                "actual_car_price": "88888",
+            }
+        },
+        "observed_at": UTC_FIRST,
+    }
+
+    page = database.get_catalog_scan_pages(scan.scan_id)[0]
+    assert database.defer_catalog_api_lot_updates(
+        page.page_id,
+        response,
+        {"car-unknown"},
+    ) == 1
+    assert database.defer_catalog_api_lot_updates(
+        page.page_id,
+        response,
+        {"car-unknown"},
+    ) == 0
+    assert database.get_pending_catalog_api_lot_updates(auction_id) == ()
+
+    raw_rows = database.get_catalog_scan_pages(scan.scan_id)[0].page_data
+    assert raw_rows == {}
+
+    database.set_auction_lot_qualification(
+        "car-unknown",
+        auction_id,
+        sale_type="open_auction",
+        has_fixed_price=False,
+        collection_eligible=False,
+        checked_at=UTC_SECOND,
+    )
+    pending = database.get_pending_catalog_api_lot_updates(auction_id)
+    assert len(pending) == 1
+    assert pending[0]["source_car_id"] == "car-unknown"
+    assert pending[0]["payload"] == {"car-unknown": {"highest_offer": "9000"}}
+    assert pending[0]["observed_at"] == (
+        UTC_FIRST.isoformat(timespec="microseconds").replace("+00:00", "Z")
+    )
+
+    assert database.mark_catalog_api_lot_update_processed(
+        pending[0]["id"],
+        observed_at=UTC_SECOND,
+    )
+    assert not database.mark_catalog_api_lot_update_processed(
+        pending[0]["id"],
+        observed_at=UTC_THIRD,
+    )
+    assert database.get_pending_catalog_api_lot_updates(auction_id) == ()
+
 def test_schema_v16_migrates_catalogue_page_payload_columns(tmp_path):
     database = ArchiveDatabase(tmp_path / "legacy-v16.sqlite3")
     database.initialize()
@@ -1495,3 +1576,11 @@ def test_schema_v16_migrates_catalogue_page_payload_columns(tmp_path):
         "api_responses_processed",
     }.issubset(columns)
     assert integrity_errors == []
+    with sqlite3.connect(database.path) as connection:
+        deferred_table = connection.execute(
+            """
+            SELECT COUNT(*) FROM sqlite_master
+            WHERE type = 'table' AND name = 'catalog_deferred_api_lots'
+            """
+        ).fetchone()[0]
+    assert deferred_table == 1
