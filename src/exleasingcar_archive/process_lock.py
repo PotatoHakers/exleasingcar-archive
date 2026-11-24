@@ -13,6 +13,8 @@ import os
 from pathlib import Path
 from typing import BinaryIO
 
+from typing_extensions import Self
+
 
 class CollectorAlreadyRunning(RuntimeError):
     """Raised when another process already owns the collector lock."""
@@ -80,7 +82,7 @@ class CollectorProcessLock:
             handle.close()
             self._handle = None
 
-    def __enter__(self) -> CollectorProcessLock:
+    def __enter__(self) -> Self:
         return self.acquire()
 
     def __exit__(self, exc_type: object, exc: object, traceback: object) -> bool:
