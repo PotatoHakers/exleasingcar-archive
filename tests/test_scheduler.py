@@ -7,6 +7,9 @@ from exleasingcar_archive.scheduler import (
     DeferredReason,
     DeferredWork,
     PlannerBudget,
+    RunBudget,
+    RunBudgetReason,
+    RunLimits,
     WorkType,
     plan_collection_work,
 )
@@ -250,4 +253,199 @@ def test_work_item_rejects_mismatched_costs():
             due_at=NOW,
             live_lots=1,
             catalog_pages=1,
+        )
+
+
+
+class FakeMonotonicClock:
+    def __init__(self, initial: float = 100.0):
+        self.current = initial
+
+    def __call__(self) -> float:
+        return self.current
+
+    def advance(self, seconds: float) -> None:
+        self.current += seconds
+
+
+def test_run_budget_tracks_catalogue_live_and_detail_units_atomically():
+    clock = FakeMonotonicClock()
+    run_budget = RunBudget(
+        RunLimits(
+            max_duration_seconds=30,
+            max_catalog_pages=2,
+            max_live_lots=3,
+            max_detail_pages=1,
+        ),
+        monotonic_clock=clock,
+    )
+
+    assert run_budget.try_consume(catalog_pages=1, live_lots=2) is None
+    assert run_budget.try_consume(catalog_pages=1, detail_pages=1) is None
+
+    snapshot = run_budget.snapshot()
+    assert snapshot.catalog_pages_used == 2
+    assert snapshot.live_lots_used == 2
+    assert snapshot.detail_pages_used == 1
+    assert snapshot.elapsed_seconds == 0
+    assert snapshot.remaining_seconds == 30
+    assert snapshot.expired is False
+
+    # Each exhausted resource returns its own reason without changing counters.
+    assert run_budget.try_consume(catalog_pages=1) is RunBudgetReason.MAX_CATALOG_PAGES
+    assert run_budget.try_consume(live_lots=2) is RunBudgetReason.MAX_LIVE_LOTS
+    assert run_budget.try_consume(detail_pages=1) is RunBudgetReason.MAX_DETAIL_PAGES
+
+    after_rejections = run_budget.snapshot()
+    assert after_rejections.catalog_pages_used == 2
+    assert after_rejections.live_lots_used == 2
+    assert after_rejections.detail_pages_used == 1
+
+
+def test_run_budget_enforces_monotonic_wall_clock_deadline():
+    clock = FakeMonotonicClock(250.0)
+    run_budget = RunBudget(
+        RunLimits(
+            max_duration_seconds=5,
+            max_catalog_pages=10,
+            max_live_lots=10,
+            max_detail_pages=10,
+        ),
+        monotonic_clock=clock,
+    )
+
+    assert run_budget.try_consume(catalog_pages=1) is None
+    clock.advance(4.9)
+    assert run_budget.try_consume(live_lots=1) is None
+    clock.advance(0.1)
+
+    assert run_budget.try_consume(detail_pages=1) is RunBudgetReason.WALL_CLOCK
+    snapshot = run_budget.snapshot()
+    assert snapshot.elapsed_seconds == pytest.approx(5.0)
+    assert snapshot.remaining_seconds == 0
+    assert snapshot.expired is True
+    assert snapshot.catalog_pages_used == 1
+    assert snapshot.live_lots_used == 1
+    assert snapshot.detail_pages_used == 0
+
+
+def test_run_budget_rejection_does_not_partially_consume_combined_request():
+    clock = FakeMonotonicClock()
+    run_budget = RunBudget(
+        RunLimits(
+            max_duration_seconds=10,
+            max_catalog_pages=1,
+            max_live_lots=0,
+            max_detail_pages=1,
+        ),
+        monotonic_clock=clock,
+    )
+
+    assert (
+        run_budget.try_consume(catalog_pages=1, live_lots=1)
+        is RunBudgetReason.MAX_LIVE_LOTS
+    )
+    assert run_budget.snapshot().catalog_pages_used == 0
+    assert run_budget.snapshot().live_lots_used == 0
+    assert run_budget.snapshot().detail_pages_used == 0
+
+    # The failed request above must not have consumed its otherwise-valid page.
+    assert run_budget.try_consume(catalog_pages=1) is None
+    assert run_budget.try_consume(detail_pages=1) is None
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"catalog_pages": -1},
+        {"live_lots": -1},
+        {"detail_pages": -1},
+        {"catalog_pages": True},
+        {"live_lots": 1.5},
+        {},
+    ],
+)
+def test_run_budget_rejects_invalid_or_empty_consumption(kwargs):
+    run_budget = RunBudget(
+        RunLimits(
+            max_duration_seconds=10,
+            max_catalog_pages=10,
+            max_live_lots=10,
+            max_detail_pages=10,
+        ),
+        monotonic_clock=FakeMonotonicClock(),
+    )
+
+    error = TypeError if any(
+        isinstance(value, bool) or not isinstance(value, int)
+        for value in kwargs.values()
+    ) else ValueError
+    with pytest.raises(error):
+        run_budget.try_consume(**kwargs)
+
+
+@pytest.mark.parametrize(
+    "duration",
+    [0, -1, float("nan"), float("inf"), float("-inf"), True],
+)
+def test_run_limits_reject_invalid_durations(duration):
+    with pytest.raises((TypeError, ValueError)):
+        RunLimits(
+            max_duration_seconds=duration,
+            max_catalog_pages=1,
+            max_live_lots=1,
+            max_detail_pages=1,
+        )
+
+
+def test_run_budget_rejects_a_clock_that_moves_backwards():
+    clock = FakeMonotonicClock(100)
+    run_budget = RunBudget(
+        RunLimits(
+            max_duration_seconds=10,
+            max_catalog_pages=1,
+            max_live_lots=1,
+            max_detail_pages=1,
+        ),
+        monotonic_clock=clock,
+    )
+    clock.advance(1)
+    assert run_budget.snapshot().elapsed_seconds == 1
+    clock.current = 100.5
+
+    with pytest.raises(ValueError, match="moved backwards"):
+        run_budget.try_consume(catalog_pages=1)
+
+
+def test_run_budget_rejects_non_finite_clock_values():
+    class InvalidClock:
+        def __init__(self):
+            self.value = 100.0
+
+        def __call__(self):
+            return self.value
+
+    clock = InvalidClock()
+    run_budget = RunBudget(
+        RunLimits(
+            max_duration_seconds=10,
+            max_catalog_pages=1,
+            max_live_lots=1,
+            max_detail_pages=1,
+        ),
+        monotonic_clock=clock,
+    )
+    clock.value = float("nan")
+
+    with pytest.raises(ValueError, match="finite"):
+        run_budget.snapshot()
+
+
+def test_run_budget_requires_valid_limits_and_clock():
+    with pytest.raises(TypeError, match="RunLimits"):
+        RunBudget(None)  # type: ignore[arg-type]
+    with pytest.raises(TypeError, match="callable"):
+        RunBudget(
+            RunLimits(10, 1, 1, 1),
+            monotonic_clock=None,  # type: ignore[arg-type]
         )
