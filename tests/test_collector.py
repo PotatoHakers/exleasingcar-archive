@@ -969,7 +969,7 @@ def test_catalogue_scan_resumes_api_and_detail_data_after_a_run_budget_pause(
         RunLimits(
             max_duration_seconds=60,
             max_catalog_pages=1,
-            max_live_lots=1,
+            max_live_lots=2,
             max_detail_pages=1,
         )
     )
