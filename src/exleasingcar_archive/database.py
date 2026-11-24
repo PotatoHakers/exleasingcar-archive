@@ -16,7 +16,7 @@ from .parsers import PriceObservation
 from .pdf_damage import PDFDamageObservation, PDFDamagePhotoReference
 from .pdf_fields import PDFExtractedField, PDFFieldProvenance, PDFFieldState
 
-SCHEMA_VERSION = 17
+SCHEMA_VERSION = 18
 DEFAULT_SOURCE = "ajax_update_car_form.v3.1.php"
 
 
@@ -185,6 +185,22 @@ CREATE TABLE IF NOT EXISTS catalog_scan_pages (
     FOREIGN KEY (scan_run_id) REFERENCES catalog_scan_runs(id) ON DELETE RESTRICT,
     UNIQUE (scan_run_id, page_number),
     UNIQUE (scan_run_id, page_url)
+)
+"""
+
+
+
+CATALOG_DEFERRED_API_LOTS_SQL = """
+CREATE TABLE IF NOT EXISTS catalog_deferred_api_lots (
+    id INTEGER PRIMARY KEY,
+    page_id INTEGER NOT NULL,
+    source_car_id TEXT NOT NULL,
+    source_url TEXT NOT NULL,
+    response_payload_json TEXT NOT NULL,
+    observed_at TEXT NOT NULL,
+    processed_at TEXT,
+    FOREIGN KEY (page_id) REFERENCES catalog_scan_pages(id) ON DELETE RESTRICT,
+    UNIQUE (page_id, source_car_id, source_url, response_payload_json, observed_at)
 )
 """
 
@@ -437,6 +453,7 @@ class ArchiveDatabase:
                     (14, self._migrate_v14_to_v15),
                     (15, self._migrate_v15_to_v16),
                     (16, self._migrate_v16_to_v17),
+                    (17, self._migrate_v17_to_v18),
                 )
                 for from_version, migration in migrations:
                     if version <= from_version:
@@ -466,6 +483,7 @@ class ArchiveDatabase:
             MEDIA_DERIVATIVES_SQL,
             CATALOG_SCAN_RUNS_SQL,
             CATALOG_SCAN_PAGES_SQL,
+            CATALOG_DEFERRED_API_LOTS_SQL,
         ):
             connection.execute(statement)
         ArchiveDatabase._create_indexes(connection)
@@ -556,6 +574,10 @@ class ArchiveDatabase:
             """
             CREATE INDEX IF NOT EXISTS idx_catalog_scan_pages_run
             ON catalog_scan_pages(scan_run_id, page_number)
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_catalog_deferred_api_pending
+            ON catalog_deferred_api_lots(source_car_id, processed_at, id)
             """,
         )
         for statement in statements:
@@ -812,6 +834,11 @@ class ArchiveDatabase:
             END
             """
         )
+
+    @classmethod
+    def _migrate_v17_to_v18(cls, connection: sqlite3.Connection) -> None:
+        """Keep unclassified public lot updates separately for later replay."""
+        connection.execute(CATALOG_DEFERRED_API_LOTS_SQL)
 
     @classmethod
     def _migrate_v16_to_v17(cls, connection: sqlite3.Connection) -> None:
@@ -1952,6 +1979,144 @@ class ArchiveDatabase:
             )
             for row in rows
         }
+
+
+    def defer_catalog_api_lot_updates(
+        self,
+        page_id: int,
+        api_response: Mapping[str, Any],
+        source_car_ids: set[str],
+    ) -> int:
+        """Split unknown-mode lots out of a bulk response without blocking known lots."""
+        if isinstance(page_id, bool) or not isinstance(page_id, int) or page_id < 1:
+            raise ValueError("page_id must be a positive integer")
+        if not isinstance(api_response, Mapping):
+            raise TypeError("api_response must be a mapping")
+        normalized_responses = self._normalize_catalog_api_responses((api_response,))
+        if len(normalized_responses) != 1:
+            raise ValueError("exactly one API response is required")
+        normalized = normalized_responses[0]
+        payload = normalized["payload"]
+        car_ids = sorted(
+            {self._validate_identifier(car_id, "source_car_id") for car_id in source_car_ids}
+        )
+        entries = []
+        for car_id in car_ids:
+            if car_id not in payload or payload[car_id] is None:
+                continue
+            payload_json = json.dumps(
+                {car_id: payload[car_id]},
+                ensure_ascii=False,
+                sort_keys=True,
+                allow_nan=False,
+            )
+            entries.append(
+                (
+                    page_id,
+                    car_id,
+                    normalized["url"],
+                    payload_json,
+                    normalized["observed_at"],
+                )
+            )
+        if not entries:
+            return 0
+
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            if connection.execute(
+                "SELECT 1 FROM catalog_scan_pages WHERE id = ?",
+                (page_id,),
+            ).fetchone() is None:
+                raise KeyError(f"Unknown catalogue page id: {page_id}")
+            cursor = connection.executemany(
+                """
+                INSERT INTO catalog_deferred_api_lots (
+                    page_id, source_car_id, source_url,
+                    response_payload_json, observed_at
+                ) VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT (
+                    page_id, source_car_id, source_url, response_payload_json, observed_at
+                ) DO NOTHING
+                """,
+                entries,
+            )
+            return max(0, cursor.rowcount)
+
+    def get_pending_catalog_api_lot_updates(
+        self,
+        exleasingcar_auction_id: str,
+    ) -> tuple[dict[str, Any], ...]:
+        """Return deferred payloads only after their auction lot has a known sale mode."""
+        auction_id = self._validate_identifier(
+            exleasingcar_auction_id, "exleasingcar_auction_id"
+        )
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT deferred.id, deferred.page_id, deferred.source_car_id,
+                       deferred.source_url, deferred.response_payload_json,
+                       deferred.observed_at
+                FROM catalog_deferred_api_lots AS deferred
+                JOIN catalog_scan_pages AS pages ON pages.id = deferred.page_id
+                JOIN catalog_scan_runs AS runs ON runs.id = pages.scan_run_id
+                JOIN auctions ON auctions.id = runs.auction_id
+                JOIN auction_lots ON auction_lots.auction_id = auctions.id
+                JOIN vehicles ON vehicles.id = auction_lots.vehicle_id
+                              AND vehicles.source_car_id = deferred.source_car_id
+                WHERE auctions.exleasingcar_auction_id = ?
+                  AND deferred.processed_at IS NULL
+                  AND auction_lots.sale_type IS NOT NULL
+                ORDER BY deferred.observed_at, deferred.id
+                """,
+                (auction_id,),
+            ).fetchall()
+        result = []
+        for row in rows:
+            try:
+                payload = json.loads(str(row["response_payload_json"]))
+            except (TypeError, ValueError) as exc:
+                raise RuntimeError(
+                    f"Invalid deferred API payload for lot {row['source_car_id']}"
+                ) from exc
+            if not isinstance(payload, Mapping):
+                raise TypeError("Invalid deferred API payload shape")
+            result.append(
+                {
+                    "id": int(row["id"]),
+                    "page_id": int(row["page_id"]),
+                    "source_car_id": str(row["source_car_id"]),
+                    "url": str(row["source_url"]),
+                    "payload": payload,
+                    "observed_at": str(row["observed_at"]),
+                }
+            )
+        return tuple(result)
+
+    def mark_catalog_api_lot_update_processed(
+        self,
+        deferred_update_id: int,
+        *,
+        observed_at: datetime | None = None,
+    ) -> bool:
+        """Mark one deferred lot payload processed after its archive writes commit."""
+        if (
+            isinstance(deferred_update_id, bool)
+            or not isinstance(deferred_update_id, int)
+            or deferred_update_id < 1
+        ):
+            raise ValueError("deferred_update_id must be a positive integer")
+        timestamp = self._serialize_datetime(observed_at)
+        with self._connect() as connection:
+            cursor = connection.execute(
+                """
+                UPDATE catalog_deferred_api_lots
+                SET processed_at = ?
+                WHERE id = ? AND processed_at IS NULL
+                """,
+                (timestamp, deferred_update_id),
+            )
+            return cursor.rowcount > 0
 
     def complete_catalog_scan(
         self,
