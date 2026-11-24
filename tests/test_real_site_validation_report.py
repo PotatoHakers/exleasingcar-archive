@@ -3,7 +3,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from exleasingcar_archive.database import ArchiveDatabase, SCHEMA_VERSION
+from exleasingcar_archive.database import SCHEMA_VERSION, ArchiveDatabase
 
 ROOT = Path(__file__).resolve().parents[1]
 REPORT_SCRIPT = ROOT / "real_site_validation_report.py"
