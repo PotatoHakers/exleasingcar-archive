@@ -1244,7 +1244,10 @@ def test_catalogue_page_checkpoint_persists_page_data_and_api_responses_atomical
     }
     api_responses = (
         {
-            "url": "https://www.exleasingcar.com/ajax_update_car_form.v3.1.php",
+            "url": (
+                "https://www.exleasingcar.com/ajax_update_car_form.v3.1.php"
+                "?session=account-secret&car_id=car-1"
+            ),
             "payload": {
                 "car-1": {
                     "highest_offer": "12000",
@@ -1286,6 +1289,10 @@ def test_catalogue_page_checkpoint_persists_page_data_and_api_responses_atomical
             },
         }
     }
+    assert pages[0].api_responses[0]["url"] == (
+        "https://www.exleasingcar.com/ajax_update_car_form.v3.1.php"
+    )
+    assert "account-secret" not in pages[0].api_responses[0]["url"]
     assert pages[0].api_responses[0]["observed_at"] == (
         response_time.isoformat(timespec="microseconds").replace("+00:00", "Z")
     )
