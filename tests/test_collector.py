@@ -764,8 +764,6 @@ def test_catalogue_scan_resumes_api_and_detail_data_after_a_run_budget_pause(
     from exleasingcar_archive.parsers import ParsedAuctionPage, ParsedLot
     from exleasingcar_archive.scheduler import RunBudget, RunLimits
 
-    from exleasingcar_archive import collector as collector_module
-
     first_url = "https://www.exleasingcar.com/auction-210547?page=1"
     second_url = "https://www.exleasingcar.com/auction-210547?page=2"
     observed_at = datetime(2026, 11, 24, 12, 0, tzinfo=timezone.utc)
