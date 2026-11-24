@@ -1786,12 +1786,24 @@ class ExleasingcarCollector:
         max_auctions: int,
         auction_id: str | None,
         max_detail_pages: int,
+        run_limits: RunLimits | None = None,
     ) -> CollectorSummary:
         """Open the persistent browser and collect a bounded auction scan."""
         if max_auctions < 0:
             raise ValueError("max_auctions must be zero (all) or a positive integer")
         if max_detail_pages < -1:
             raise ValueError("max_detail_pages must be -1 (all), 0 (none), or positive")
+
+        if run_limits is None:
+            run_limits = RunLimits(
+                max_duration_seconds=900,
+                max_catalog_pages=40,
+                max_live_lots=500,
+                max_detail_pages=60,
+            )
+        if not isinstance(run_limits, RunLimits):
+            raise TypeError("run_limits must be a RunLimits instance")
+        run_budget = RunBudget(run_limits)
 
         try:
             from playwright.sync_api import sync_playwright
@@ -1887,6 +1899,7 @@ class ExleasingcarCollector:
                         page,
                         snapshot_dir,
                         max_detail_pages=max_detail_pages,
+                        run_budget=run_budget,
                     )
                     pages_processed += page_count
                     lots_seen += lot_count
@@ -1973,6 +1986,30 @@ def build_argument_parser() -> argparse.ArgumentParser:
         default=1.5,
         help="Seconds to pause between page navigations (default: 1.5)",
     )
+    parser.add_argument(
+        "--max-run-seconds",
+        type=float,
+        default=900,
+        help="Maximum wall-clock duration for the entire invocation (default: 900)",
+    )
+    parser.add_argument(
+        "--max-catalog-pages-per-run",
+        type=int,
+        default=40,
+        help="Maximum catalogue page navigations across all auctions (default: 40)",
+    )
+    parser.add_argument(
+        "--max-live-lots-per-run",
+        type=int,
+        default=500,
+        help="Maximum open-lot API updates processed across all auctions (default: 500)",
+    )
+    parser.add_argument(
+        "--max-detail-pages-per-run",
+        type=int,
+        default=60,
+        help="Maximum detail pages across all auctions (default: 60)",
+    )
     return parser
 
 
@@ -1984,6 +2021,15 @@ def main() -> None:
         raise SystemExit("--max-detail-pages must be -1, 0 or a positive integer")
     if args.page_delay < 0:
         raise SystemExit("--page-delay cannot be negative")
+    try:
+        run_limits = RunLimits(
+            max_duration_seconds=args.max_run_seconds,
+            max_catalog_pages=args.max_catalog_pages_per_run,
+            max_live_lots=args.max_live_lots_per_run,
+            max_detail_pages=args.max_detail_pages_per_run,
+        )
+    except (TypeError, ValueError) as exc:
+        raise SystemExit(f"Invalid per-run collection limit: {exc}") from exc
 
     collector = ExleasingcarCollector(
         ArchiveDatabase(args.database),
@@ -1997,6 +2043,7 @@ def main() -> None:
         max_auctions=args.max_auctions,
         auction_id=args.auction_id,
         max_detail_pages=args.max_detail_pages,
+        run_limits=run_limits,
     )
     print("\nCollection completed")
     for field, value in asdict(summary).items():
