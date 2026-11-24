@@ -749,7 +749,7 @@ def test_catalogue_scan_resumes_api_and_detail_data_after_a_run_budget_pause(
     monkeypatch,
     tmp_path,
 ):
-    from datetime import datetime, timezone
+    from datetime import datetime, timedelta, timezone
 
     from exleasingcar_archive import collector as collector_module
     from exleasingcar_archive.collector import CapturedApiResponse
@@ -907,11 +907,15 @@ def test_catalogue_scan_resumes_api_and_detail_data_after_a_run_budget_pause(
     assert progress.next_page_url == second_url
     assert progress.next_page_number == 2
 
-    pending = database.get_pending_catalog_api_pages("210547")
-    assert len(pending) == 1
-    assert pending[0].api_responses[0]["payload"] == {
-        "car-1": {"highest_offer": "10000"}
-    }
+    assert database.get_pending_catalog_api_pages("210547") == ()
+    with sqlite3.connect(database.path) as connection:
+        deferred_count = connection.execute(
+            """
+            SELECT COUNT(*) FROM catalog_deferred_api_lots
+            WHERE processed_at IS NULL
+            """
+        ).fetchone()[0]
+    assert deferred_count == 1
 
     second_collector = ExleasingcarCollector(
         database,
@@ -951,7 +955,7 @@ def test_catalogue_scan_resumes_api_and_detail_data_after_a_run_budget_pause(
                         "actual_car_price": "654321",
                     }
                 },
-                observed_at=observed_at,
+                observed_at=observed_at + timedelta(minutes=1),
             )
         )
         return "open_auction"
@@ -1009,6 +1013,7 @@ def test_catalogue_scan_resumes_api_and_detail_data_after_a_run_budget_pause(
 
     assert stored_prices == [("10000",), ("11000",)]
     assert stored_detail_check is not None
+    assert database.get_pending_catalog_api_lot_updates("210547") == ()
 
     saved_api_responses = database.get_catalog_scan_pages(completed.scan_id)[0].api_responses
     assert len(saved_api_responses) == 2
