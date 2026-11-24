@@ -1189,3 +1189,89 @@ def test_unknown_sale_mode_does_not_block_public_updates_for_known_lots(tmp_path
     assert updated_unknown_lot == (SaleType.OPEN_AUCTION.value, 1)
     assert "car-unknown" in eligible_ids
     assert database.get_pending_catalog_api_lot_updates(auction_id) == ()
+
+
+def test_malformed_deferred_api_update_is_closed_without_losing_raw_snapshot(
+    monkeypatch,
+    tmp_path,
+):
+    import sqlite3
+    from datetime import datetime, timezone
+
+    from exleasingcar_archive import collector as collector_module
+    from exleasingcar_archive.collector import ExleasingcarCollector
+    from exleasingcar_archive.database import ArchiveDatabase
+    from exleasingcar_archive.ingestion import AuctionContext, LotMetadata
+    from exleasingcar_archive.models import SaleType
+
+    database = ArchiveDatabase(tmp_path / "malformed-deferred-api.sqlite3")
+    database.initialize()
+    auction_id = "auction-malformed-deferred"
+    observed_at = datetime(2026, 11, 24, 12, 0, tzinfo=timezone.utc)
+    database.upsert_auction(auction_id, observed_at=observed_at)
+    database.upsert_vehicle("car-deferred", observed_at=observed_at)
+    database.upsert_auction_lot(
+        "car-deferred",
+        auction_id,
+        sale_type=SaleType.OPEN_AUCTION,
+        collection_eligible=True,
+        observed_at=observed_at,
+    )
+    scan = database.start_or_resume_catalog_scan(
+        auction_id,
+        "bootstrap",
+        "https://www.exleasingcar.com/auction-malformed-deferred?page=1",
+        observed_at=observed_at,
+    )
+    assert database.record_catalog_page_completed(
+        scan.scan_id,
+        1,
+        "https://www.exleasingcar.com/auction-malformed-deferred?page=1",
+        next_page_url=None,
+        next_page_number=None,
+        item_count=1,
+        page_data={},
+        observed_at=observed_at,
+    )
+    page = database.get_catalog_scan_pages(scan.scan_id)[0]
+    assert database.defer_catalog_api_lot_updates(
+        page.page_id,
+        {
+            "url": "https://www.exleasingcar.com/ajax_update_car_form.v3.1.php",
+            "payload": {"car-deferred": {"highest_offer": "not-a-number"}},
+            "observed_at": observed_at,
+        },
+        {"car-deferred"},
+    ) == 1
+
+    def reject_payload(payload):
+        raise ValueError("synthetic invalid API payload")
+
+    monkeypatch.setattr(
+        collector_module,
+        "parse_car_update_response",
+        reject_payload,
+    )
+    collector = ExleasingcarCollector(
+        database,
+        tmp_path / "raw",
+        page_delay_seconds=0,
+    )
+    collector._persist_api_updates(
+        AuctionContext(auction_id),
+        {"car-deferred"},
+        {"car-deferred": LotMetadata()},
+        open_auction_car_ids={"car-deferred"},
+    )
+
+    assert database.get_pending_catalog_api_lot_updates(auction_id) == ()
+    with sqlite3.connect(database.path) as connection:
+        retained = connection.execute(
+            """
+            SELECT response_payload_json, processed_at
+            FROM catalog_deferred_api_lots
+            """
+        ).fetchone()
+    assert retained is not None
+    assert '"not-a-number"' in retained[0]
+    assert retained[1] is not None
