@@ -5,6 +5,7 @@ import pytest
 from exleasingcar_archive.scheduler import (
     CollectionWorkItem,
     DeferredReason,
+    DeferredWork,
     PlannerBudget,
     WorkType,
     plan_collection_work,
@@ -161,10 +162,8 @@ def test_estimated_runtime_budget_does_not_allow_a_later_item_to_be_overrun():
     )
 
     assert [item.work_id for item in result.selected] == ["short"]
-    assert result.deferred == (
-        # The larger first item is skipped; the smaller item still fits.
-        result.deferred[0],
-    )
+    # The larger first item is skipped; the smaller item still fits.
+    assert len(result.deferred) == 1
     assert result.deferred[0].item.work_id == "long"
     assert result.deferred[0].reason is DeferredReason.MAX_ESTIMATED_SECONDS
 
@@ -180,7 +179,7 @@ def test_future_work_is_returned_as_not_due_and_does_not_consume_reserve():
     result = plan_collection_work([future, live], now=NOW, budget=budget(max_items=1))
 
     assert [item.work_id for item in result.selected] == ["live"]
-    assert result.deferred == (type(result.deferred[0])(future, DeferredReason.NOT_DUE),)
+    assert result.deferred == (DeferredWork(future, DeferredReason.NOT_DUE),)
 
 
 def test_ties_are_broken_by_auction_and_target_ids():
