@@ -17,7 +17,16 @@ import sys
 from pathlib import Path
 from urllib.parse import quote
 
-EXPECTED_SCHEMA_VERSION = 13
+EXPECTED_SCHEMA_VERSION = 18
+REQUIRED_TABLES = (
+    "auctions",
+    "vehicles",
+    "auction_lots",
+    "catalog_scan_runs",
+    "catalog_scan_pages",
+    "catalog_deferred_api_lots",
+)
+
 TABLES = (
     "auctions",
     "vehicles",
@@ -32,6 +41,9 @@ TABLES = (
     "media_derivatives",
     "pdf_field_observations",
     "pdf_damage_observations",
+    "catalog_scan_runs",
+    "catalog_scan_pages",
+    "catalog_deferred_api_lots",
 )
 
 
@@ -116,6 +128,40 @@ def print_media_summary(connection: sqlite3.Connection, tables: set[str]) -> Non
         )
         if by_type["photo"] != 43 or by_type["report"] != 4:
             print("  NOTE: a different auction/lot scope can legitimately produce different totals.")
+
+
+def print_scheduler_summary(connection: sqlite3.Connection, tables: set[str]) -> None:
+    print("\\nCatalogue progress:")
+    if "catalog_scan_runs" not in tables:
+        print("  catalog_scan_runs: MISSING")
+        return
+
+    rows = connection.execute(
+        """
+        SELECT scan_type, status, COUNT(*) AS runs,
+               COALESCE(SUM(pages_completed), 0) AS pages_completed
+        FROM catalog_scan_runs
+        GROUP BY scan_type, status
+        ORDER BY scan_type, status
+        """
+    ).fetchall()
+    if rows:
+        for row in rows:
+            print(
+                f"  {row['scan_type']} / {row['status']}: "
+                f"runs={row['runs']}, pages_completed={row['pages_completed']}"
+            )
+    else:
+        print("  no catalogue scans recorded")
+
+    if "catalog_scan_pages" in tables:
+        page_count = count_rows(connection, "catalog_scan_pages")
+        print(f"  completed page checkpoints: {page_count}")
+    if "catalog_deferred_api_lots" in tables:
+        pending = connection.execute(
+            "SELECT COUNT(*) FROM catalog_deferred_api_lots WHERE processed_at IS NULL"
+        ).fetchone()[0]
+        print(f"  deferred API lot updates still pending: {pending}")
 
 
 def print_price_summary(connection: sqlite3.Connection, tables: set[str]) -> None:
@@ -212,13 +258,14 @@ def main() -> int:
         tables = table_names(connection)
 
         print("Exleasingcar Archive — local real-site validation report")
-        print(f"Database: {args.database}")
+        print(f"Database file: {args.database.name}")
         print(f"SQLite schema version: {version} (expected current: {EXPECTED_SCHEMA_VERSION})")
         print(f"SQLite integrity_check: {integrity}")
         print(f"Foreign-key violations: {len(foreign_key_errors)}")
 
         if version != EXPECTED_SCHEMA_VERSION:
-            print("  WARNING: database schema is not at the current application version.")
+            print("  ERROR: database schema is not at the current application version.")
+            errors += 1
         if integrity != "ok":
             errors += 1
         if foreign_key_errors:
@@ -230,9 +277,12 @@ def main() -> int:
                 print(f"  {table}: {count_rows(connection, table)}")
             else:
                 print(f"  {table}: not present")
+                if table in REQUIRED_TABLES:
+                    errors += 1
 
         print_media_summary(connection, tables)
         print_price_summary(connection, tables)
+        print_scheduler_summary(connection, tables)
 
         if "auction_lots" in tables:
             coverage = connection.execute(
