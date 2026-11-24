@@ -2,6 +2,7 @@ from pathlib import Path
 
 import pytest
 
+from exleasingcar_archive.collector import build_argument_parser
 from exleasingcar_archive.process_lock import (
     CollectorAlreadyRunning,
     CollectorProcessLock,
@@ -29,3 +30,11 @@ def test_process_lock_rejects_double_acquire_on_same_instance(tmp_path: Path):
     with lock:
         with pytest.raises(RuntimeError, match="already acquired"):
             lock.acquire()
+
+
+def test_collector_cli_accepts_an_explicit_lock_file(tmp_path: Path):
+    lock_path = tmp_path / "runtime" / "collector.lock"
+
+    args = build_argument_parser().parse_args(["--lock-file", str(lock_path)])
+
+    assert args.lock_file == lock_path
