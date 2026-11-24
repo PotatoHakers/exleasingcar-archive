@@ -1248,8 +1248,22 @@ class ArchiveDatabase:
     def _validate_catalog_page_url(value: str, field_name: str) -> str:
         normalized = ArchiveDatabase._validate_identifier(value, field_name)
         parsed = urlsplit(normalized)
-        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
-            raise ValueError(f"{field_name} must be an absolute HTTP(S) URL")
+        hostname = (parsed.hostname or "").lower().rstrip(".")
+        try:
+            port = parsed.port
+        except ValueError as exc:
+            raise ValueError(f"{field_name} has an invalid port") from exc
+        if (
+            parsed.scheme != "https"
+            or not (
+                hostname == "exleasingcar.com"
+                or hostname.endswith(".exleasingcar.com")
+            )
+            or parsed.username is not None
+            or parsed.password is not None
+            or port not in {None, 443}
+        ):
+            raise ValueError(f"{field_name} must be an HTTPS Exleasingcar URL")
         return normalized
 
     @staticmethod
