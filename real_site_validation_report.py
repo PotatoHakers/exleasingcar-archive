@@ -131,7 +131,7 @@ def print_media_summary(connection: sqlite3.Connection, tables: set[str]) -> Non
 
 
 def print_scheduler_summary(connection: sqlite3.Connection, tables: set[str]) -> None:
-    print("\\nCatalogue progress:")
+    print("\nCatalogue progress:")
     if "catalog_scan_runs" not in tables:
         print("  catalog_scan_runs: MISSING")
         return
