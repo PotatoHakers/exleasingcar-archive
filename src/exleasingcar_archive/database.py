@@ -1351,7 +1351,10 @@ class ArchiveDatabase:
                 UPDATE auction_lots
                 SET sale_type = ?,
                     has_fixed_price = ?,
-                    collection_eligible = ?,
+                    collection_eligible = CASE
+                        WHEN sale_type = ? AND collection_eligible = 1 THEN 1
+                        ELSE ?
+                    END,
                     last_detail_checked_at = ?
                 WHERE vehicle_id = (
                     SELECT id FROM vehicles WHERE source_car_id = ?
@@ -1363,6 +1366,7 @@ class ArchiveDatabase:
                 (
                     normalized_sale_type,
                     int(has_fixed_price),
+                    normalized_sale_type,
                     int(collection_eligible),
                     timestamp,
                     car_id,
@@ -1473,6 +1477,40 @@ class ArchiveDatabase:
                 (auction_id, *car_ids),
             ).fetchall()
         return {str(row["source_car_id"]): row["sale_type"] for row in rows}
+
+    def get_open_auction_lot_ids(
+        self,
+        exleasingcar_auction_id: str,
+        source_car_ids: set[str],
+    ) -> set[str]:
+        """Return known open-auction lots, including candidates not yet qualified."""
+        auction_id = self._validate_identifier(
+            exleasingcar_auction_id, "exleasingcar_auction_id"
+        )
+        car_ids = sorted(
+            {
+                self._validate_identifier(car_id, "source_car_id")
+                for car_id in source_car_ids
+            }
+        )
+        if not car_ids:
+            return set()
+        placeholders = ", ".join("?" for _ in car_ids)
+        with self._connect() as connection:
+            rows = connection.execute(
+                f"""
+                SELECT v.source_car_id
+                FROM auction_lots AS al
+                JOIN vehicles AS v ON v.id = al.vehicle_id
+                JOIN auctions AS a ON a.id = al.auction_id
+                WHERE a.exleasingcar_auction_id = ?
+                  AND v.source_car_id IN ({placeholders})
+                  AND al.sale_type = 'open_auction'
+                  AND al.monitoring_completed_at IS NULL
+                """,
+                (auction_id, *car_ids),
+            ).fetchall()
+        return {str(row["source_car_id"]) for row in rows}
 
     def mark_detail_attempted(
         self,

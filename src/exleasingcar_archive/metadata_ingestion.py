@@ -241,8 +241,28 @@ def import_html_snapshots(
         source_car_id=vehicle.source_car_id,
         page_url=vehicle_detail_url,
     )
-    has_fixed_price = parsed_detail.fixed_price is not None
-    collection_eligible = parsed_detail.should_archive
+    has_fixed_price = (
+        parsed_detail.fixed_price is not None
+        and parsed_detail.fixed_price.amount > 0
+    )
+    previously_eligible = database.get_collection_eligible_lots(
+        catalog.exleasingcar_auction_id,
+        {vehicle.source_car_id},
+    )
+    current_sale_type = (
+        parsed_detail.sale_type.value if parsed_detail.sale_type is not None else None
+    )
+    collection_eligible = parsed_detail.should_archive or (
+        vehicle.source_car_id in previously_eligible
+        and previously_eligible[vehicle.source_car_id] == current_sale_type
+    )
+    if (
+        parsed_api_updates is not None
+        and parsed_detail.sale_type is SaleType.OPEN_AUCTION
+    ):
+        current_update = parsed_api_updates.get(vehicle.source_car_id)
+        if current_update is not None and current_update.has_positive_highest_offer:
+            collection_eligible = True
     database.set_auction_lot_qualification(
         vehicle.source_car_id,
         catalog.exleasingcar_auction_id,
@@ -289,7 +309,7 @@ def import_html_snapshots(
             parsed_detail.displayed_auction_price,
             parsed_detail.fixed_price,
         ):
-            if price is None:
+            if price is None or price.amount <= 0:
                 continue
             lot_prices_inserted += int(
                 database.record_lot_price_observation(
