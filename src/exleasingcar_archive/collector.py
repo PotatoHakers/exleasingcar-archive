@@ -38,6 +38,7 @@ from .metadata_parser import (
 )
 from .models import PriceType, SaleType, VehicleStatus
 from .parsers import ParsedLot, PriceObservation, parse_auction_list
+from .scheduler import RunBudget, RunLimits
 
 try:
     from playwright.sync_api import Error as PlaywrightError
