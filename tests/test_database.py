@@ -1197,7 +1197,221 @@ def test_schema_v15_migrates_to_v16_without_touching_archive_rows(tmp_path):
         }
         integrity_errors = connection.execute("PRAGMA foreign_key_check").fetchall()
 
-    assert version == SCHEMA_VERSION == 16
+    assert version == SCHEMA_VERSION == 17
     assert auction == ("210547", "BCA DE 3.3")
     assert {"catalog_scan_runs", "catalog_scan_pages"}.issubset(tables)
+    assert integrity_errors == []
+
+
+
+def test_catalogue_page_checkpoint_persists_page_data_and_api_responses_atomically(
+    tmp_path,
+):
+    database = ArchiveDatabase(tmp_path / "catalogue-api-queue.sqlite3")
+    database.initialize()
+    first_url = "https://www.exleasingcar.com/auction-210547?page=1"
+    second_url = "https://www.exleasingcar.com/auction-210547?page=2"
+    response_time = datetime(2026, 11, 24, 12, 1, tzinfo=timezone.utc)
+    scan = database.start_or_resume_catalog_scan(
+        "210547", "bootstrap", first_url, observed_at=UTC_FIRST
+    )
+
+    page_data = {
+        "observed_at": UTC_FIRST.isoformat().replace("+00:00", "Z"),
+        "lots_seen": 1,
+        "detail_urls": {"car-1": "https://www.exleasingcar.com/ru/auto-details/car-1"},
+        "catalog_lot_metadata": [
+            {
+                "source_car_id": "car-1",
+                "displayed_title": "Ford Focus",
+                "displayed_lot_reference": "LOT-1",
+                "listing_code_attribute": "code-1",
+                "make_label": "Ford",
+                "mileage_km": 12000,
+            }
+        ],
+        "catalog_lots": [
+            {
+                "source_car_id": "car-1",
+                "title": "Ford Focus",
+                "source_url": "https://www.exleasingcar.com/ru/auto-details/car-1",
+                "status": "active",
+                "raw_status": "Active",
+                "is_hot_bid": False,
+                "current_price": None,
+            }
+        ],
+    }
+    api_responses = (
+        {
+            "url": "https://www.exleasingcar.com/ajax_update_car_form.v3.1.php",
+            "payload": {"car-1": {"highest_offer": "12000"}},
+            "observed_at": response_time,
+        },
+    )
+
+    assert database.record_catalog_page_completed(
+        scan.scan_id,
+        1,
+        first_url,
+        next_page_url=second_url,
+        next_page_number=2,
+        item_count=1,
+        page_data=page_data,
+        api_responses=api_responses,
+        observed_at=UTC_SECOND,
+    )
+
+    pages = database.get_catalog_scan_pages(scan.scan_id)
+    assert len(pages) == 1
+    assert pages[0].page_data == page_data
+    assert pages[0].api_responses_processed == 0
+    assert pages[0].api_responses[0]["payload"] == {
+        "car-1": {"highest_offer": "12000"}
+    }
+    assert pages[0].api_responses[0]["observed_at"] == (
+        response_time.isoformat(timespec="microseconds").replace("+00:00", "Z")
+    )
+
+    pending = database.get_pending_catalog_api_pages("210547")
+    assert len(pending) == 1
+    assert pending[0].page_id == pages[0].page_id
+
+    assert database.advance_catalog_api_response_cursor(pages[0].page_id, 0)
+    assert not database.advance_catalog_api_response_cursor(pages[0].page_id, 0)
+    assert database.get_pending_catalog_api_pages("210547") == ()
+
+
+def test_catalogue_api_response_cursor_can_be_resumed_after_partial_processing(
+    tmp_path,
+):
+    database = ArchiveDatabase(tmp_path / "catalogue-api-resume.sqlite3")
+    database.initialize()
+    first_url = "https://www.exleasingcar.com/auction-210547?page=1"
+    scan = database.start_or_resume_catalog_scan("210547", "bootstrap", first_url)
+
+    responses = tuple(
+        {
+            "url": "https://www.exleasingcar.com/ajax_update_car_form.v3.1.php",
+            "payload": {f"car-{number}": {"highest_offer": str(number * 1000)}},
+            "observed_at": UTC_FIRST,
+        }
+        for number in range(1, 4)
+    )
+    assert database.record_catalog_page_completed(
+        scan.scan_id,
+        1,
+        first_url,
+        next_page_url=None,
+        next_page_number=None,
+        item_count=3,
+        page_data={"lots_seen": 3},
+        api_responses=responses,
+    )
+
+    page = database.get_catalog_scan_pages(scan.scan_id)[0]
+    assert database.advance_catalog_api_response_cursor(page.page_id, 0)
+    pending = database.get_pending_catalog_api_pages("210547")
+    assert len(pending) == 1
+    assert pending[0].api_responses_processed == 1
+    assert pending[0].api_responses[1]["payload"] == {
+        "car-2": {"highest_offer": "2000"}
+    }
+
+    # A fresh database object sees the same durable response cursor.
+    resumed = ArchiveDatabase(database.path).get_pending_catalog_api_pages("210547")
+    assert len(resumed) == 1
+    assert resumed[0].api_responses_processed == 1
+
+    with pytest.raises(ValueError, match="cursor moved"):
+        database.advance_catalog_api_response_cursor(page.page_id, 0)
+
+    assert database.advance_catalog_api_response_cursor(page.page_id, 1)
+    assert database.advance_catalog_api_response_cursor(page.page_id, 2)
+    assert database.get_pending_catalog_api_pages("210547") == ()
+
+
+def test_catalogue_page_checkpoint_rejects_non_json_or_untrusted_api_data(tmp_path):
+    database = ArchiveDatabase(tmp_path / "catalogue-api-validation.sqlite3")
+    database.initialize()
+    page_url = "https://www.exleasingcar.com/auction-210547?page=1"
+    scan = database.start_or_resume_catalog_scan("210547", "bootstrap", page_url)
+
+    with pytest.raises(ValueError, match="finite JSON-compatible"):
+        database.record_catalog_page_completed(
+            scan.scan_id,
+            1,
+            page_url,
+            next_page_url=None,
+            next_page_number=None,
+            item_count=0,
+            page_data={"bad": float("nan")},
+        )
+
+    with pytest.raises(ValueError, match="HTTPS Exleasingcar"):
+        database.record_catalog_page_completed(
+            scan.scan_id,
+            1,
+            page_url,
+            next_page_url=None,
+            next_page_number=None,
+            item_count=0,
+            api_responses=(
+                {
+                    "url": "https://example.com/api",
+                    "payload": {},
+                    "observed_at": UTC_FIRST,
+                },
+            ),
+        )
+
+    progress = database.get_catalog_scan_progress(scan.scan_id)
+    assert progress is not None
+    assert progress.pages_completed == 0
+
+
+def test_schema_v16_migrates_catalogue_page_payload_columns(tmp_path):
+    database = ArchiveDatabase(tmp_path / "legacy-v16.sqlite3")
+    database.initialize()
+    with sqlite3.connect(database.path) as connection:
+        connection.execute("DROP INDEX IF EXISTS idx_catalog_scan_one_active_per_auction")
+        connection.execute("DROP INDEX IF EXISTS idx_catalog_scan_pages_run")
+        connection.execute(
+            """
+            CREATE TABLE catalog_scan_pages_v16 (
+                id INTEGER PRIMARY KEY,
+                scan_run_id INTEGER NOT NULL,
+                page_number INTEGER NOT NULL,
+                page_url TEXT NOT NULL,
+                item_count INTEGER NOT NULL,
+                completed_at TEXT NOT NULL,
+                FOREIGN KEY (scan_run_id)
+                    REFERENCES catalog_scan_runs(id) ON DELETE RESTRICT,
+                UNIQUE (scan_run_id, page_number),
+                UNIQUE (scan_run_id, page_url)
+            )
+            """
+        )
+        connection.execute("DROP TABLE catalog_scan_pages")
+        connection.execute(
+            "ALTER TABLE catalog_scan_pages_v16 RENAME TO catalog_scan_pages"
+        )
+        connection.execute("PRAGMA user_version = 16")
+
+    database.initialize()
+
+    with sqlite3.connect(database.path) as connection:
+        version = connection.execute("PRAGMA user_version").fetchone()[0]
+        columns = {
+            row[1]
+            for row in connection.execute("PRAGMA table_info(catalog_scan_pages)")
+        }
+        integrity_errors = connection.execute("PRAGMA foreign_key_check").fetchall()
+
+    assert version == SCHEMA_VERSION == 17
+    assert {
+        "page_data_json",
+        "api_responses_json",
+        "api_responses_processed",
+    }.issubset(columns)
     assert integrity_errors == []
