@@ -122,7 +122,6 @@ class ApiResponseRecorder:
         self.responses: list[CapturedApiResponse] = []
         self.errors: list[str] = []
         self.pending_requests: dict[int, Any] = {}
-        self._timed_out_request_ids: set[int] = set()
         self._responses_captured: set[int] = set()
 
     def attach(self, context: Any) -> None:
@@ -189,7 +188,6 @@ class ApiResponseRecorder:
         request_id = id(request)
         if self.pending_requests.pop(request_id, None) is None:
             return
-        self._timed_out_request_ids.discard(request_id)
         if request_id not in self._responses_captured:
             # Retry after the response body has fully downloaded. This covers
             # transient Network.getResponseBody failures in the response event.
@@ -214,7 +212,6 @@ class ApiResponseRecorder:
         request_id = id(request)
         if self.pending_requests.pop(request_id, None) is None:
             return
-        self._timed_out_request_ids.discard(request_id)
         if request_id in self._responses_captured:
             # The full response body was already retained successfully.
             self._responses_captured.discard(request_id)
@@ -236,20 +233,9 @@ class ApiResponseRecorder:
         while self.pending_requests and time.monotonic() < deadline:
             page.wait_for_timeout(50)
 
-        pending_ids = set(self.pending_requests)
-        newly_timed_out = pending_ids - self._timed_out_request_ids
-        if newly_timed_out:
-            urls = sorted(
-                {
-                    str(self.pending_requests[request_id].url)
-                    for request_id in newly_timed_out
-                }
-            )
-            self.errors.append(
-                f"Timed out waiting for {len(newly_timed_out)} API request(s) "
-                f"before navigation: {'; '.join(urls)}"
-            )
-            self._timed_out_request_ids.update(newly_timed_out)
+        # A timeout is a pause signal, not a confirmed capture failure. The
+        # caller must stop before navigation, while the request may still
+        # complete and be captured by a later event.
         return not self.pending_requests
 
     # Compatibility hook for direct recorder tests.
