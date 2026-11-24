@@ -400,3 +400,28 @@ def test_parse_vehicle_media_extracts_gallery_originals_and_unique_reports():
     assert reports[0].label == "Inspection Report"
     assert reports[1].source_url.endswith("report-b.pdf")
     assert [item.source_order for item in media] == [0, 1, 2, 3]
+
+
+def test_parse_vehicle_media_when_gallery_area_is_also_gallery_thumbs():
+    # Some live page variants put both the ID and gallery class on the same
+    # element. A descendant-only ".gallery-thumbs" selector misses its links.
+    html = """
+    <html><body>
+      <div id="gallery-area" class="gallery-thumbs">
+        <a onclick="change_thumb(this, 'https://data.exleasingcar.com/car-normal.jpg')">
+          <img src="https://data.exleasingcar.com/car-small.jpg">
+        </a>
+      </div>
+    </body></html>
+    """
+
+    media = parse_vehicle_media(
+        html,
+        "https://www.exleasingcar.com/ru/auto-details/12345",
+    )
+
+    assert len(media) == 1
+    assert media[0].media_type == "photo"
+    assert media[0].source_url.endswith("car-normal.jpg")
+    assert media[0].preview_url is not None
+    assert media[0].preview_url.endswith("car-small.jpg")
