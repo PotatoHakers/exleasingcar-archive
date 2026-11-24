@@ -370,6 +370,8 @@ def _restore_catalog_page_datetime(value: str) -> datetime:
 
 def _restore_catalog_page_data(
     page_data: Mapping[str, Any],
+    *,
+    fallback_observed_at: str | None = None,
 ) -> tuple[
     tuple[ParsedAuctionLotMetadata, ...],
     tuple[ParsedLot, ...],
@@ -378,7 +380,10 @@ def _restore_catalog_page_data(
     int,
 ]:
     """Rebuild typed page observations from the JSON checkpoint."""
-    observed_at = _restore_catalog_page_datetime(str(page_data["observed_at"]))
+    observed_value = page_data.get("observed_at") or fallback_observed_at
+    if observed_value is None:
+        raise ValueError("Persisted catalogue page has no observation timestamp")
+    observed_at = _restore_catalog_page_datetime(str(observed_value))
     metadata = tuple(
         ParsedAuctionLotMetadata(**item)
         for item in page_data.get("catalog_lot_metadata", [])
@@ -598,6 +603,9 @@ class ExleasingcarCollector:
             deferred_update_id: int | None = None,
         ) -> bool:
             """Process one response; False means it must remain in the durable queue."""
+            if run_budget is not None and run_budget.snapshot().expired:
+                print("  API response deferred by the per-run wall-clock limit.")
+                return False
             self.api_responses_seen += 1
             try:
                 updates = parse_car_update_response(captured.payload)
@@ -1631,7 +1639,10 @@ class ExleasingcarCollector:
                 saved_detail_urls,
                 page_observed_at,
                 page_lots_seen,
-            ) = _restore_catalog_page_data(saved_page.page_data)
+            ) = _restore_catalog_page_data(
+                saved_page.page_data,
+                fallback_observed_at=saved_page.completed_at,
+            )
             all_lot_metadata.update(
                 {item.source_car_id: _lot_metadata(item) for item in page_metadata}
             )
@@ -1661,7 +1672,10 @@ class ExleasingcarCollector:
                 saved_detail_urls,
                 page_observed_at,
                 page_lots_seen,
-            ) = _restore_catalog_page_data(pending_page.page_data)
+            ) = _restore_catalog_page_data(
+                pending_page.page_data,
+                fallback_observed_at=pending_page.completed_at,
+            )
             all_lot_metadata.update(
                 {item.source_car_id: _lot_metadata(item) for item in page_metadata}
             )
