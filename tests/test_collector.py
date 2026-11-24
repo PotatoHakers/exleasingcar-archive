@@ -488,7 +488,7 @@ def test_api_response_recorder_reports_non_json_http_response():
 
     assert recorder.responses == []
     assert len(recorder.errors) == 1
-    assert "content-type=text/html" in recorder.errors
+    assert "content-type=text/html" in recorder.errors[0]
 
 
 def test_api_response_recorder_reports_abort_after_response_headers_once():
