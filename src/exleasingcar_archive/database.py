@@ -9,7 +9,7 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlsplit
+from urllib.parse import urlsplit, urlunsplit
 
 from .models import AuctionCardMarker, PriceType, SaleType
 from .parsers import PriceObservation
@@ -1494,8 +1494,14 @@ class ArchiveDatabase:
         for response in api_responses:
             if not isinstance(response, Mapping):
                 raise TypeError("each API response must be a mapping")
-            response_url = cls._validate_catalog_page_url(
+            validated_url = cls._validate_catalog_page_url(
                 response.get("url"), "api_response.url"
+            )
+            parsed_url = urlsplit(validated_url)
+            # API query strings are not needed for replay and can contain
+            # account/session-specific parameters.
+            response_url = urlunsplit(
+                (parsed_url.scheme, parsed_url.netloc, parsed_url.path, "", "")
             )
             payload = response.get("payload")
             if not isinstance(payload, Mapping):
