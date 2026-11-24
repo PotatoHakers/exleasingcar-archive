@@ -743,3 +743,266 @@ def test_dismiss_notification_prompt_never_grants_permission():
 
     assert container.clicked == 0
     assert all("ALLOW" not in pattern for pattern in container.role_queries)
+
+
+def test_catalogue_scan_resumes_api_and_detail_data_after_a_run_budget_pause(
+    monkeypatch,
+    tmp_path,
+):
+    from datetime import datetime, timezone
+
+    from exleasingcar_archive.collector import CapturedApiResponse
+    from exleasingcar_archive.database import ArchiveDatabase
+    from exleasingcar_archive.ingestion import AuctionContext
+    from exleasingcar_archive.metadata_parser import (
+        ParsedAuctionCatalogMetadata,
+        ParsedAuctionListing,
+        ParsedAuctionLotMetadata,
+        ParsedCatalogPagination,
+    )
+    from exleasingcar_archive.models import AuctionStatus, SaleType, VehicleStatus
+    from exleasingcar_archive.parsers import ParsedAuctionPage, ParsedLot
+    from exleasingcar_archive.scheduler import RunBudget, RunLimits
+
+    from exleasingcar_archive import collector as collector_module
+
+    first_url = "https://www.exleasingcar.com/auction-210547?page=1"
+    second_url = "https://www.exleasingcar.com/auction-210547?page=2"
+    observed_at = datetime(2026, 11, 24, 12, 0, tzinfo=timezone.utc)
+    database = ArchiveDatabase(tmp_path / "resumable-collector.sqlite3")
+    database.initialize()
+
+    listing = ParsedAuctionListing(
+        exleasingcar_auction_id="210547",
+        source_auction_name="BCA DE",
+        source_auction_country_code="DE",
+        source_auction_country_name="Germany",
+        auction_type_label="English auction",
+        auction_status_label="ACTIVE",
+        vehicle_count=1,
+        source_url=first_url,
+        markers=(),
+    )
+
+    first_catalog_lot = ParsedAuctionLotMetadata(
+        source_car_id="car-1",
+        displayed_title="Ford Focus",
+        displayed_lot_reference="LOT-1",
+        listing_code_attribute="code-1",
+        make_label="Ford",
+        mileage_km=12000,
+    )
+    first_status_lot = ParsedLot(
+        source_car_id="car-1",
+        title="Ford Focus",
+        source_url="https://www.exleasingcar.com/ru/auto-details/car-1",
+        status=VehicleStatus.ACTIVE,
+        raw_status="Active",
+        is_hot_bid=False,
+        current_price=None,
+    )
+
+    def parse_catalog(html, page_url):
+        if page_url == first_url:
+            return ParsedAuctionCatalogMetadata("210547", (first_catalog_lot,))
+        return ParsedAuctionCatalogMetadata("210547", ())
+
+    def parse_status(html, page_url):
+        lots = (first_status_lot,) if page_url == first_url else ()
+        return ParsedAuctionPage(
+            source_auction_id="210547",
+            status=AuctionStatus.ACTIVE,
+            raw_status="ACTIVE",
+            lots=lots,
+        )
+
+    def parse_pagination(html, page_url):
+        return ParsedCatalogPagination(
+            current_page_url=page_url,
+            current_page_number=1 if page_url == first_url else 2,
+            page_urls=(first_url, second_url),
+            next_page_url=second_url if page_url == first_url else None,
+        )
+
+    monkeypatch.setattr(
+        collector_module,
+        "_wait_for_dynamic_content",
+        lambda page: None,
+    )
+    monkeypatch.setattr(
+        collector_module,
+        "parse_auction_catalog_metadata",
+        parse_catalog,
+    )
+    monkeypatch.setattr(collector_module, "parse_auction_list", parse_status)
+    monkeypatch.setattr(
+        collector_module,
+        "parse_catalog_pagination",
+        parse_pagination,
+    )
+    monkeypatch.setattr(
+        collector_module,
+        "extract_vehicle_detail_urls",
+        lambda html, url: (
+            {"car-1": "https://www.exleasingcar.com/ru/auto-details/car-1"}
+            if url == first_url
+            else {}
+        ),
+    )
+
+    class FakePage:
+        def __init__(self, capture_api=False):
+            self.url = ""
+            self.capture_api = capture_api
+            self.goto_calls = []
+
+        def goto(self, url, **kwargs):
+            self.goto_calls.append(url)
+            self.url = url
+            if self.capture_api and url == first_url:
+                first_collector.recorder.responses.append(
+                    CapturedApiResponse(
+                        url=(
+                            "https://www.exleasingcar.com/"
+                            "ajax_update_car_form.v3.1.php"
+                        ),
+                        payload={"car-1": {"highest_offer": "10000"}},
+                        observed_at=observed_at,
+                    )
+                )
+
+        def content(self):
+            return "<html><body>synthetic catalogue</body></html>"
+
+    first_collector = ExleasingcarCollector(
+        database,
+        tmp_path / "raw",
+        page_delay_seconds=0,
+    )
+    first_page = FakePage(capture_api=True)
+    monkeypatch.setattr(
+        first_collector.recorder,
+        "wait_for_pending",
+        lambda page: True,
+    )
+    first_budget = RunBudget(
+        RunLimits(
+            max_duration_seconds=60,
+            max_catalog_pages=1,
+            max_live_lots=1,
+            max_detail_pages=0,
+        )
+    )
+
+    first_collector._collect_auction(
+        listing,
+        first_page,
+        tmp_path / "snapshots-first",
+        max_detail_pages=0,
+        run_budget=first_budget,
+    )
+
+    assert first_page.goto_calls == [first_url]
+    progress = database.get_catalog_scan_progress(1)
+    assert progress is not None
+    assert progress.status == "in_progress"
+    assert progress.next_page_url == second_url
+    assert progress.next_page_number == 2
+
+    pending = database.get_pending_catalog_api_pages("210547")
+    assert len(pending) == 1
+    assert pending[0].api_responses[0]["payload"] == {
+        "car-1": {"highest_offer": "10000"}
+    }
+
+    second_collector = ExleasingcarCollector(
+        database,
+        tmp_path / "raw",
+        page_delay_seconds=0,
+    )
+    second_page = FakePage()
+    monkeypatch.setattr(
+        second_collector.recorder,
+        "wait_for_pending",
+        lambda page: True,
+    )
+
+    def enrich_open_lot(
+        auction,
+        car_id,
+        detail_url,
+        page,
+        detail_observed_at,
+        auction_dir,
+    ):
+        database.set_auction_lot_qualification(
+            car_id,
+            "210547",
+            sale_type=SaleType.OPEN_AUCTION,
+            has_fixed_price=False,
+            collection_eligible=True,
+            checked_at=detail_observed_at,
+        )
+        return "open_auction"
+
+    monkeypatch.setattr(
+        second_collector,
+        "_enrich_vehicle_detail",
+        enrich_open_lot,
+    )
+    second_budget = RunBudget(
+        RunLimits(
+            max_duration_seconds=60,
+            max_catalog_pages=1,
+            max_live_lots=1,
+            max_detail_pages=1,
+        )
+    )
+
+    second_collector._collect_auction(
+        listing,
+        second_page,
+        tmp_path / "snapshots-second",
+        max_detail_pages=1,
+        run_budget=second_budget,
+    )
+
+    assert second_page.goto_calls == [second_url]
+    completed = database.get_catalog_scan_progress(1)
+    assert completed is not None
+    assert completed.status == "completed"
+    assert completed.pages_completed == 2
+    assert database.get_pending_catalog_api_pages("210547") == ()
+
+    import sqlite3
+
+    with sqlite3.connect(database.path) as connection:
+        stored_price = connection.execute(
+            """
+            SELECT highest_offer
+            FROM price_observations
+            JOIN auction_lots ON auction_lots.id = price_observations.auction_lot_id
+            JOIN vehicles ON vehicles.id = auction_lots.vehicle_id
+            WHERE vehicles.source_car_id = 'car-1'
+            """
+        ).fetchone()
+        stored_detail_check = connection.execute(
+            """
+            SELECT last_detail_checked_at
+            FROM auction_lots
+            JOIN vehicles ON vehicles.id = auction_lots.vehicle_id
+            WHERE vehicles.source_car_id = 'car-1'
+            """
+        ).fetchone()[0]
+
+    assert stored_price == ("10000",)
+    assert stored_detail_check is not None
+
+
+def test_collector_cli_exposes_safe_run_wide_limits():
+    args = build_argument_parser().parse_args([])
+
+    assert args.max_run_seconds == 900
+    assert args.max_catalog_pages_per_run == 40
+    assert args.max_live_lots_per_run == 500
+    assert args.max_detail_pages_per_run == 60
