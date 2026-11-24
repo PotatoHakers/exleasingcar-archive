@@ -1026,3 +1026,114 @@ def test_collector_cli_exposes_safe_run_wide_limits():
     assert args.max_catalog_pages_per_run == 40
     assert args.max_live_lots_per_run == 500
     assert args.max_detail_pages_per_run == 60
+
+
+def test_unknown_sale_mode_does_not_block_public_updates_for_known_lots(tmp_path):
+    import sqlite3
+    from datetime import datetime, timezone
+
+    from exleasingcar_archive.collector import ExleasingcarCollector
+    from exleasingcar_archive.database import ArchiveDatabase
+    from exleasingcar_archive.ingestion import AuctionContext, LotMetadata
+    from exleasingcar_archive.models import SaleType
+
+    database = ArchiveDatabase(tmp_path / "unknown-mode-queue.sqlite3")
+    database.initialize()
+    auction_id = "auction-known-and-unknown"
+    page_url = "https://www.exleasingcar.com/auction-known-and-unknown?page=1"
+    api_url = "https://www.exleasingcar.com/ajax_update_car_form.v3.1.php"
+    observed_at = datetime(2026, 11, 24, 12, 0, tzinfo=timezone.utc)
+
+    database.upsert_auction(auction_id, observed_at=observed_at)
+    database.upsert_vehicle("car-unknown", observed_at=observed_at)
+    database.upsert_auction_lot(
+        "car-unknown",
+        auction_id,
+        sale_type=None,
+        collection_eligible=False,
+        observed_at=observed_at,
+    )
+    database.upsert_vehicle("car-open", observed_at=observed_at)
+    database.upsert_auction_lot(
+        "car-open",
+        auction_id,
+        sale_type=SaleType.OPEN_AUCTION,
+        collection_eligible=True,
+        observed_at=observed_at,
+    )
+
+    scan = database.start_or_resume_catalog_scan(
+        auction_id,
+        "bootstrap",
+        page_url,
+        observed_at=observed_at,
+    )
+    assert database.record_catalog_page_completed(
+        scan.scan_id,
+        1,
+        page_url,
+        next_page_url=None,
+        next_page_number=None,
+        item_count=2,
+        page_data={},
+        api_responses=(
+            {
+                "url": api_url,
+                "payload": {
+                    "car-unknown": {"highest_offer": "8000"},
+                    "car-open": {"highest_offer": "10000"},
+                },
+                "observed_at": observed_at,
+            },
+        ),
+        observed_at=observed_at,
+    )
+
+    collector = ExleasingcarCollector(
+        database,
+        tmp_path / "raw",
+        page_delay_seconds=0,
+    )
+    eligible_ids = {"car-open"}
+    collector._persist_api_updates(
+        AuctionContext(auction_id),
+        eligible_ids,
+        {
+            "car-unknown": LotMetadata(),
+            "car-open": LotMetadata(),
+        },
+        open_auction_car_ids={"car-open"},
+    )
+
+    with sqlite3.connect(database.path) as connection:
+        prices = connection.execute(
+            """
+            SELECT vehicles.source_car_id, price_observations.highest_offer
+            FROM price_observations
+            JOIN auction_lots
+              ON auction_lots.id = price_observations.auction_lot_id
+            JOIN vehicles ON vehicles.id = auction_lots.vehicle_id
+            ORDER BY vehicles.source_car_id
+            """
+        ).fetchall()
+        unknown_lot = connection.execute(
+            """
+            SELECT sale_type, collection_eligible
+            FROM auction_lots
+            JOIN vehicles ON vehicles.id = auction_lots.vehicle_id
+            WHERE vehicles.source_car_id = 'car-unknown'
+            """
+        ).fetchone()
+
+    assert prices == [("car-open", "10000")]
+    assert unknown_lot == (None, 0)
+    assert eligible_ids == {"car-open"}
+    assert database.get_pending_catalog_api_pages(auction_id) == ()
+
+    # The public snapshot remains available for audit, but its unclassified
+    # lot was not used to qualify or price the archive record.
+    saved_page = database.get_catalog_scan_pages(scan.scan_id)[0]
+    assert saved_page.api_responses_processed == 1
+    assert saved_page.api_responses[0]["payload"]["car-unknown"] == {
+        "highest_offer": "8000"
+    }
