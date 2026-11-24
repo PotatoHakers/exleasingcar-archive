@@ -1,18 +1,19 @@
-"""Pure, bounded work planning for the archive collector.
+"""Pure, bounded work planning and per-run accounting for the archive collector.
 
-This module deliberately has no database, browser, clock, or host-scheduler
-dependencies. A future runtime adapter can load persisted due work, call the
-planner, and checkpoint each result separately.
+This module has no database, browser, or host-scheduler dependency. The
+planner is deterministic, and hard run limits use an injectable monotonic
+clock so runtime integration can enforce budgets without coupling tests to
+wall-clock time.
 """
 
 from __future__ import annotations
 
+import math
+import time
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
-import math
-import time
 
 
 class WorkType(str, Enum):
