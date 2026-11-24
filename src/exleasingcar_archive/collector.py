@@ -1557,6 +1557,10 @@ class ExleasingcarCollector:
             if self.page_delay_seconds:
                 time.sleep(self.page_delay_seconds)
 
+        # All page-scoped responses are either checkpointed in SQLite or
+        # discarded with an incomplete page. Never let an in-memory response
+        # from one auction fall through to the next auction's API processing.
+        self.api_cursor = max(self.api_cursor, len(self.recorder.responses))
         progress = self.database.get_catalog_scan_progress(scan.scan_id)
         if (
             progress is not None
