@@ -621,11 +621,15 @@ class ExleasingcarCollector:
                 if car_id in sale_types and sale_types[car_id] is None
             }
             if unclassified_ids:
+                # Keep the original public response in the SQLite audit queue,
+                # but do not let one unclassified lot block known lots in the
+                # same bulk response. A later API snapshot can be used after
+                # detail enrichment establishes that lot's sale mode.
                 print(
-                    "  API response deferred until sale modes are known for: "
+                    "  Ignoring API updates for unclassified sale modes (raw "
+                    "public snapshot retained): "
                     + ", ".join(sorted(unclassified_ids))
                 )
-                return False
 
             promotable_ids = {
                 car_id
