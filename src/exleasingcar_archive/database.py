@@ -3,6 +3,7 @@ import re
 import sqlite3
 from collections.abc import Iterator
 from contextlib import contextmanager
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
@@ -13,8 +14,25 @@ from .parsers import PriceObservation
 from .pdf_damage import PDFDamageObservation, PDFDamagePhotoReference
 from .pdf_fields import PDFExtractedField, PDFFieldProvenance, PDFFieldState
 
-SCHEMA_VERSION = 15
+SCHEMA_VERSION = 16
 DEFAULT_SOURCE = "ajax_update_car_form.v3.1.php"
+
+
+@dataclass(frozen=True, slots=True)
+class CatalogScanProgress:
+    """Persisted position of one auction catalogue scan."""
+
+    scan_id: int
+    exleasingcar_auction_id: str
+    scan_type: str
+    status: str
+    initial_page_url: str
+    next_page_url: str | None
+    next_page_number: int | None
+    pages_completed: int
+    started_at: str
+    updated_at: str
+    completed_at: str | None
 
 
 AUCTIONS_SQL = """
@@ -100,6 +118,53 @@ CREATE TABLE IF NOT EXISTS auction_events (
     observed_at TEXT NOT NULL,
     source TEXT NOT NULL,
     FOREIGN KEY (auction_lot_id) REFERENCES auction_lots(id) ON DELETE RESTRICT
+)
+"""
+
+
+
+CATALOG_SCAN_RUNS_SQL = """
+CREATE TABLE IF NOT EXISTS catalog_scan_runs (
+    id INTEGER PRIMARY KEY,
+    auction_id INTEGER NOT NULL,
+    scan_type TEXT NOT NULL CHECK (
+        scan_type IN ('bootstrap', 'routine', 'prestart')
+    ),
+    status TEXT NOT NULL DEFAULT 'in_progress' CHECK (
+        status IN ('in_progress', 'completed')
+    ),
+    initial_page_url TEXT NOT NULL,
+    next_page_url TEXT,
+    next_page_number INTEGER,
+    pages_completed INTEGER NOT NULL DEFAULT 0 CHECK (pages_completed >= 0),
+    started_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    completed_at TEXT,
+    CHECK (
+        (next_page_url IS NULL AND next_page_number IS NULL)
+        OR (next_page_url IS NOT NULL AND next_page_number > 0)
+    ),
+    CHECK (
+        (status = 'in_progress' AND completed_at IS NULL)
+        OR (status = 'completed' AND completed_at IS NOT NULL
+            AND next_page_url IS NULL AND next_page_number IS NULL)
+    ),
+    FOREIGN KEY (auction_id) REFERENCES auctions(id) ON DELETE RESTRICT
+)
+"""
+
+
+CATALOG_SCAN_PAGES_SQL = """
+CREATE TABLE IF NOT EXISTS catalog_scan_pages (
+    id INTEGER PRIMARY KEY,
+    scan_run_id INTEGER NOT NULL,
+    page_number INTEGER NOT NULL CHECK (page_number > 0),
+    page_url TEXT NOT NULL,
+    item_count INTEGER NOT NULL CHECK (item_count >= 0),
+    completed_at TEXT NOT NULL,
+    FOREIGN KEY (scan_run_id) REFERENCES catalog_scan_runs(id) ON DELETE RESTRICT,
+    UNIQUE (scan_run_id, page_number),
+    UNIQUE (scan_run_id, page_url)
 )
 """
 
@@ -350,6 +415,7 @@ class ArchiveDatabase:
                     (12, self._migrate_v12_to_v13),
                     (13, self._migrate_v13_to_v14),
                     (14, self._migrate_v14_to_v15),
+                    (15, self._migrate_v15_to_v16),
                 )
                 for from_version, migration in migrations:
                     if version <= from_version:
@@ -377,6 +443,8 @@ class ArchiveDatabase:
             PDF_FIELD_OBSERVATIONS_SQL,
             PDF_DAMAGE_OBSERVATIONS_SQL,
             MEDIA_DERIVATIVES_SQL,
+            CATALOG_SCAN_RUNS_SQL,
+            CATALOG_SCAN_PAGES_SQL,
         ):
             connection.execute(statement)
         ArchiveDatabase._create_indexes(connection)
@@ -458,6 +526,15 @@ class ArchiveDatabase:
             """
             CREATE INDEX IF NOT EXISTS idx_pdf_damage_observations_lot
             ON pdf_damage_observations(auction_lot_id, id)
+            """,
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_catalog_scan_one_active_per_auction
+            ON catalog_scan_runs(auction_id)
+            WHERE status = 'in_progress'
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_catalog_scan_pages_run
+            ON catalog_scan_pages(scan_run_id, page_number)
             """,
         )
         for statement in statements:
@@ -714,6 +791,12 @@ class ArchiveDatabase:
             END
             """
         )
+
+    @classmethod
+    def _migrate_v15_to_v16(cls, connection: sqlite3.Connection) -> None:
+        """Persist resumable catalogue scan cursors and completed page checkpoints."""
+        connection.execute(CATALOG_SCAN_RUNS_SQL)
+        connection.execute(CATALOG_SCAN_PAGES_SQL)
 
     @classmethod
     def _migrate_v14_to_v15(cls, connection: sqlite3.Connection) -> None:
@@ -1160,6 +1243,301 @@ class ArchiveDatabase:
                     observed_at,
                 ),
             )
+
+    @staticmethod
+    def _validate_catalog_page_url(value: str, field_name: str) -> str:
+        normalized = ArchiveDatabase._validate_identifier(value, field_name)
+        parsed = urlsplit(normalized)
+        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+            raise ValueError(f"{field_name} must be an absolute HTTP(S) URL")
+        return normalized
+
+    @staticmethod
+    def _catalog_scan_progress(
+        connection: sqlite3.Connection,
+        scan_id: int,
+    ) -> CatalogScanProgress | None:
+        row = connection.execute(
+            """
+            SELECT runs.id, auctions.exleasingcar_auction_id, runs.scan_type,
+                   runs.status, runs.initial_page_url, runs.next_page_url,
+                   runs.next_page_number, runs.pages_completed, runs.started_at,
+                   runs.updated_at, runs.completed_at
+            FROM catalog_scan_runs AS runs
+            JOIN auctions ON auctions.id = runs.auction_id
+            WHERE runs.id = ?
+            """,
+            (scan_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        return CatalogScanProgress(
+            scan_id=int(row["id"]),
+            exleasingcar_auction_id=str(row["exleasingcar_auction_id"]),
+            scan_type=str(row["scan_type"]),
+            status=str(row["status"]),
+            initial_page_url=str(row["initial_page_url"]),
+            next_page_url=(
+                str(row["next_page_url"]) if row["next_page_url"] is not None else None
+            ),
+            next_page_number=(
+                int(row["next_page_number"])
+                if row["next_page_number"] is not None
+                else None
+            ),
+            pages_completed=int(row["pages_completed"]),
+            started_at=str(row["started_at"]),
+            updated_at=str(row["updated_at"]),
+            completed_at=(
+                str(row["completed_at"]) if row["completed_at"] is not None else None
+            ),
+        )
+
+    def start_or_resume_catalog_scan(
+        self,
+        exleasingcar_auction_id: str,
+        scan_type: str,
+        first_page_url: str,
+        *,
+        observed_at: datetime | None = None,
+    ) -> CatalogScanProgress:
+        """Start a catalogue scan or return its existing unfinished checkpoint.
+
+        Only one unfinished catalogue scan is allowed per auction. A process
+        restart therefore resumes the saved cursor instead of silently
+        creating a fresh generation at page one.
+        """
+        auction_id = self._validate_identifier(
+            exleasingcar_auction_id, "exleasingcar_auction_id"
+        )
+        scan_kind = self._validate_identifier(scan_type, "scan_type")
+        if scan_kind not in {"bootstrap", "routine", "prestart"}:
+            raise ValueError("scan_type must be bootstrap, routine, or prestart")
+        first_url = self._validate_catalog_page_url(first_page_url, "first_page_url")
+        timestamp = self._serialize_datetime(observed_at)
+
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            database_auction_id = self._ensure_auction(
+                connection, auction_id, timestamp
+            )
+            active = connection.execute(
+                """
+                SELECT id, scan_type
+                FROM catalog_scan_runs
+                WHERE auction_id = ? AND status = 'in_progress'
+                ORDER BY id DESC
+                LIMIT 1
+                """,
+                (database_auction_id,),
+            ).fetchone()
+            if active is not None:
+                if str(active["scan_type"]) != scan_kind:
+                    raise RuntimeError(
+                        "An unfinished catalogue scan already exists for this auction "
+                        f"with scan_type={active['scan_type']!r}"
+                    )
+                progress = self._catalog_scan_progress(
+                    connection, int(active["id"])
+                )
+                assert progress is not None
+                return progress
+
+            cursor = connection.execute(
+                """
+                INSERT INTO catalog_scan_runs (
+                    auction_id, scan_type, status, initial_page_url,
+                    next_page_url, next_page_number, pages_completed,
+                    started_at, updated_at, completed_at
+                ) VALUES (?, ?, 'in_progress', ?, ?, 1, 0, ?, ?, NULL)
+                """,
+                (
+                    database_auction_id,
+                    scan_kind,
+                    first_url,
+                    first_url,
+                    timestamp,
+                    timestamp,
+                ),
+            )
+            progress = self._catalog_scan_progress(connection, int(cursor.lastrowid))
+            assert progress is not None
+            return progress
+
+    def get_catalog_scan_progress(self, scan_id: int) -> CatalogScanProgress | None:
+        """Return the current persisted cursor for one catalogue scan."""
+        if isinstance(scan_id, bool) or not isinstance(scan_id, int) or scan_id < 1:
+            raise ValueError("scan_id must be a positive integer")
+        with self._connect() as connection:
+            return self._catalog_scan_progress(connection, scan_id)
+
+    def record_catalog_page_completed(
+        self,
+        scan_id: int,
+        page_number: int,
+        page_url: str,
+        *,
+        next_page_url: str | None,
+        next_page_number: int | None,
+        item_count: int,
+        observed_at: datetime | None = None,
+    ) -> bool:
+        """Checkpoint one fully processed page and advance the saved cursor.
+
+        Call this only after every row/API observation from the page has been
+        successfully persisted. A crash before the checkpoint causes the page
+        to be replayed; callers must keep page ingestion idempotent.
+        """
+        for value, name, minimum in (
+            (scan_id, "scan_id", 1),
+            (page_number, "page_number", 1),
+            (item_count, "item_count", 0),
+        ):
+            if isinstance(value, bool) or not isinstance(value, int):
+                raise TypeError(f"{name} must be an integer")
+            if value < minimum:
+                raise ValueError(f"{name} must be at least {minimum}")
+        current_url = self._validate_catalog_page_url(page_url, "page_url")
+        if next_page_url is None:
+            if next_page_number is not None:
+                raise ValueError("next_page_number must be None when there is no next page")
+            following_url = None
+        else:
+            following_url = self._validate_catalog_page_url(
+                next_page_url, "next_page_url"
+            )
+            if isinstance(next_page_number, bool) or not isinstance(next_page_number, int):
+                raise TypeError("next_page_number must be an integer when next_page_url exists")
+            if next_page_number <= page_number:
+                raise ValueError("next_page_number must be greater than page_number")
+            if following_url == current_url:
+                raise ValueError("next_page_url cannot repeat the current page URL")
+
+        timestamp = self._serialize_datetime(observed_at)
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            scan = connection.execute(
+                """
+                SELECT auction_id, status, next_page_url, next_page_number,
+                       pages_completed
+                FROM catalog_scan_runs
+                WHERE id = ?
+                """,
+                (scan_id,),
+            ).fetchone()
+            if scan is None:
+                raise KeyError(f"Unknown catalogue scan id: {scan_id}")
+
+            existing = connection.execute(
+                """
+                SELECT page_number, page_url, item_count
+                FROM catalog_scan_pages
+                WHERE scan_run_id = ? AND (page_number = ? OR page_url = ?)
+                """,
+                (scan_id, page_number, current_url),
+            ).fetchone()
+            if existing is not None:
+                if (
+                    int(existing["page_number"]) == page_number
+                    and str(existing["page_url"]) == current_url
+                    and int(existing["item_count"]) == item_count
+                ):
+                    return False
+                raise ValueError("Page checkpoint conflicts with an already saved page")
+
+            if str(scan["status"]) != "in_progress":
+                raise ValueError("Cannot checkpoint a page for a completed scan")
+            if scan["next_page_url"] is None or scan["next_page_number"] is None:
+                raise ValueError("The scan has no remaining page to checkpoint")
+            if (
+                int(scan["next_page_number"]) != page_number
+                or str(scan["next_page_url"]) != current_url
+            ):
+                raise ValueError(
+                    "Page does not match the saved catalogue cursor; "
+                    "resume from the persisted next_page_url and next_page_number"
+                )
+
+            if following_url is not None:
+                repeated = connection.execute(
+                    """
+                    SELECT 1 FROM catalog_scan_pages
+                    WHERE scan_run_id = ? AND page_url = ?
+                    """,
+                    (scan_id, following_url),
+                ).fetchone()
+                if repeated is not None:
+                    raise ValueError("next_page_url points to a page already checkpointed")
+
+            connection.execute(
+                """
+                INSERT INTO catalog_scan_pages (
+                    scan_run_id, page_number, page_url, item_count, completed_at
+                ) VALUES (?, ?, ?, ?, ?)
+                """,
+                (scan_id, page_number, current_url, item_count, timestamp),
+            )
+            pages_completed = int(scan["pages_completed"]) + 1
+            connection.execute(
+                """
+                UPDATE catalog_scan_runs
+                SET next_page_url = ?, next_page_number = ?,
+                    pages_completed = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (
+                    following_url,
+                    next_page_number,
+                    pages_completed,
+                    timestamp,
+                    scan_id,
+                ),
+            )
+            return True
+
+    def complete_catalog_scan(
+        self,
+        scan_id: int,
+        *,
+        observed_at: datetime | None = None,
+    ) -> bool:
+        """Mark a scan complete only after its final page has been checkpointed."""
+        if isinstance(scan_id, bool) or not isinstance(scan_id, int) or scan_id < 1:
+            raise ValueError("scan_id must be a positive integer")
+        timestamp = self._serialize_datetime(observed_at)
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            scan = connection.execute(
+                """
+                SELECT status, next_page_url, next_page_number, pages_completed
+                FROM catalog_scan_runs
+                WHERE id = ?
+                """,
+                (scan_id,),
+            ).fetchone()
+            if scan is None:
+                raise KeyError(f"Unknown catalogue scan id: {scan_id}")
+            if str(scan["status"]) == "completed":
+                return False
+            if scan["next_page_url"] is not None or scan["next_page_number"] is not None:
+                raise ValueError("Cannot complete a catalogue scan while pages remain")
+            page_count = int(
+                connection.execute(
+                    "SELECT COUNT(*) FROM catalog_scan_pages WHERE scan_run_id = ?",
+                    (scan_id,),
+                ).fetchone()[0]
+            )
+            if page_count < 1 or page_count != int(scan["pages_completed"]):
+                raise ValueError("Cannot complete a scan without all page checkpoints")
+            connection.execute(
+                """
+                UPDATE catalog_scan_runs
+                SET status = 'completed', completed_at = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (timestamp, timestamp, scan_id),
+            )
+            return True
 
     def upsert_auction(
         self,
