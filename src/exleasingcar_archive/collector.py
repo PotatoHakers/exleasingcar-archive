@@ -595,6 +595,7 @@ class ExleasingcarCollector:
             *,
             page_id: int | None,
             response_index: int | None,
+            deferred_update_id: int | None = None,
         ) -> bool:
             """Process one response; False means it must remain in the durable queue."""
             self.api_responses_seen += 1
@@ -621,13 +622,22 @@ class ExleasingcarCollector:
                 if car_id in sale_types and sale_types[car_id] is None
             }
             if unclassified_ids:
-                # Keep the original public response in the SQLite audit queue,
-                # but do not let one unclassified lot block known lots in the
-                # same bulk response. A later API snapshot can be used after
-                # detail enrichment establishes that lot's sale mode.
+                # Split unresolved lots into their own durable queue entries.
+                # This lets known lots in the same bulk response be processed
+                # now, then replays the isolated lot snapshot after a detail
+                # page establishes the sale mode.
+                if page_id is not None:
+                    self.database.defer_catalog_api_lot_updates(
+                        page_id,
+                        {
+                            "url": captured.url,
+                            "payload": captured.payload,
+                            "observed_at": captured.observed_at,
+                        },
+                        unclassified_ids,
+                    )
                 print(
-                    "  Ignoring API updates for unclassified sale modes (raw "
-                    "public snapshot retained): "
+                    "  Deferred API updates until sale modes are known for: "
                     + ", ".join(sorted(unclassified_ids))
                 )
 
@@ -752,7 +762,12 @@ class ExleasingcarCollector:
 
             # Advance only after the database observations have committed. If
             # this write fails, the exact response is replayed idempotently.
-            if page_id is not None and response_index is not None:
+            if deferred_update_id is not None:
+                self.database.mark_catalog_api_lot_update_processed(
+                    deferred_update_id,
+                    observed_at=datetime.now(timezone.utc),
+                )
+            elif page_id is not None and response_index is not None:
                 self.database.advance_catalog_api_response_cursor(
                     page_id, response_index
                 )
@@ -794,6 +809,27 @@ class ExleasingcarCollector:
                     response_index=None,
                 ):
                     return
+
+        # Unknown sale modes no longer hold the bulk API cursor in place.
+        # Once detail enrichment classifies one of those lots, replay its
+        # individually retained public payload.
+        for deferred in self.database.get_pending_catalog_api_lot_updates(
+            auction.exleasingcar_auction_id
+        ):
+            captured = CapturedApiResponse(
+                url=str(deferred["url"]),
+                payload=deferred["payload"],
+                observed_at=_restore_catalog_page_datetime(
+                    str(deferred["observed_at"])
+                ),
+            )
+            if not process_response(
+                captured,
+                page_id=None,
+                response_index=None,
+                deferred_update_id=int(deferred["id"]),
+            ):
+                return
 
     def _persist_catalog_lot_observations(
         self,
