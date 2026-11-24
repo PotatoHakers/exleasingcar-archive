@@ -2188,7 +2188,7 @@ def main() -> None:
                 max_detail_pages=args.max_detail_pages,
                 run_limits=run_limits,
             )
-            print("\\nCollection completed")
+            print("\nCollection completed")
             for field, value in asdict(summary).items():
                 print(f"  {field}: {value}")
             if collector.recorder.errors:
