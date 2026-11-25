@@ -17,6 +17,8 @@ import sys
 from pathlib import Path
 from urllib.parse import quote
 
+from exleasingcar_archive.auction_time import format_auction_time_for_user
+
 EXPECTED_SCHEMA_VERSION = 18
 REQUIRED_TABLES = (
     "auctions",
@@ -342,13 +344,17 @@ def print_source_observation_samples(
         for row in rows:
             print(
                 "    phase={phase}; bid_status={bid}; final_call_active={final}; "
-                "live_bidding={live}; auction_end_at={end}; remaining_seconds={remaining}; "
+                "live_bidding={live}; auction_end_at_site={site_end}; "
+                "auction_end_at_user(+1h)={user_end}; remaining_seconds={remaining}; "
                 "observed_at={observed}; source={source}".format(
                     phase=_report_value(row["auction_phase"]),
                     bid=_report_value(row["bid_status"]),
                     final=_report_value(row["final_call_active"]),
                     live=_report_value(row["live_bidding"]),
-                    end=_report_value(row["auction_end_at"]),
+                    site_end=_report_value(row["auction_end_at"]),
+                    user_end=_report_value(
+                        format_auction_time_for_user(row["auction_end_at"])
+                    ),
                     remaining=_report_value(row["remaining_seconds"]),
                     observed=_report_value(row["observed_at"]),
                     source=_report_value(row["source"]),
