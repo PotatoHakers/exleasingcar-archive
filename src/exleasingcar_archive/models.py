@@ -24,6 +24,7 @@ class AuctionStatus(str, Enum):
     ACTIVE = "active"
     FINAL_CALL = "final_call"
     COMPLETED = "completed"
+    SCHEDULED_END = "scheduled_end"
     UNKNOWN = "unknown"
 
 
