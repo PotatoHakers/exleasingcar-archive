@@ -35,3 +35,11 @@ def test_unrecognized_text_and_missing_values_are_safe():
 def test_timezone_aware_instant_is_not_treated_as_naive_site_clock():
     value = "2026-11-25T11:59:00+02:00"
     assert format_auction_time_for_user(value) == value
+
+
+
+def test_site_datetime_with_seconds_keeps_its_precision():
+    assert (
+        format_auction_time_for_user("2026-11-25 11:59:00")
+        == "2026-11-25 12:59:00"
+    )
