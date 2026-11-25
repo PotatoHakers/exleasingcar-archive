@@ -186,3 +186,19 @@ def test_open_auction_end_time_is_distinct_from_final_call():
 
     assert result.status is AuctionStatus.SCHEDULED_END
     assert result.raw_status == "Конец Сегодня 10:28"
+
+
+
+def test_legacy_final_call_without_open_format_is_not_assumed_live():
+    html = """
+    <html>
+      <body>
+        <h2><button>FINAL CALL</button></h2>
+        <div car-id="car-unknown" id="auto_car-unknown"></div>
+      </body>
+    </html>
+    """
+
+    result = parse_auction_list(html)
+
+    assert result.status is AuctionStatus.UNKNOWN
