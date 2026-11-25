@@ -235,6 +235,132 @@ def print_price_summary(connection: sqlite3.Connection, tables: set[str]) -> Non
             )
 
 
+
+def _report_value(value: object | None) -> str:
+    """Format a database value on one line without exposing source identifiers."""
+    if value is None:
+        return "not recorded"
+    text = " ".join(str(value).split())
+    return text[:120] + ("…" if len(text) > 120 else "")
+
+
+def print_source_observation_samples(
+    connection: sqlite3.Connection, tables: set[str], *, limit: int = 3
+) -> None:
+    """Print a few latest source values without lot IDs, VINs, or source URLs."""
+    print("\\nRecent source observations (latest samples; IDs and URLs omitted):")
+
+    if "price_observations" in tables:
+        rows = connection.execute(
+            """
+            SELECT highest_offer, currency, observed_at, source
+            FROM price_observations
+            ORDER BY observed_at DESC, id DESC
+            LIMIT ?
+            """,
+            (limit,),
+        ).fetchall()
+        print("  Raw API highest_offer (not independently verified as a public bid):")
+        if not rows:
+            print("    no observations")
+        for row in rows:
+            print(
+                "    highest_offer={value} {currency}; observed_at={observed}; "
+                "source={source}".format(
+                    value=_report_value(row["highest_offer"]),
+                    currency=_report_value(row["currency"]),
+                    observed=_report_value(row["observed_at"]),
+                    source=_report_value(row["source"]),
+                )
+            )
+
+    if "price_reference_observations" in tables:
+        rows = connection.execute(
+            """
+            SELECT minimum_price, indicative_price, currency, observed_at, source
+            FROM price_reference_observations
+            ORDER BY observed_at DESC, id DESC
+            LIMIT ?
+            """,
+            (limit,),
+        ).fetchall()
+        print("  Seller reference fields (not treated as public bids or Buy Now prices):")
+        if not rows:
+            print("    no observations")
+        for row in rows:
+            print(
+                "    minimum_price={minimum}; indicative_price={indicative}; "
+                "currency={currency}; observed_at={observed}; source={source}".format(
+                    minimum=_report_value(row["minimum_price"]),
+                    indicative=_report_value(row["indicative_price"]),
+                    currency=_report_value(row["currency"]),
+                    observed=_report_value(row["observed_at"]),
+                    source=_report_value(row["source"]),
+                )
+            )
+
+    if "lot_price_observations" in tables:
+        rows = connection.execute(
+            """
+            SELECT price_type, amount, currency, source_field, observed_at, source
+            FROM lot_price_observations
+            ORDER BY observed_at DESC, id DESC
+            LIMIT ?
+            """,
+            (limit,),
+        ).fetchall()
+        print("  Detail/catalogue price observations (type is kept explicit):")
+        if not rows:
+            print("    no observations")
+        for row in rows:
+            print(
+                "    price_type={kind}; amount={amount} {currency}; "
+                "source_field={field}; observed_at={observed}; source={source}".format(
+                    kind=_report_value(row["price_type"]),
+                    amount=_report_value(row["amount"]),
+                    currency=_report_value(row["currency"]),
+                    field=_report_value(row["source_field"]),
+                    observed=_report_value(row["observed_at"]),
+                    source=_report_value(row["source"]),
+                )
+            )
+
+    if "auction_events" in tables:
+        rows = connection.execute(
+            """
+            SELECT auction_phase, bid_status, final_call_active, live_bidding,
+                   auction_end_at, remaining_seconds, observed_at, source
+            FROM auction_events
+            ORDER BY observed_at DESC, id DESC
+            LIMIT ?
+            """,
+            (limit,),
+        ).fetchall()
+        print("  Per-lot event observations (not an auction-level start signal):")
+        if not rows:
+            print("    no observations")
+        for row in rows:
+            print(
+                "    phase={phase}; bid_status={bid}; final_call_active={final}; "
+                "live_bidding={live}; auction_end_at={end}; remaining_seconds={remaining}; "
+                "observed_at={observed}; source={source}".format(
+                    phase=_report_value(row["auction_phase"]),
+                    bid=_report_value(row["bid_status"]),
+                    final=_report_value(row["final_call_active"]),
+                    live=_report_value(row["live_bidding"]),
+                    end=_report_value(row["auction_end_at"]),
+                    remaining=_report_value(row["remaining_seconds"]),
+                    observed=_report_value(row["observed_at"]),
+                    source=_report_value(row["source"]),
+                )
+            )
+
+    print(
+        "  Auction-level scheduled start: not stored in schema v18; "
+        "per-lot end/countdown fields are not a substitute."
+    )
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("database", type=Path, help="Path to the SQLite archive database")
@@ -282,6 +408,7 @@ def main() -> int:
 
         print_media_summary(connection, tables)
         print_price_summary(connection, tables)
+        print_source_observation_samples(connection, tables)
         print_scheduler_summary(connection, tables)
 
         if "auction_lots" in tables:
