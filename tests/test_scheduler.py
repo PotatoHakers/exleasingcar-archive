@@ -31,7 +31,7 @@ def work(
         WorkType.LIVE_REFRESH: {"live_lots": units},
         WorkType.DETAIL_ENRICHMENT: {"detail_pages": units},
         WorkType.BOOTSTRAP: {"catalog_pages": units},
-        WorkType.PRESTART_REFRESH: {"catalog_pages": units},
+        WorkType.SCHEDULED_END_REFRESH: {"catalog_pages": units},
         WorkType.ROUTINE_REFRESH: {"catalog_pages": units},
     }[work_type]
     return CollectionWorkItem(
@@ -62,7 +62,7 @@ def test_plan_uses_owner_priority_and_stable_due_order():
     items = [
         work("details", WorkType.DETAIL_ENRICHMENT),
         work("routine", WorkType.ROUTINE_REFRESH),
-        work("prestart", WorkType.PRESTART_REFRESH),
+        work("scheduled-end", WorkType.PRESTART_REFRESH),
         work("bootstrap", WorkType.BOOTSTRAP),
         work("live-later", WorkType.LIVE_REFRESH, due_at=NOW - timedelta(minutes=2)),
         work("live-earlier", WorkType.LIVE_REFRESH, due_at=NOW - timedelta(minutes=8)),
