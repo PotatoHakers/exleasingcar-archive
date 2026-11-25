@@ -135,7 +135,7 @@ One invocation should ask a single planner to choose among:
 The five-minute live work must not permanently starve bootstrap, routine refresh, or detail enrichment. Keep a configurable background reservation or weighted fairness rule. Within each class, select the oldest overdue item first with stable identifier tie-breaks.
 
 Persist at least:
-- work type, auction/lot target, due time, next due time, last attempted time, last successful time, and last result;
+- work type (including same-day scheduled-end refresh), auction/lot target, due time, next due time, last attempted time, last successful time, and last result;
 - scan generation, page cursor, completed-page checkpoints, and full-scan completion;
 - run ID, start/end time, selected work, consumed budgets, deferred items, and stop reason;
 - raw scheduled end-time label, source, observation time, server-clock context, and timezone verification status; do not store an inferred scheduled start.
