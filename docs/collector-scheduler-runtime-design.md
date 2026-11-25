@@ -34,7 +34,7 @@ The earlier version of this document described the pre-PR #92 collector. That de
 
 ### Implemented
 
-- **Bounded planner primitives:** `scheduler.py` defines work types and deterministic priority ordering for live refresh, bootstrap, pre-start, routine refresh, and detail enrichment. It supports explicit item/time/page/live-lot/detail-page budgets and a reservation for background work to reduce starvation.
+- **Bounded planner primitives:** `scheduler.py` defines work types and deterministic priority ordering for live refresh, bootstrap, scheduled refresh, routine refresh, and detail enrichment. Auction-card parsing now separately exposes primary format, FINAL CALL/HOT BID, and a raw same-day end-time label. These classification/priority properties are not yet connected to the persisted due-work runtime. The manual bounded path remains in source order to avoid starving closed/fixed-price auctions while fairness is not persisted.
 - **Hard per-run limits:** `RunBudget` uses a monotonic deadline and atomically reserves catalogue pages, live-lot updates, and detail-page visits. Failed attempts still consume their reserved budget.
 - **Resumable catalogue scans:** SQLite schema v18 stores scan generations, completed page checkpoints, page payloads, API response payloads, and cursors. An unfinished scan resumes from its saved cursor. A page is checkpointed only after successful parsing and ingestion.
 - **Durable API queues:** bulk responses are replayed only after archive writes commit. API cursor advancement is durable. Unknown sale modes are split into per-lot deferred updates and replayed after detail enrichment establishes the sale type.
@@ -158,7 +158,7 @@ For every observation, retain the raw field name, source (catalogue HTML, detail
 
 ## 7. Remaining implementation and acceptance phases
 
-1. **Finish API capture reliability:** review and merge PR #98 after successful CI; then repeat a bounded real-site run against a representative auction and verify API response capture.
+1. **Finish API capture reliability:** PR #98 is merged; the 25 Nov real-site run still showed a `Network.getResponseBody` warning, so verify whether the remaining response race can be reduced further.
 2. **Complete real-site qualification:** process the pending detail queue in bounded runs; verify price categories, completed-lot behavior, excluded hidden-bid lots, Buy Now eligibility, and media associations.
 3. **Complete bootstrap coverage:** traverse all 93+ discovered auctions and all catalogue pages using a persisted fair work queue. Do not mark bootstrap complete globally until every discovered auction scan is complete.
 4. **Integrate the planner:** persist due-work state and connect live, bootstrap, same-day end-time, routine, and detail work to the real collector adapters. Add tests for fairness, missed triggers, stale/missing signals, crash resume, and one-writer operation.
