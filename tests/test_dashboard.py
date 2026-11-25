@@ -1180,3 +1180,43 @@ def test_dashboard_zero_offer_is_labelled_as_not_a_bid_and_completed_status_is_v
     assert "ноль не считается ставкой" in PAGE
     assert "const apiOfferCell" in PAGE
 
+
+
+
+def test_dashboard_shows_auction_times_one_hour_ahead_and_keeps_source_values(
+    tmp_path,
+):
+    database = ArchiveDatabase(tmp_path / "auction-time.sqlite3")
+    database.initialize()
+    database.upsert_auction(
+        "auction-time",
+        auction_type_label="Английский аукцион",
+        auction_status_label="Конец Сегодня 10:28",
+    )
+    database.upsert_vehicle("car-time", displayed_title="Auction time sample")
+    database.upsert_auction_lot(
+        "car-time",
+        "auction-time",
+        sale_type=SaleType.OPEN_AUCTION,
+    )
+    database.record_auction_event(
+        "car-time",
+        auction_phase="final-call",
+        final_call_active=True,
+        live_bidding=False,
+        auction_end_at="2026-11-25 11:59",
+        remaining_seconds=-2687,
+        exleasingcar_auction_id="auction-time",
+    )
+
+    handler = object.__new__(DashboardHandler)
+    handler.database_path = database.path
+    payload = handler._load_data()
+
+    lot = next(item for item in payload["lots"] if item["car_id"] == "car-time")
+    event = next(item for item in payload["events"] if item["car_id"] == "car-time")
+    assert lot["auction_status_label_source"] == "Конец Сегодня 10:28"
+    assert lot["auction_status_label"] == "Конец Сегодня 11:28"
+    assert event["auction_end_at_source"] == "2026-11-25 11:59"
+    assert event["auction_end_at"] == "2026-11-25 12:59"
+    assert event["remaining_seconds"] == -2687
