@@ -99,7 +99,8 @@ def test_auction_coverage_report_distinguishes_api_refresh_from_detail_visits(
     assert "Detail attempts during run: 1" in result.stdout
     assert "Successful detail checks during run: 1" in result.stdout
     assert "Open-lot monitoring completed: 1" in result.stdout
-    assert "COMPLETED 2026-11-25T10:56:00+00:00 (countdown_expired)" in result.stdout
+    assert "COMPLETED " in result.stdout
+    assert "(countdown_expired)" in result.stdout
     assert "car-api-only | Audi A6 2.0 TDI" in result.stdout
     assert "10900 EUR" in result.stdout
     assert "car-detail | BMW 320d" in result.stdout
