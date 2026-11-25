@@ -254,7 +254,7 @@ def main() -> int:
             )
         )
     if since:
-        print(f"Distinct lots API-checked during run: {api_updated}")
+        print(f"Distinct lots API checked during run: {api_updated}")
         print(f"Detail attempts during run: {detail_attempted_count}")
         print(f"Successful detail checks during run: {detail_checked_count}")
         print(
