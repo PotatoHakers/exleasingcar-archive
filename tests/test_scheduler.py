@@ -62,7 +62,7 @@ def test_plan_uses_owner_priority_and_stable_due_order():
     items = [
         work("details", WorkType.DETAIL_ENRICHMENT),
         work("routine", WorkType.ROUTINE_REFRESH),
-        work("scheduled-end", WorkType.PRESTART_REFRESH),
+        work("scheduled-end", WorkType.SCHEDULED_END_REFRESH),
         work("bootstrap", WorkType.BOOTSTRAP),
         work("live-later", WorkType.LIVE_REFRESH, due_at=NOW - timedelta(minutes=2)),
         work("live-earlier", WorkType.LIVE_REFRESH, due_at=NOW - timedelta(minutes=8)),
@@ -74,7 +74,7 @@ def test_plan_uses_owner_priority_and_stable_due_order():
         "live-earlier",
         "live-later",
         "bootstrap",
-        "prestart",
+        "scheduled-end",
         "routine",
         "details",
     ]
