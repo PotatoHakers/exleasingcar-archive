@@ -29,3 +29,9 @@ def test_clock_shift_that_crosses_midnight_advances_relative_day():
 def test_unrecognized_text_and_missing_values_are_safe():
     assert format_auction_time_for_user("FINAL CALL") == "FINAL CALL"
     assert format_auction_time_for_user(None) is None
+
+
+
+def test_timezone_aware_instant_is_not_treated_as_naive_site_clock():
+    value = "2026-11-25T11:59:00+02:00"
+    assert format_auction_time_for_user(value) == value
