@@ -17,7 +17,11 @@ import sys
 from pathlib import Path
 from urllib.parse import quote
 
+# The standalone report is invoked by file path, so expose the src-layout package.
+sys.path.insert(0, str(Path(__file__).resolve().parent / "src"))
+
 from exleasingcar_archive.auction_time import format_auction_time_for_user
+
 
 EXPECTED_SCHEMA_VERSION = 18
 REQUIRED_TABLES = (
