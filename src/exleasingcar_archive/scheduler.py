@@ -179,22 +179,27 @@ class RunLimits:
     """Hard limits enforced while one collector invocation is running.
 
     A zero resource limit disables that work type for the invocation.
-    max_duration_seconds is always positive and is measured using a monotonic
-    clock, not wall-clock timestamps.
+    max_duration_seconds=None disables only the wall-clock deadline; resource
+    budgets remain active. Finite durations use a monotonic clock.
     """
 
-    max_duration_seconds: float
+    max_duration_seconds: float | None
     max_catalog_pages: int
     max_live_lots: int
     max_detail_pages: int
 
     def __post_init__(self) -> None:
         duration = self.max_duration_seconds
-        if isinstance(duration, bool) or not isinstance(duration, (int, float)):
-            raise TypeError("max_duration_seconds must be a finite positive number")
-        if not math.isfinite(duration) or duration <= 0:
-            raise ValueError("max_duration_seconds must be a finite positive number")
-        object.__setattr__(self, "max_duration_seconds", float(duration))
+        if duration is not None:
+            if isinstance(duration, bool) or not isinstance(duration, (int, float)):
+                raise TypeError(
+                    "max_duration_seconds must be None or a finite positive number"
+                )
+            if not math.isfinite(duration) or duration <= 0:
+                raise ValueError(
+                    "max_duration_seconds must be None or a finite positive number"
+                )
+            object.__setattr__(self, "max_duration_seconds", float(duration))
 
         for field_name in (
             "max_catalog_pages",
@@ -211,7 +216,7 @@ class RunBudgetSnapshot:
     """Immutable accounting snapshot for one collector invocation."""
 
     elapsed_seconds: float
-    remaining_seconds: float
+    remaining_seconds: float | None
     expired: bool
     catalog_pages_used: int
     live_lots_used: int
@@ -240,7 +245,11 @@ class RunBudget:
         self._clock = monotonic_clock
         self._started_at = self._read_clock()
         self._last_clock = self._started_at
-        self._deadline = self._started_at + limits.max_duration_seconds
+        self._deadline = (
+            None
+            if limits.max_duration_seconds is None
+            else self._started_at + limits.max_duration_seconds
+        )
         self._catalog_pages_used = 0
         self._live_lots_used = 0
         self._detail_pages_used = 0
@@ -285,7 +294,7 @@ class RunBudget:
             raise ValueError("at least one work unit must be requested")
 
         current = self._read_clock()
-        if current >= self._deadline:
+        if self._deadline is not None and current >= self._deadline:
             return RunBudgetReason.WALL_CLOCK
         if self._catalog_pages_used + catalog_pages > self.limits.max_catalog_pages:
             return RunBudgetReason.MAX_CATALOG_PAGES
@@ -303,11 +312,15 @@ class RunBudget:
         """Return current usage and monotonic deadline information."""
         current = self._read_clock()
         elapsed = current - self._started_at
-        remaining = max(0.0, self._deadline - current)
+        remaining = (
+            None
+            if self._deadline is None
+            else max(0.0, self._deadline - current)
+        )
         return RunBudgetSnapshot(
             elapsed_seconds=elapsed,
             remaining_seconds=remaining,
-            expired=current >= self._deadline,
+            expired=self._deadline is not None and current >= self._deadline,
             catalog_pages_used=self._catalog_pages_used,
             live_lots_used=self._live_lots_used,
             detail_pages_used=self._detail_pages_used,
