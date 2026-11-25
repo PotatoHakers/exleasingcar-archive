@@ -160,7 +160,7 @@ For every observation, retain the raw field name, source (catalogue HTML, detail
 
 1. **Finish API capture reliability:** PR #98 is merged; the 25 Nov real-site run still showed a `Network.getResponseBody` warning, so verify whether the remaining response race can be reduced further.
 2. **Complete real-site qualification:** process the pending detail queue in bounded runs; verify price categories, completed-lot behavior, excluded hidden-bid lots, Buy Now eligibility, and media associations.
-3. **Complete bootstrap coverage:** traverse all 93+ discovered auctions and all catalogue pages using a persisted fair work queue. Do not mark bootstrap complete globally until every discovered auction scan is complete.
+3. **Complete bootstrap coverage:** traverse all discovered auctions and catalogue pages using a persisted fair work queue. Do not mark bootstrap complete globally until every discovered auction scan is complete.
 4. **Integrate the planner:** persist due-work state and connect live, bootstrap, same-day end-time, routine, and detail work to the real collector adapters. Add tests for fairness, missed triggers, stale/missing signals, crash resume, and one-writer operation.
 5. **Prepare the local runtime:** confirm the laptop's persistent storage, interactive Windows account, private SSH access, and a separate encrypted backup destination. No paid host is planned.
 6. **Operational rehearsal:** manually run bounded jobs on the laptop; test crash recovery, delayed/missed triggers, the reported 15-minute session expiry, manual reauthentication, and database restoration. Keep the Dashboard loopback-only.
