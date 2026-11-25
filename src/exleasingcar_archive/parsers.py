@@ -315,9 +315,8 @@ def _auction_card_status(
             return AuctionStatus.ACTIVE, status_text
         return AuctionStatus.UNKNOWN, status_text
 
-    if "аукцион активен" in lowered or "auction active" in lowered:
-        if is_open_auction:
-            return AuctionStatus.ACTIVE, status_text
+    if ("аукцион активен" in lowered or "auction active" in lowered) and is_open_auction:
+        return AuctionStatus.ACTIVE, status_text
 
     return AuctionStatus.UNKNOWN, status_text
 
