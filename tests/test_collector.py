@@ -79,6 +79,17 @@ def test_collector_cli_snapshot_retention_is_opt_in_and_legacy_opt_out_still_wor
     assert legacy_args.save_html_snapshots is False
 
 
+def test_collector_cli_supports_no_time_limit_without_changing_resource_defaults():
+    default_args = build_argument_parser().parse_args([])
+    unlimited_args = build_argument_parser().parse_args(["--no-time-limit"])
+
+    assert default_args.no_time_limit is False
+    assert default_args.max_run_seconds == 900
+    assert unlimited_args.no_time_limit is True
+    assert unlimited_args.max_detail_pages_per_run == 60
+    assert unlimited_args.max_live_lots_per_run == 500
+
+
 def test_filter_updates_for_catalog_rejects_other_auction_ids():
     updates = {
         "car-1": {"highest_offer": 100},

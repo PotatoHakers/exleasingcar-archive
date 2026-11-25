@@ -95,6 +95,25 @@ The API body-capture race is not fully resolved by PR #98: this transcript still
 
 PR #98 added a bounded retry at `requestfinished`, a longer wait for detail-page API requests, and a stop-before-next-navigation guard. The 25 Nov 2026 real-site transcript still contains eight HTTP 200 response-body capture warnings across four runs (`Network.getResponseBody: No resource with given identifier found`). The retry reduced neither the root cause nor eliminated the race; a separate capture strategy is still required. Responses must remain queued and must not be treated as processed when their body was unavailable.
 
+### Extended 211225 run — 25 November 2026
+
+A later invocation used the same local v18 database with no explicit --max-run-seconds argument. The effective duration was still the 900-second default. Resource caps stopped the work earlier:
+
+- One catalogue page; 166 unique lot IDs in the auction.
+- 60 detail pages attempted and processed; 106 other URLs were deferred by weekly/per-auction/per-run rules.
+- 101 API response snapshots were seen; 100 car updates were processed before the max_live_lots=100 cap deferred another response.
+- Of the 100 processed price values, 50 created new highest_offer observations and 50 were unchanged. Seller references had the same 50/50 split; event observations were 50 inserted and 50 unchanged.
+- Detail enrichment added 60 displayed-price observations and 1,388 photo source links.
+- Total vehicle and auction_lot row counts remained 362. The 166 catalogue IDs were therefore already represented in the database before this run; this invocation added no new vehicle/lot rows.
+- The accumulated scan page restored four appearances of the same 166-card page (664 appearances, 498 repeated), not 664 unique cars.
+- The final database report was structurally healthy: schema v18, integrity ok, zero foreign-key violations. Deferred API-lot rows remained 846. Three response-body capture warnings remained.
+
+**Existing-lot freshness behavior:** `store_car_updates` calls `mark_api_checked` for every processed API car, whether its price changed or not. A duplicate price does not add another `price_observations` row, but `auction_lots.last_api_checked_at` still advances. Detail visits use a separate seven-day recheck gate and a 60-page per-run default. Thus a known vehicle can receive an API price refresh without its detail page being opened. These are separate freshness clocks.
+
+For a per-car audit, `auction_coverage_report.py` reads the local SQLite file read-only and prints each lot's sale type, eligibility, last API check, last detail attempt/check, latest persisted highest_offer, and latest per-lot auction fields. Its optional `--since` timestamp distinguishes vehicles refreshed in a particular run from those merely present in the database.
+
+The new `--no-time-limit` CLI option disables only the monotonic wall-clock deadline. The catalogue-page, live-lot, and detail-page resource caps remain enforced. It does **not** turn the one-pass collector into a continuous live polling daemon; repeated live refresh still requires the persisted scheduler/runtime integration.
+
 ### Next controlled data work
 
 Continue using the same temporary database so its catalogue checkpoints and deferred queue are retained. Process additional detail pages in bounded batches, verify that the pending deferred API count falls as sale modes become known, and compare representative catalogue/API/detail observations. Do not use the tiny three-car auction `209633` as the primary sample; it is not representative of the wider archive.
