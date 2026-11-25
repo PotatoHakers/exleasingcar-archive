@@ -449,3 +449,28 @@ def test_run_budget_requires_valid_limits_and_clock():
             RunLimits(10, 1, 1, 1),
             monotonic_clock=None,  # type: ignore[arg-type]
         )
+
+
+def test_run_budget_can_disable_only_the_wall_clock_limit():
+    now = [100.0]
+    budget = RunBudget(
+        RunLimits(
+            max_duration_seconds=None,
+            max_catalog_pages=2,
+            max_live_lots=3,
+            max_detail_pages=4,
+        ),
+        monotonic_clock=lambda: now[0],
+    )
+
+    now[0] += 24 * 60 * 60
+    snapshot = budget.snapshot()
+
+    assert snapshot.expired is False
+    assert snapshot.remaining_seconds is None
+    assert snapshot.elapsed_seconds == 24 * 60 * 60
+    assert budget.try_consume(catalog_pages=1) is None
+    assert budget.try_consume(live_lots=3) is None
+    assert budget.try_consume(live_lots=1) is RunBudgetReason.MAX_LIVE_LOTS
+    assert budget.try_consume(detail_pages=4) is None
+    assert budget.try_consume(detail_pages=1) is RunBudgetReason.MAX_DETAIL_PAGES
