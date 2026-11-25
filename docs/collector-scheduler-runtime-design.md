@@ -70,38 +70,48 @@ Continue using the same temporary database so its catalogue checkpoints and defe
 
 The next full-archive bootstrap must cover all available auctions, not just `211304`. The current collector still needs a round-robin/persisted due-work integration before repeated unattended runs can safely manage this across the whole site.
 
-## 4. Recommended runtime shape
+## 4. Selected runtime shape: owner's always-on laptop
 
-**Recommendation:** one dedicated private cloud VM with encrypted persistent block storage, running a single collector service. The provider is deliberately not selected.
+**Owner decision — 25 November 2026:** recurring infrastructure spend is not acceptable. Use the owner's existing, always-on laptop as the initial collection host. Do not provision a paid VM.
 
-- Run independently of the owner's personal PC.
-- Keep SQLite, the persistent Chromium profile, and scheduler state on a durable private local filesystem attached to the VM. Do not put the live SQLite database on a network share or file-sync folder.
-- Use one collector process at a time; retain the OS process lock and SQLite transactions.
-- Trigger the worker with a host scheduler such as a systemd timer only after persisted due-work scheduling and operational rehearsal are complete.
-- Keep GitHub Actions limited to public-source Ruff/pytest CI. Do not grant public pull-request workflows access to authenticated sessions, the database, or cloud secrets. Do not use a self-hosted runner for untrusted public PRs.
-- Keep the Dashboard bound to loopback. Use a private VPN or SSH tunnel for initial administration. Remote Dashboard hosting requires authentication, HTTPS at the serving edge, and authorization tests before exposure.
+This is a local-first runtime, not a highly available service:
 
-A GitHub Actions schedule may only trigger a private service; it must not become the collector's runtime or persistence layer.
+- The collector, SQLite database, Chromium profile, and scheduler state live on the laptop's persistent local disk.
+- Keep the live SQLite database and browser profile out of OneDrive, Dropbox, network shares, and other file-synchronization folders.
+- The laptop must be powered on, connected to the Internet, and in a usable user session for collection to run. Sleep, shutdown, or loss of connectivity pauses collection. Missed ticks remain overdue and must be resumed in bounded batches; never launch an unbounded catch-up burst.
+- Run one collector process at a time. Keep the OS process lock and SQLite transactions.
+- The current collector opens a visible Chromium persistent context and uses the local Windows credential-store integration. Run it under the same Windows user profile that owns the browser profile and credentials. Do not run it as a generic background service in a different account or an isolated non-interactive session.
+- A future Windows Task Scheduler entry may start bounded runs only after the persisted due-work queue is implemented and manual session-expiry behavior is tested. It must use the same user profile and preserve the interactive browser flow. Scheduling is not enabled by this document.
+- Do not register this laptop as a self-hosted GitHub Actions runner. The repository is public, and untrusted pull-request code must not gain access to the authenticated browser, local database, or private R2 credentials.
 
-### Authentication and secrets
+### GitHub Actions
 
-The current local credential-store/browser setup is not a cloud authentication design.
+Keep GitHub Actions limited to source-only Ruff and pytest CI. Standard GitHub-hosted runners are free for public repositories, but each job runs in a fresh virtual environment; they do not preserve the laptop's SQLite database, browser profile, or session. Scheduled Actions can also be delayed or dropped under load. Therefore Actions is not the collector runtime and must not receive Exleasingcar session data or R2 credentials.
 
-- Establish the first login interactively through private remote access on the selected host.
-- Verify that ordinary Exleasingcar login and the persistent Chromium session remain stable there, including the site's normal additional verification flow if requested.
-- Keep the browser profile on the encrypted private volume, accessible only to the collector service account.
-- Keep credentials and service secrets in the host's protected secret store, never in Git, SQLite rows, command-line arguments, CI artifacts, or logs.
-- Never bypass CAPTCHA, MFA, or another verification step.
+### SSH and Dashboard
 
-If the site session cannot be maintained safely and reliably, stop; do not attempt to defeat the site's authentication controls.
+The Dashboard remains bound to loopback and is intended for use on the laptop itself. It is not a public website and must not be exposed to the Internet.
+
+SSH is for private administration of the laptop, not for publishing the Dashboard. When remote administration is needed, use SSH only over a trusted local network or a private VPN; do not expose an unauthenticated Dashboard or an unrestricted public SSH port. A private SSH tunnel is possible later, but is not required for local Dashboard use.
+
+### Authentication and session expiry
+
+The owner reports that the Exleasingcar session expires after about 15 minutes of inactivity.
+
+- Keep the persistent Chromium profile on the laptop and start the collector under the same interactive Windows account.
+- The collector must detect an expired session and stop safely for normal manual login. Do not bypass MFA, CAPTCHA, or any other verification.
+- A process that runs continuously may keep the session active, but this has not been proven. Do not assume that scheduled short runs will preserve the session between invocations.
+- Before unattended Task Scheduler runs are enabled, rehearse initial login, a 15-minute idle expiry, manual reauthentication, browser restart, and recovery after an interrupted run. If the site requires manual login and nobody is present, collection must pause rather than attempt an authentication workaround.
 
 ### SQLite backups and R2
 
-- Keep one SQLite database on the VM's durable local volume and use SQLite's backup API for consistent backups. Do not copy a live database while ignoring WAL state.
-- Store encrypted backups in a separate private backup destination. Test restoration before schema migrations.
-- R2 remains the selected object store for original photos, reports, and derived previews. The production bucket must remain private.
-- Database backups are not implicitly stored in the media bucket.
-- This design does not authorize R2 reads, writes, usage queries, bucket checks, uploads, downloads, or preview serving. Those require separate explicit owner authorization for the specific operation and the project's usage guard.
+Keep the working SQLite database on the laptop's local disk and use SQLite's backup API to produce consistent snapshots. Do not copy a live database while ignoring its WAL state.
+
+For a zero-spend starting setup, store a second encrypted backup on a separate disk or another existing computer, not beside the only working copy. A backup on the same physical disk is not protection against disk failure.
+
+R2 remains suitable for original photos, inspection reports, derived previews, and potentially a second encrypted backup destination. It is object storage, not a place to run Python/Chromium or host the active SQLite database. Cloudflare currently includes 10 GB-month of Standard storage, 1 million Class A operations, and 10 million Class B operations per month; usage beyond included amounts can be billable. Keep Standard only, retain the project's account-wide usage checks and durable reservation ledger, and enforce the default cap at no more than 50% of the free allowance (or a lower owner-set cap).
+
+Keep the production media bucket private. Put database backups in a separate private backup bucket/destination rather than mixing them with media objects. R2 operations remain disabled until the usage guard is implemented and the owner separately authorizes each specific live operation. Do not send or store R2 credentials in the repository, CI, logs, or chat.
 
 ## 5. One persisted due-work planner
 
@@ -145,16 +155,21 @@ For every observation, retain the raw field name, source (catalogue HTML, detail
 3. **Complete bootstrap coverage:** traverse all 93+ discovered auctions and all catalogue pages using a persisted fair work queue. Do not mark bootstrap complete globally until every discovered auction scan is complete.
 4. **Integrate the planner:** persist due-work state and connect live, bootstrap, pre-start, routine, and detail work to the real collector adapters. Add tests for fairness, missed triggers, stale/missing signals, crash resume, and one-writer operation.
 5. **Choose and provision the runtime:** select provider/region, monthly budget, private access, durable disk, secret handling, and separate encrypted backup destination.
-6. **Operational rehearsal:** manually run bounded jobs on the private host; test crash recovery, delayed/missed triggers, session expiry, and database restoration. Keep the Dashboard private.
+6. **Operational rehearsal:** manually run bounded jobs on the laptop; test crash recovery, delayed/missed triggers, the reported 15-minute session expiry, manual reauthentication, and database restoration. Keep the Dashboard loopback-only.
 7. **R2 media archive:** only after the separate usage guard and explicit operation-level authorization are ready; no live R2 operations before that.
 8. **Release v0.4.0:** only after real-site acceptance, migrations, CI, security, and recovery checks pass.
 
-## 8. Owner decisions still needed
+## 8. Owner decisions and current status
 
-- **Cloud provider and region:** preferred provider/region, or permission to compare EU providers; maximum monthly budget for compute and persistent disk.
-- **Private administration:** VPN or SSH tunnel for login and maintenance; whether remote Dashboard access is required at all.
-- **Database backups:** separate destination, retention period, and maximum monthly budget. The backup destination must not be the R2 media bucket by default.
-- **Authentication:** whether ordinary login requires MFA/additional confirmation and how often the session currently expires. Do not send passwords, cookies, or browser-profile files.
-- **R2 operations:** when the media workstream is ready, authorize the specific read/write/usage-check operation separately; no credentials need to be sent in chat.
+The following runtime choices are now set:
+
+- **Execution host:** the owner's existing, always-on laptop; no paid VM or recurring hosting spend.
+- **Administration:** SSH, kept on a trusted local network or private VPN. Dashboard remains local-only and loopback-bound.
+- **GitHub Actions:** source-only CI. No live collection runner, private data, browser session, or R2 secret.
+- **Authentication:** the current session reportedly expires after about 15 minutes of inactivity. Reauthentication remains a normal interactive login; unattended recovery has not yet been proven.
+- **Backups:** use a separate encrypted local disk or another existing computer for the zero-spend baseline. R2 may be considered as an additional private destination after the usage guard is complete and specific live operations are separately authorized.
+- **R2:** keep it for object storage (media and, later, a guarded backup destination), not compute or the live SQLite database. No live R2 operation is authorized.
+
+Still open are implementation and acceptance gates, not infrastructure-provider choices: persist and integrate the due-work queue; verify source semantics and real-site coverage; prove session behavior under repeated runs; test backup restoration; and finish the R2 usage guard before any live R2 use.
 
 Until these decisions and source-verification gates are satisfied, collection remains manually started and bounded. No unattended cloud collector or public Dashboard should be enabled.
