@@ -122,3 +122,66 @@ def test_unknown_price_is_not_guessed():
     result = parse_auction_list(html)
 
     assert result.lots[0].current_price is None
+
+
+
+def test_fixed_price_final_call_label_does_not_activate_live_auction_status():
+    html = """
+    <html>
+      <body>
+        <input type="hidden" name="aukciono_id" value="209633">
+        <div class="ac-list-item">
+          <div class="card-header">
+            <div class="ac-head-items">
+              <div class="ac-head-item">
+                <img src="/assets/euro-sign.svg"
+                     alt="Фиксированная цена автомобилей">
+              </div>
+            </div>
+          </div>
+          <div class="card-body">
+            <div class="ac-list-left">
+              <div class="ac-head-items">
+                <div class="ac-head-item"><button>FINAL CALL</button></div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </body>
+    </html>
+    """
+
+    result = parse_auction_list(html)
+
+    assert result.status is AuctionStatus.UNKNOWN
+
+
+def test_open_auction_end_time_is_distinct_from_final_call():
+    html = """
+    <html>
+      <body>
+        <input type="hidden" name="aukciono_id" value="211075">
+        <div class="ac-list-item">
+          <div class="card-header">
+            <div class="ac-head-items">
+              <div class="ac-head-item">
+                <img src="/assets/ac.svg" alt="Английский аукцион">
+              </div>
+            </div>
+          </div>
+          <div class="card-body">
+            <div class="ac-list-left">
+              <div class="ac-head-items">
+                <div class="ac-head-item"><span>Конец Сегодня 10:28</span></div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </body>
+    </html>
+    """
+
+    result = parse_auction_list(html)
+
+    assert result.status is AuctionStatus.SCHEDULED_END
+    assert result.raw_status == "Конец Сегодня 10:28"
