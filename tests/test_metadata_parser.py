@@ -185,7 +185,10 @@ def test_parse_fixed_price_only_auction_without_overriding_mixed_auction_types()
     assert closed_with_fixed_price_cars.is_closed_auction is True
     assert closed_with_fixed_price_cars.supports_live_bid_monitoring is False
     # A FINAL CALL label does not make a closed auction a live public-bid auction.
-    assert closed_with_fixed_price_cars.collection_priority > open_with_fixed_price_cars.collection_priority
+    assert (
+        closed_with_fixed_price_cars.collection_priority
+        > open_with_fixed_price_cars.collection_priority
+    )
 
     unknown = auctions["210999"]
     assert unknown.auction_type_label is None
