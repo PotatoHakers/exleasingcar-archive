@@ -170,15 +170,26 @@ def test_parse_fixed_price_only_auction_without_overriding_mixed_auction_types()
     assert fixed_only.source_auction_country_code == "LT"
     assert fixed_only.source_auction_country_name == "Литва"
     assert fixed_only.auction_type_label == "Фиксированная цена автомобилей"
+    assert fixed_only.is_fixed_price_only is True
+    assert fixed_only.supports_live_bid_monitoring is False
 
     open_with_fixed_price_cars = auctions["210854"]
     assert open_with_fixed_price_cars.auction_type_label == "Английский аукцион"
+    assert open_with_fixed_price_cars.is_open_auction is True
+    assert open_with_fixed_price_cars.supports_live_bid_monitoring is True
+    assert open_with_fixed_price_cars.has_final_call is True
+    assert open_with_fixed_price_cars.collection_priority == 0
 
     closed_with_fixed_price_cars = auctions["209954"]
     assert closed_with_fixed_price_cars.auction_type_label == "Закрытые торги аукциона"
+    assert closed_with_fixed_price_cars.is_closed_auction is True
+    assert closed_with_fixed_price_cars.supports_live_bid_monitoring is False
+    # A FINAL CALL label does not make a closed auction a live public-bid auction.
+    assert closed_with_fixed_price_cars.collection_priority > open_with_fixed_price_cars.collection_priority
 
     unknown = auctions["210999"]
     assert unknown.auction_type_label is None
+    assert unknown.supports_live_bid_monitoring is False
 
 
 
@@ -400,3 +411,42 @@ def test_parse_vehicle_media_extracts_gallery_originals_and_unique_reports():
     assert reports[0].label == "Inspection Report"
     assert reports[1].source_url.endswith("report-b.pdf")
     assert [item.source_order for item in media] == [0, 1, 2, 3]
+
+
+
+def test_parse_auction_end_time_label_without_treating_it_as_final_call():
+    html = """
+    <a href="/ru/авто-аукционы/аукцион-211075">
+      <div class="ac-list-item">
+        <div class="card-header">
+          <div class="ac-head-items">
+            <div class="ac-head-item"><div class="ac-inner">108</div></div>
+            <div class="ac-head-item">
+              <img src="/assets/img/icons/ac.svg" alt="Английский аукцион">
+            </div>
+            <div class="ac-head-item"><span>Аукцион ID: 211075</span></div>
+            <div class="ac-head-item"><div>ALD Automotive</div></div>
+          </div>
+        </div>
+        <div class="card-body">
+          <div class="ac-list-left">
+            <div class="ac-head-items">
+              <div class="ac-head-item">Бельгия</div>
+              <div class="ac-head-item"><span>Конец Сегодня 10:28</span></div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </a>
+    """
+
+    auction = parse_auction_listings(
+        html,
+        "https://www.exleasingcar.com/ru/авто-аукционы",
+    )[0]
+
+    assert auction.auction_status_label == "Конец Сегодня 10:28"
+    assert auction.has_scheduled_end_label is True
+    assert auction.has_final_call is False
+    assert auction.is_open_auction is True
+    assert auction.collection_priority == 2
