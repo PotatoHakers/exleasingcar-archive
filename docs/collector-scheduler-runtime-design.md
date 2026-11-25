@@ -93,7 +93,7 @@ The API body-capture race is not fully resolved by PR #98: this transcript still
 
 ### API response capture follow-up
 
-The same real-site collector log showed two HTTP 200 API responses whose bodies were unavailable after navigation (`Network.getResponseBody: No resource with given identifier found`). PR #98 contains a bounded retry at `requestfinished`, a longer wait for detail-page API requests, and a stop-before-next-navigation guard. It must pass CI and owner review/merge before another real-site run is used to assess whether this issue is resolved.
+PR #98 added a bounded retry at `requestfinished`, a longer wait for detail-page API requests, and a stop-before-next-navigation guard. The 25 Nov 2026 real-site transcript still contains eight HTTP 200 response-body capture warnings across four runs (`Network.getResponseBody: No resource with given identifier found`). The retry reduced neither the root cause nor eliminated the race; a separate capture strategy is still required. Responses must remain queued and must not be treated as processed when their body was unavailable.
 
 ### Next controlled data work
 
