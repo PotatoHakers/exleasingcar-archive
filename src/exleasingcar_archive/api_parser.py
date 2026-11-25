@@ -32,8 +32,13 @@ class ParsedCarUpdate:
     @property
     def completion_reason(self) -> str | None:
         """Return a source-confirmed end state for this lot, not its parent auction."""
-        if self.final_call_active or self.live_bidding is True:
+        # A positive live-bidding signal is authoritative even if a stale
+        # countdown has reached zero. Conversely, FINAL CALL must not keep a
+        # lot alive after the API explicitly reports bidding disabled and its
+        # per-lot countdown has expired.
+        if self.live_bidding is True:
             return None
+
         terminal_values = {"closed", "completed", "ended", "finished"}
         phase = (self.auction_phase or "").strip().casefold().replace("_", "-")
         status = (self.bid_status or "").strip().casefold().replace("_", "-")
@@ -45,6 +50,9 @@ class ParsedCarUpdate:
             and self.live_bidding is False
         ):
             return "countdown_expired"
+
+        if self.final_call_active:
+            return None
         return None
 
 
