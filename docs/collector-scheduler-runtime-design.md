@@ -12,11 +12,19 @@ The collector must support one shared due-work planner with configurable interva
 |---|---|---|
 | Initial bootstrap | One-time, explicitly started | Discover every available auction and traverse every catalogue page in bounded, resumable runs. Archive only lots with a qualifying public price. |
 | Routine refresh | Every 12 hours | Refresh known auctions/lots, discover newly listed lots, append observations, and preserve history when listings disappear. |
-| Pre-start refresh | Once about 2 hours before a verified scheduled start | Refresh eligible lots. Use a scheduled **start** time, never an end time or countdown. |
-| Live-auction refresh | Every 5 minutes after trading is positively confirmed | Prefer catalogue/bulk API updates; do not open every vehicle detail page on each cycle. |
+| Same-day end-time refresh | Every 2 hours for auctions with an explicit source end-time label today | Preserve the original visible end-time label and source server clock. Do not reinterpret an end time as a start time or convert it to UTC until the source timezone is verified. |
+| Live-auction refresh | Every 5 minutes for English/open auctions with a known end time within the next 30 minutes or a source FINAL CALL/HOT BID signal | Prefer catalogue/bulk API updates; do not open every vehicle detail page on each cycle. FINAL CALL is a live-priority hint only when the primary auction format is English/open. |
 | Detail enrichment | Lower-frequency rotation, preferably during night hours | Refresh slow-changing vehicle metadata and discover photo/report references. Night-time is an optimization, not an assumption that auctions are inactive. |
 
 Auction state and lot state are separate. An auction may remain active while individual lots have finished bidding. A source-confirmed terminal state stops live polling for that lot only. The end of bidding is not proof of a sale.
+
+Auction format, auction phase, and lot countdown are independent signals:
+
+- The auction card's primary format label distinguishes English/open, closed, and fixed-price-only offers. A fixed-price option marker beside an English/closed format is an additional Buy Now option, not a replacement for the primary format.
+- FINAL CALL/HOT BID on an auction card may prioritize live refresh only for an English/open auction. The same label on a closed or fixed-price-only card must not activate live bid monitoring.
+- A visible label such as "Конец Сегодня 10:28" is an auction end-time label, not proof that bidding has started. Preserve it as source text until the site's server-time timezone is verified.
+- Per-lot HOT BID imagery and `counter_to_car_auction_end` timers describe an individual lot; they must not be promoted to auction-level state.
+- Fixed-price-only lots are enriched once and then rechecked on the slower detail rotation. The fixed price is appended to history only when amount/currency/source field changes. Do not poll them on the live-bid cadence.
 
 Price categories must remain separate: displayed auction price, verified fixed Buy Now price, raw API `highest_offer`, seller `minimum_price`, and seller `indicative_price`. Account-specific `user_offer` and `actual_car_price` must never enter the archive.
 
@@ -26,7 +34,7 @@ The earlier version of this document described the pre-PR #92 collector. That de
 
 ### Implemented
 
-- **Bounded planner primitives:** `scheduler.py` defines work types and deterministic priority ordering for live refresh, bootstrap, pre-start, routine refresh, and detail enrichment. It supports explicit item/time/page/live-lot/detail-page budgets and a reservation for background work to reduce starvation.
+- **Bounded planner primitives:** `scheduler.py` defines work types and deterministic priority ordering for live refresh, bootstrap, scheduled refresh, routine refresh, and detail enrichment. Auction-card parsing now separately exposes primary format, FINAL CALL/HOT BID, and a raw same-day end-time label. These classification/priority properties are not yet connected to the persisted due-work runtime. The manual bounded path remains in source order to avoid starving closed/fixed-price auctions while fairness is not persisted.
 - **Hard per-run limits:** `RunBudget` uses a monotonic deadline and atomically reserves catalogue pages, live-lot updates, and detail-page visits. Failed attempts still consume their reserved budget.
 - **Resumable catalogue scans:** SQLite schema v18 stores scan generations, completed page checkpoints, page payloads, API response payloads, and cursors. An unfinished scan resumes from its saved cursor. A page is checkpointed only after successful parsing and ingestion.
 - **Durable API queues:** bulk responses are replayed only after archive writes commit. API cursor advancement is durable. Unknown sale modes are split into per-lot deferred updates and replayed after detail enrichment establishes the sale type.
@@ -39,7 +47,7 @@ The earlier version of this document described the pre-PR #92 collector. That de
 - The pure planner is **not yet integrated** with `ExleasingcarCollector.run()` as a persisted due-work scheduler. The CLI still processes the selected auction list in its current order; it does not yet calculate and persist every auction's next due time for all cadences.
 - There is no host timer, systemd service, cloud worker, or unattended collection.
 - The collector still launches a visible persistent Chromium profile and uses the current local credential-store integration. This is not yet a supported cloud authentication design.
-- There is no verified auction-level scheduled start field or authoritative auction-level live/inactive signal.
+- The auction-list card exposes a same-day end-time label on some auctions, but the timestamp is still raw display text and its server timezone has not been verified. There is no verified scheduled trading-start field or authoritative auction-level live/inactive signal.
 - The current API fields `auction_end_at`, `remaining_seconds`, `live_bidding`, `auction_phase`, and `bid_status` are lot-level observations. They must not be repurposed as an auction start-time signal.
 - The Dashboard remains loopback-only and has no remote authentication/TLS layer. Do not expose it publicly.
 
@@ -56,7 +64,7 @@ A controlled manual run used auction `211304` and the separate database `real_si
 - One completed bootstrap scan with one catalogue page checkpoint.
 - 142 per-lot API updates still pending because their sale modes had not yet been established.
 
-The structural report passed. This is **not** full real-site acceptance: only six of 148 detail pages were checked, and only one of the 93 discovered auction cards was collected. The report does not prove the meaning of `highest_offer`, seller reference fields, scheduled start, or auction-level trading state. It also does not establish that all 66 photo references are correctly associated without a sample audit.
+The structural report passed. This is **not** full real-site acceptance: only six of 148 detail pages were checked, and only one of the 93 discovered auction cards was collected. The report does not prove the meaning of `highest_offer`, seller reference fields, the timezone/semantics of the visible end-time label, or auction-level trading state. It also does not establish that all 66 photo references are correctly associated without a sample audit.
 
 No media binaries were downloaded and no R2 operation was performed.
 
@@ -120,17 +128,17 @@ The existing planner is a pure bounded selection component. Runtime integration 
 One invocation should ask a single planner to choose among:
 1. positively confirmed live-auction refreshes;
 2. unfinished one-time bootstrap work;
-3. pre-start refreshes for verified start times;
+3. same-day end-time refreshes using an explicitly visible source label, without converting the label into a start time or UTC timestamp until verified;
 4. overdue 12-hour routine refreshes and catalogue discovery;
 5. lower-frequency detail enrichment and safe retries.
 
 The five-minute live work must not permanently starve bootstrap, routine refresh, or detail enrichment. Keep a configurable background reservation or weighted fairness rule. Within each class, select the oldest overdue item first with stable identifier tie-breaks.
 
 Persist at least:
-- work type, auction/lot target, due time, next due time, last attempted time, last successful time, and last result;
+- work type (including same-day scheduled-end refresh), auction/lot target, due time, next due time, last attempted time, last successful time, and last result;
 - scan generation, page cursor, completed-page checkpoints, and full-scan completion;
 - run ID, start/end time, selected work, consumed budgets, deferred items, and stop reason;
-- scheduled start value, source, observation time, timezone, and verification status after a trustworthy source is confirmed.
+- raw scheduled end-time label, source, observation time, server-clock context, and timezone verification status; do not store an inferred scheduled start.
 
 Missed timer ticks must result in overdue work being selected once, not unbounded catch-up bursts. A partial catalogue scan must never imply that an absent lot was sold or unavailable. Missing lots may be evaluated only after a complete scan, and disappearance alone is not proof of sale.
 
@@ -138,7 +146,7 @@ Missed timer ticks must result in overdue work being selected once, not unbounde
 
 Before enabling auction-level scheduling, a controlled real-site comparison must establish:
 
-1. Where the scheduled **trading start** is exposed (catalogue HTML, auction detail page, or API), its timezone, and whether it changes.
+1. Where the auction card's visible **end-time label** is exposed, whether it changes, and how it relates to the server clock; separately determine whether a scheduled trading-start field exists at all.
 2. Which source field positively confirms that the auction has started and later become inactive. Do not use `FINAL CALL`, an end time, or a stale lot countdown as a substitute.
 3. Whether catalogue/bulk API values are reliable during active trading. Compare displayed prices and per-lot states against the corresponding detail pages.
 4. The public meaning, if any, of `highest_offer`. Keep it named as the raw API field until verified.
@@ -150,11 +158,11 @@ For every observation, retain the raw field name, source (catalogue HTML, detail
 
 ## 7. Remaining implementation and acceptance phases
 
-1. **Finish API capture reliability:** review and merge PR #98 after successful CI; then repeat a bounded real-site run against a representative auction and verify API response capture.
+1. **Finish API capture reliability:** PR #98 is merged; the 25 Nov real-site run still showed a `Network.getResponseBody` warning, so verify whether the remaining response race can be reduced further.
 2. **Complete real-site qualification:** process the pending detail queue in bounded runs; verify price categories, completed-lot behavior, excluded hidden-bid lots, Buy Now eligibility, and media associations.
-3. **Complete bootstrap coverage:** traverse all 93+ discovered auctions and all catalogue pages using a persisted fair work queue. Do not mark bootstrap complete globally until every discovered auction scan is complete.
-4. **Integrate the planner:** persist due-work state and connect live, bootstrap, pre-start, routine, and detail work to the real collector adapters. Add tests for fairness, missed triggers, stale/missing signals, crash resume, and one-writer operation.
-5. **Choose and provision the runtime:** select provider/region, monthly budget, private access, durable disk, secret handling, and separate encrypted backup destination.
+3. **Complete bootstrap coverage:** traverse all discovered auctions and catalogue pages using a persisted fair work queue. Do not mark bootstrap complete globally until every discovered auction scan is complete.
+4. **Integrate the planner:** persist due-work state and connect live, bootstrap, same-day end-time, routine, and detail work to the real collector adapters. Add tests for fairness, missed triggers, stale/missing signals, crash resume, and one-writer operation.
+5. **Prepare the local runtime:** confirm the laptop's persistent storage, interactive Windows account, private SSH access, and a separate encrypted backup destination. No paid host is planned.
 6. **Operational rehearsal:** manually run bounded jobs on the laptop; test crash recovery, delayed/missed triggers, the reported 15-minute session expiry, manual reauthentication, and database restoration. Keep the Dashboard loopback-only.
 7. **R2 media archive:** only after the separate usage guard and explicit operation-level authorization are ready; no live R2 operations before that.
 8. **Release v0.4.0:** only after real-site acceptance, migrations, CI, security, and recovery checks pass.

@@ -21,7 +21,7 @@ class WorkType(str, Enum):
 
     LIVE_REFRESH = "live_refresh"
     BOOTSTRAP = "bootstrap"
-    PRESTART_REFRESH = "prestart_refresh"
+    SCHEDULED_END_REFRESH = "scheduled_end_refresh"
     ROUTINE_REFRESH = "routine_refresh"
     DETAIL_ENRICHMENT = "detail_enrichment"
 
@@ -30,7 +30,7 @@ class WorkType(str, Enum):
         return {
             WorkType.LIVE_REFRESH: 0,
             WorkType.BOOTSTRAP: 1,
-            WorkType.PRESTART_REFRESH: 2,
+            WorkType.SCHEDULED_END_REFRESH: 2,
             WorkType.ROUTINE_REFRESH: 3,
             WorkType.DETAIL_ENRICHMENT: 4,
         }[self]
@@ -52,7 +52,7 @@ class CollectionWorkItem:
     """One resumable unit of collector work.
 
     Costs are explicit so the planner can enforce separate catalogue-page,
-    live-lot, and detail-page limits. Bootstrap, pre-start, and routine work
+    live-lot, and detail-page limits. Bootstrap, scheduled-end, and routine work
     consume catalogue pages; live refresh consumes lot slots; detail
     enrichment consumes detail-page slots.
     """
@@ -103,7 +103,7 @@ class CollectionWorkItem:
             WorkType.LIVE_REFRESH: "live lots",
             WorkType.DETAIL_ENRICHMENT: "detail pages",
             WorkType.BOOTSTRAP: "catalogue",
-            WorkType.PRESTART_REFRESH: "catalogue",
+            WorkType.SCHEDULED_END_REFRESH: "catalogue",
             WorkType.ROUTINE_REFRESH: "catalogue",
         }[self.work_type]
         if costs[expected_cost] <= 0:

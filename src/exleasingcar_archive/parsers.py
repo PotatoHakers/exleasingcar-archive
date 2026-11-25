@@ -238,20 +238,128 @@ def classify_vehicle_status(
     return VehicleStatus.UNKNOWN
 
 
+def _scheduled_end_label(text: str) -> bool:
+    lowered = text.casefold()
+    return bool(
+        re.search(r"\b\d{1,2}:\d{2}\b", lowered)
+        and any(
+            marker in lowered
+            for marker in ("сегодня", "today", "завтра", "tomorrow", "конец", "end")
+        )
+    )
+
+
+def _auction_card_status(
+    card: Tag,
+) -> tuple[AuctionStatus, str | None]:
+    """Read auction-level status without confusing it with per-lot HOT BID."""
+    type_image = card.select_one(".card-header .ac-head-items img[alt]")
+    auction_type = (
+        str(type_image.get("alt") or type_image.get("title") or "").casefold()
+        if isinstance(type_image, Tag)
+        else ""
+    )
+    is_open_auction = "английск" in auction_type or "english auction" in auction_type
+
+    status_area = card.select_one(".ac-list-left")
+    if status_area is None:
+        return AuctionStatus.UNKNOWN, None
+
+    status_text = None
+    for candidate in status_area.select(
+        ".ac-head-item, .ac-head-inner, button"
+    ):
+        candidate_text = clean_text(candidate)
+        if not candidate_text:
+            continue
+        lowered = candidate_text.casefold()
+        if (
+            "final call" in lowered
+            or "hot bid" in lowered
+            or "аукцион заверш" in lowered
+            or "auction completed" in lowered
+            or "аукцион активен" in lowered
+            or "auction active" in lowered
+            or _scheduled_end_label(candidate_text)
+        ):
+            status_text = candidate_text
+            break
+
+    if status_text is None:
+        return AuctionStatus.UNKNOWN, None
+
+    lowered = status_text.casefold()
+    if any(
+        marker in lowered
+        for marker in (
+            "аукцион завершён",
+            "аукцион завершен",
+            "auction completed",
+        )
+    ):
+        return AuctionStatus.COMPLETED, status_text
+
+    if _scheduled_end_label(status_text):
+        return AuctionStatus.SCHEDULED_END, status_text
+
+    # FINAL CALL is a live-bidding priority signal only for the English/open
+    # auction format. Closed and fixed-price cards can display the same label,
+    # but they must not be promoted into the live bid monitor.
+    if "final call" in lowered:
+        if is_open_auction:
+            return AuctionStatus.FINAL_CALL, status_text
+        return AuctionStatus.UNKNOWN, status_text
+
+    if "hot bid" in lowered:
+        if is_open_auction:
+            return AuctionStatus.ACTIVE, status_text
+        return AuctionStatus.UNKNOWN, status_text
+
+    if ("аукцион активен" in lowered or "auction active" in lowered) and is_open_auction:
+        return AuctionStatus.ACTIVE, status_text
+
+    return AuctionStatus.UNKNOWN, status_text
+
+
 def extract_auction_status(
     soup: BeautifulSoup,
 ) -> tuple[AuctionStatus, str | None]:
+    """Extract auction-card phase, falling back only on old card-less page variants."""
+    auction_card = soup.select_one(".ac-list-item")
+    if isinstance(auction_card, Tag):
+        return _auction_card_status(auction_card)
+
+    # Older catalogue variants may omit the auction-card wrapper. In that
+    # case, require an explicit English/open format icon before interpreting
+    # FINAL CALL/HOT BID as live bidding. Unknown format stays unknown.
+    format_labels = []
+    for image in soup.find_all("img", alt=True):
+        source = str(image.get("src") or "").rsplit("/", 1)[-1].split("?", 1)[0]
+        if source.casefold() not in {"ac.svg", "mail-b.svg"}:
+            continue
+        format_labels.append(
+            str(image.get("alt") or image.get("title") or "").casefold()
+        )
+    is_open_auction = any(
+        "английск" in label or "english auction" in label
+        for label in format_labels
+    ) and not any(
+        "закрыт" in label or "closed auction" in label for label in format_labels
+    )
+
     for tag in soup.find_all(("h1", "h2", "button")):
         text = clean_text(tag)
-
         if not text:
             continue
-
         lowered = text.casefold()
-
         if "final call" in lowered:
-            return AuctionStatus.FINAL_CALL, text
-
+            if is_open_auction:
+                return AuctionStatus.FINAL_CALL, text
+            continue
+        if "hot bid" in lowered:
+            if is_open_auction:
+                return AuctionStatus.ACTIVE, text
+            continue
         if any(
             marker in lowered
             for marker in (
@@ -261,13 +369,11 @@ def extract_auction_status(
             )
         ):
             return AuctionStatus.COMPLETED, text
-
-        if any(
-            marker in lowered
-            for marker in (
-                "аукцион активен",
-                "auction active",
-            )
+        if _scheduled_end_label(text):
+            return AuctionStatus.SCHEDULED_END, text
+        if (
+            is_open_auction
+            and ("аукцион активен" in lowered or "auction active" in lowered)
         ):
             return AuctionStatus.ACTIVE, text
 

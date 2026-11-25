@@ -30,6 +30,71 @@ class ParsedAuctionListing:
     source_url: str | None
     markers: tuple[AuctionCardMarker, ...] = ()
 
+    @property
+    def is_open_auction(self) -> bool:
+        """Return true only for the site's explicitly labelled English auction."""
+        label = (self.auction_type_label or "").casefold()
+        return "английск" in label or "english auction" in label
+
+    @property
+    def is_closed_auction(self) -> bool:
+        """Recognize the site's explicitly labelled closed/sealed auction format."""
+        label = (self.auction_type_label or "").casefold()
+        return "закрыт" in label or "closed auction" in label
+
+    @property
+    def is_fixed_price_only(self) -> bool:
+        """A fixed-price option is primary only when no auction format is advertised."""
+        label = (self.auction_type_label or "").casefold()
+        is_fixed_price = "фиксирован" in label or "fixed price" in label
+        return (
+            is_fixed_price
+            and not self.is_open_auction
+            and not self.is_closed_auction
+        )
+
+    @property
+    def has_final_call(self) -> bool:
+        return (self.auction_status_label or "").strip().casefold() == "final call"
+
+    @property
+    def has_hot_bid_signal(self) -> bool:
+        return (self.auction_status_label or "").strip().casefold() == "hot bid"
+
+    @property
+    def has_scheduled_end_label(self) -> bool:
+        """Recognize a visible end-time label without guessing its timezone."""
+        label = (self.auction_status_label or "").casefold()
+        return bool(
+            re.search(r"\b\d{1,2}:\d{2}\b", label)
+            and any(
+                marker in label
+                for marker in ("сегодня", "today", "завтра", "tomorrow", "конец", "end")
+            )
+        )
+
+    @property
+    def supports_live_bid_monitoring(self) -> bool:
+        """Only English/open auctions are candidates for public bid monitoring."""
+        return self.is_open_auction
+
+    @property
+    def collection_priority(self) -> int:
+        """Prioritize live open auctions without mistaking fixed/closed formats for live."""
+        if self.is_open_auction:
+            if self.has_final_call:
+                return 0
+            if self.has_hot_bid_signal:
+                return 1
+            if self.has_scheduled_end_label:
+                return 2
+            return 3
+        if self.is_closed_auction:
+            return 4
+        if self.is_fixed_price_only:
+            return 5
+        return 6
+
 
 @dataclass(frozen=True, slots=True)
 class ParsedAuctionLotMetadata:
@@ -329,11 +394,43 @@ def _parse_auction_card(
     auction_markers = _parse_auction_card_markers(auction_header)
 
     auction_status_label = None
-    for button in card.find_all("button"):
-        button_text = _text(button)
-        if button_text:
-            auction_status_label = button_text
-            break
+    status_area = card.select_one(".ac-list-left")
+    if isinstance(status_area, Tag):
+        for candidate in status_area.select(
+            ".ac-head-item, .ac-head-inner, button"
+        ):
+            candidate_text = _text(candidate)
+            if not candidate_text:
+                continue
+            normalized = candidate_text.casefold()
+            is_status_label = (
+                any(
+                    marker in normalized
+                    for marker in (
+                        "final call",
+                        "hot bid",
+                        "сегодня",
+                        "today",
+                        "завтра",
+                        "tomorrow",
+                        "конец",
+                        "end",
+                    )
+                )
+                or re.search(r"\b\d{1,2}:\d{2}\b", candidate_text) is not None
+            )
+            if is_status_label:
+                auction_status_label = candidate_text
+                break
+
+    # Keep the previous fallback for older page variants where the clock/status
+    # area is not wrapped in the current .ac-list-left structure.
+    if auction_status_label is None:
+        for button in card.find_all("button"):
+            button_text = _text(button)
+            if button_text:
+                auction_status_label = button_text
+                break
 
     return ParsedAuctionListing(
         exleasingcar_auction_id=auction_id,

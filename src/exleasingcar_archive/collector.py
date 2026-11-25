@@ -2017,11 +2017,15 @@ class ExleasingcarCollector:
                     )
 
                 print(f"Auction cards discovered: {len(auctions)}")
+                # Auction format/status classification is available to the
+                # persisted due-work planner. Keep this manual bounded path in
+                # source order until that planner owns fairness/rotation; sorting
+                # here would starve closed and fixed-price auctions with max_auctions=1.
                 selected_auctions = auctions
                 if auction_id:
                     selected_auctions = [
                         item
-                        for item in auctions
+                        for item in selected_auctions
                         if item.exleasingcar_auction_id == auction_id
                     ]
                     if not selected_auctions:
