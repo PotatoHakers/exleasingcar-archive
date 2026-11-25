@@ -329,14 +329,37 @@ def extract_auction_status(
     if isinstance(auction_card, Tag):
         return _auction_card_status(auction_card)
 
-    # Compatibility with older page variants and small isolated parser fixtures.
+    # Older catalogue variants may omit the auction-card wrapper. In that
+    # case, require an explicit English/open format icon before interpreting
+    # FINAL CALL/HOT BID as live bidding. Unknown format stays unknown.
+    format_labels = []
+    for image in soup.find_all("img", alt=True):
+        source = str(image.get("src") or "").rsplit("/", 1)[-1].split("?", 1)[0]
+        if source.casefold() not in {"ac.svg", "mail-b.svg"}:
+            continue
+        format_labels.append(
+            str(image.get("alt") or image.get("title") or "").casefold()
+        )
+    is_open_auction = any(
+        "английск" in label or "english auction" in label
+        for label in format_labels
+    ) and not any(
+        "закрыт" in label or "closed auction" in label for label in format_labels
+    )
+
     for tag in soup.find_all(("h1", "h2", "button")):
         text = clean_text(tag)
         if not text:
             continue
         lowered = text.casefold()
         if "final call" in lowered:
-            return AuctionStatus.FINAL_CALL, text
+            if is_open_auction:
+                return AuctionStatus.FINAL_CALL, text
+            continue
+        if "hot bid" in lowered:
+            if is_open_auction:
+                return AuctionStatus.ACTIVE, text
+            continue
         if any(
             marker in lowered
             for marker in (
@@ -346,16 +369,13 @@ def extract_auction_status(
             )
         ):
             return AuctionStatus.COMPLETED, text
-        if any(
-            marker in lowered
-            for marker in (
-                "аукцион активен",
-                "auction active",
-            )
-        ):
-            return AuctionStatus.ACTIVE, text
         if _scheduled_end_label(text):
             return AuctionStatus.SCHEDULED_END, text
+        if (
+            is_open_auction
+            and ("аукцион активен" in lowered or "auction active" in lowered)
+        ):
+            return AuctionStatus.ACTIVE, text
 
     return AuctionStatus.UNKNOWN, None
 
