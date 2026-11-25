@@ -55,9 +55,14 @@ def format_auction_time_for_user(value: str | None) -> str | None:
         parsed = None
 
     if parsed is not None:
+        # Explicitly zoned timestamps are instants, not the site's naive wall
+        # clock; leave them untouched until a source timezone is configured.
+        if parsed.tzinfo is not None:
+            return raw
         shifted = parsed + SITE_TO_USER_TIME_OFFSET
+        has_seconds = re.search(r":\\d{2}:\\d{2}(?:\\.|$)", raw) is not None
         timespec = "microseconds" if shifted.microsecond else (
-            "seconds" if parsed.second else "minutes"
+            "seconds" if has_seconds else "minutes"
         )
         return shifted.isoformat(
             sep=" " if " " in raw else "T",
