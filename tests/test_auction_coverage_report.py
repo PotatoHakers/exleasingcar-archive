@@ -32,7 +32,7 @@ def test_auction_coverage_report_distinguishes_api_refresh_from_detail_visits(
     )
     database.record_price_observation(
         "car-api-only",
-        Decimal("10900"),
+        Decimal(10900),
         observed_at=datetime.fromisoformat("2026-11-25T10:55:30+00:00"),
         exleasingcar_auction_id="211225",
     )
