@@ -30,6 +30,7 @@ def test_parse_active_auction_response_fixture():
     assert car.auction_end_at == "2026-11-12 13:19:57"
     assert car.live_bidding is False
     assert car.bid_status is None
+    assert car.completion_reason is None
 
 
 def test_zero_price_is_preserved():
@@ -90,3 +91,42 @@ def test_multiple_cars_are_parsed():
 def test_invalid_json_raises_error():
     with pytest.raises(ValueError, match="Invalid JSON"):
         parse_car_update_response("{invalid json")
+
+
+
+def test_expired_final_call_with_live_bidding_false_completes_lot():
+    response = {
+        "car-1": {
+            "car_auction_time": {
+                "type": "final-call",
+                "image": "final-call-active",
+                "laikas": "2026-11-25 11:59",
+                "liveBidding": False,
+            },
+            "liko_s": -2687,
+        }
+    }
+
+    car = parse_car_update_response(response)["car-1"]
+
+    assert car.final_call_active is True
+    assert car.live_bidding is False
+    assert car.remaining_seconds == -2687
+    assert car.completion_reason == "countdown_expired"
+
+
+def test_expired_countdown_does_not_complete_while_live_bidding_is_true():
+    response = {
+        "car-1": {
+            "car_auction_time": {
+                "type": "final-call",
+                "image": "final-call-active",
+                "liveBidding": True,
+            },
+            "liko_s": -10,
+        }
+    }
+
+    car = parse_car_update_response(response)["car-1"]
+
+    assert car.completion_reason is None
