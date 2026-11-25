@@ -36,6 +36,12 @@ def test_auction_coverage_report_distinguishes_api_refresh_from_detail_visits(
         observed_at=datetime.fromisoformat("2026-11-25T10:55:30+00:00"),
         exleasingcar_auction_id="211225",
     )
+    database.mark_open_auction_completed(
+        "car-api-only",
+        "211225",
+        reason="countdown_expired",
+        completed_at=datetime.fromisoformat("2026-11-25T10:56:00+00:00"),
+    )
     with database._connect() as connection:
         connection.execute(
             """
@@ -90,7 +96,10 @@ def test_auction_coverage_report_distinguishes_api_refresh_from_detail_visits(
     assert result.returncode == 0, result.stderr + result.stdout
     assert "Auction 211225: 2 archived lot(s)" in result.stdout
     assert "API checked during run: 1" in result.stdout
-    assert "Detail pages attempted/checked during run: 1" in result.stdout
+    assert "Detail attempts during run: 1" in result.stdout
+    assert "Successful detail checks during run: 1" in result.stdout
+    assert "Open-lot monitoring completed: 1" in result.stdout
+    assert "COMPLETED 2026-11-25T10:56:00+00:00 (countdown_expired)" in result.stdout
     assert "car-api-only | Audi A6 2.0 TDI" in result.stdout
     assert "10900 EUR" in result.stdout
     assert "car-detail | BMW 320d" in result.stdout
