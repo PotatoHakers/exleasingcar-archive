@@ -1,140 +1,160 @@
 # Collector Runtime and Scheduler Design
 
-**Status:** proposal for [Issue #45](https://github.com/PotatoHakers/exleasingcar-archive/issues/45)  
-**Scope:** architecture and implementation plan only. This document does not enable unattended collection, change the database schema, expose the Dashboard, or perform any R2 operation.
+**Status:** implementation foundation in place; runtime and source-verification gates remain open for [Issue #45](https://github.com/PotatoHakers/exleasingcar-archive/issues/45).  
+**Current application schema:** SQLite v18.  
+**Scope:** design and implementation status only. This document does not enable unattended collection, expose the Dashboard, or authorize any R2 operation.
 
 ## 1. Product requirements
 
-The planner must support these work types. Intervals are configuration, with the owner's current values as defaults.
+The collector must support one shared due-work planner with configurable intervals. Current owner-requested defaults are:
 
 | Work type | Default cadence / trigger | Collection behavior |
 |---|---|---|
-| Initial bootstrap | One-time, explicitly started | Discover every available auction and walk all catalogue pages in bounded batches. Qualify only lots with an accepted public value. |
-| Routine refresh | Every 12 hours | Refresh known auctions and their known lots while they remain listed. Also discover newly listed auctions/lots through the catalogue index. |
-| Pre-start refresh | Once about 2 hours before a verified scheduled start | Refresh the eligible lots in that auction. Use a scheduled **start** time, never an end time/countdown. |
-| Live-auction refresh | Every 5 minutes while active trading is positively confirmed | Prefer catalogue/bulk API data. Update many lots without opening every detail page. |
-| Detail enrichment | Opportunistic night-time rotation, plus a lower-frequency fallback | Open a bounded number of eligible lot detail pages for slow-changing metadata and media source references. Night-time is a preference, not an assumption that no auctions are active. |
+| Initial bootstrap | One-time, explicitly started | Discover every available auction and traverse every catalogue page in bounded, resumable runs. Archive only lots with a qualifying public price. |
+| Routine refresh | Every 12 hours | Refresh known auctions/lots, discover newly listed lots, append observations, and preserve history when listings disappear. |
+| Pre-start refresh | Once about 2 hours before a verified scheduled start | Refresh eligible lots. Use a scheduled **start** time, never an end time or countdown. |
+| Live-auction refresh | Every 5 minutes after trading is positively confirmed | Prefer catalogue/bulk API updates; do not open every vehicle detail page on each cycle. |
+| Detail enrichment | Lower-frequency rotation, preferably during night hours | Refresh slow-changing vehicle metadata and discover photo/report references. Night-time is an optimization, not an assumption that auctions are inactive. |
 
-The five-minute cadence is intentional. The site timer is usually visible only during roughly the final 15 seconds, so a separate one-minute polling loop is not useful. Save a timer only when the source actually supplies one; a missing timer must not block collection or be guessed.
+Auction state and lot state are separate. An auction may remain active while individual lots have finished bidding. A source-confirmed terminal state stops live polling for that lot only. The end of bidding is not proof of a sale.
 
-Auction state and lot state are separate. An auction may remain active while individual lots have finished. A source-confirmed terminal state stops live polling only for that lot; it must not stop updates for other lots in the same auction. The end of bidding is not proof of a sale.
+Price categories must remain separate: displayed auction price, verified fixed Buy Now price, raw API `highest_offer`, seller `minimum_price`, and seller `indicative_price`. Account-specific `user_offer` and `actual_car_price` must never enter the archive.
 
-## 2. Verified current implementation and gaps
+## 2. Current implementation (verified against master)
 
-The current code is a bounded local collector, not yet a scheduled worker:
+The earlier version of this document described the pre-PR #92 collector. That description is obsolete. The repository now includes the following foundation:
 
-- `ExleasingcarCollector.run()` opens a persistent Chromium profile with `headless=False`. Authentication reads credentials from Windows Credential Manager through `keyring`.
-- One run processes selected auctions; `_collect_auction()` walks catalogue pagination from the beginning. It has a detail-page limit, but no overall run-time budget or persisted catalogue-page cursor.
-- Detail-page refresh has a weekly retry/rotation mechanism. That is useful as an enrichment mechanism, but it is not the requested 12-hour catalogue refresh.
-- The `auctions` table stores auction identity, labels, first/last-seen timestamps, but no verified scheduled trading start.
-- `auction_events` stores per-lot `auction_end_at`, `remaining_seconds`, `live_bidding`, source, and observation time. These are lot-level observations; they cannot safely substitute for an auction start time.
-- `ParsedAuctionListing` currently has no scheduled-start field. Auction-level active trading is not yet backed by a separately verified authoritative source signal.
-- The collector currently processes a catalogue scan as one pagination loop. It does not persist enough scan progress to safely resume a partially completed catalogue sweep.
-- The existing GitHub Actions workflow is source-only Ruff/pytest CI. A GitHub-hosted runner is ephemeral and has no durable browser profile or local SQLite database between jobs.
-- The Dashboard defaults to loopback, but the current HTTP server has no authentication or TLS. It must not be exposed directly on a public interface.
+### Implemented
 
-These gaps mean that the cadence policy can be designed now, but unattended execution must wait for the runtime, authentication, and source-verification gates below.
+- **Bounded planner primitives:** `scheduler.py` defines work types and deterministic priority ordering for live refresh, bootstrap, pre-start, routine refresh, and detail enrichment. It supports explicit item/time/page/live-lot/detail-page budgets and a reservation for background work to reduce starvation.
+- **Hard per-run limits:** `RunBudget` uses a monotonic deadline and atomically reserves catalogue pages, live-lot updates, and detail-page visits. Failed attempts still consume their reserved budget.
+- **Resumable catalogue scans:** SQLite schema v18 stores scan generations, completed page checkpoints, page payloads, API response payloads, and cursors. An unfinished scan resumes from its saved cursor. A page is checkpointed only after successful parsing and ingestion.
+- **Durable API queues:** bulk responses are replayed only after archive writes commit. API cursor advancement is durable. Unknown sale modes are split into per-lot deferred updates and replayed after detail enrichment establishes the sale type.
+- **Per-process exclusion:** the manual collector uses a non-blocking OS-level lock before database initialization or browser startup. The default lock is shared across CLI runs in the checkout.
+- **Read-only validation report:** `real_site_validation_report.py` checks schema version, SQLite integrity, foreign keys, expected tables, catalogue progress, pending deferred API work, price coverage, and media-discovery aggregates.
+- **Source-only CI:** GitHub Actions runs Ruff and pytest. It does not authenticate to Exleasingcar or access the private archive/R2.
 
-## 3. Recommended runtime shape
+### Still not implemented
 
-**Recommendation:** one dedicated private cloud VM with an encrypted persistent block volume, running a single collector service. The provider is deliberately not selected in this proposal.
+- The pure planner is **not yet integrated** with `ExleasingcarCollector.run()` as a persisted due-work scheduler. The CLI still processes the selected auction list in its current order; it does not yet calculate and persist every auction's next due time for all cadences.
+- There is no host timer, systemd service, cloud worker, or unattended collection.
+- The collector still launches a visible persistent Chromium profile and uses the current local credential-store integration. This is not yet a supported cloud authentication design.
+- There is no verified auction-level scheduled start field or authoritative auction-level live/inactive signal.
+- The current API fields `auction_end_at`, `remaining_seconds`, `live_bidding`, `auction_phase`, and `bid_status` are lot-level observations. They must not be repurposed as an auction start-time signal.
+- The Dashboard remains loopback-only and has no remote authentication/TLS layer. Do not expose it publicly.
 
-- Run the collector on that VM, independently of the owner's personal PC.
-- Keep the SQLite database, browser profile, and scheduler progress on the VM's durable private volume. Use a local filesystem on that volume, not a network share or a file-sync folder for the live SQLite database.
-- Use one collector process at a time. A host-level process lock prevents overlapping invocations; SQLite transactions protect each state update. The worker is the single writer.
-- Trigger the worker with a host scheduler (for example, a systemd timer) at the configured five-minute live-work cadence. Every invocation asks the same planner what is due; a delayed or missed trigger is recovered by checking persisted due times on the next invocation.
-- Run GitHub Actions only for source CI. Do not give public pull-request workflows access to the authenticated browser, database, secrets, or the private runtime. Do not put this collector on a self-hosted runner that executes untrusted pull-request code.
-- Keep the Dashboard bound to loopback. Remote access, if needed, should initially use a private VPN or SSH tunnel. Do not expose the current unauthenticated HTTP server; remote hosting requires authentication, HTTPS at the serving edge, and authorization tests first.
+## 3. Real-site validation snapshot — 24 November 2026
 
-A GitHub Actions schedule could at most be a trigger for an independently hosted private service. It should not be the collector's runtime or persistence layer.
+A controlled manual run used auction `211304` and the separate database `real_site_validation_v18.sqlite3`. The subsequent read-only report returned:
+
+- SQLite schema v18; `integrity_check=ok`; zero foreign-key violations.
+- 93 auction cards discovered on the site list; one auction processed.
+- 148 unique catalogue lots and 148 recognized detail links.
+- Six detail pages attempted and checked; 142 detail pages had not yet been checked.
+- 66 photo source references across the six checked lots; no PDF report references in those six details.
+- Eight API `highest_offer` observations across six lots; six seller-reference observations; six displayed-price observations.
+- One completed bootstrap scan with one catalogue page checkpoint.
+- 142 per-lot API updates still pending because their sale modes had not yet been established.
+
+The structural report passed. This is **not** full real-site acceptance: only six of 148 detail pages were checked, and only one of the 93 discovered auction cards was collected. The report does not prove the meaning of `highest_offer`, seller reference fields, scheduled start, or auction-level trading state. It also does not establish that all 66 photo references are correctly associated without a sample audit.
+
+No media binaries were downloaded and no R2 operation was performed.
+
+### API response capture follow-up
+
+The same real-site collector log showed two HTTP 200 API responses whose bodies were unavailable after navigation (`Network.getResponseBody: No resource with given identifier found`). PR #98 contains a bounded retry at `requestfinished`, a longer wait for detail-page API requests, and a stop-before-next-navigation guard. It must pass CI and owner review/merge before another real-site run is used to assess whether this issue is resolved.
+
+### Next controlled data work
+
+Continue using the same temporary database so its catalogue checkpoints and deferred queue are retained. Process additional detail pages in bounded batches, verify that the pending deferred API count falls as sale modes become known, and compare representative catalogue/API/detail observations. Do not use the tiny three-car auction `209633` as the primary sample; it is not representative of the wider archive.
+
+The next full-archive bootstrap must cover all available auctions, not just `211304`. The current collector still needs a round-robin/persisted due-work integration before repeated unattended runs can safely manage this across the whole site.
+
+## 4. Recommended runtime shape
+
+**Recommendation:** one dedicated private cloud VM with encrypted persistent block storage, running a single collector service. The provider is deliberately not selected.
+
+- Run independently of the owner's personal PC.
+- Keep SQLite, the persistent Chromium profile, and scheduler state on a durable private local filesystem attached to the VM. Do not put the live SQLite database on a network share or file-sync folder.
+- Use one collector process at a time; retain the OS process lock and SQLite transactions.
+- Trigger the worker with a host scheduler such as a systemd timer only after persisted due-work scheduling and operational rehearsal are complete.
+- Keep GitHub Actions limited to public-source Ruff/pytest CI. Do not grant public pull-request workflows access to authenticated sessions, the database, or cloud secrets. Do not use a self-hosted runner for untrusted public PRs.
+- Keep the Dashboard bound to loopback. Use a private VPN or SSH tunnel for initial administration. Remote Dashboard hosting requires authentication, HTTPS at the serving edge, and authorization tests before exposure.
+
+A GitHub Actions schedule may only trigger a private service; it must not become the collector's runtime or persistence layer.
 
 ### Authentication and secrets
 
-The current Windows Credential Manager integration is a local-machine dependency and is not a cloud authentication design. The cloud host needs a supported, manually established Exleasingcar session and a controlled re-authentication procedure.
+The current local credential-store/browser setup is not a cloud authentication design.
 
-- Establish the first login interactively through private remote access; verify whether the site session remains valid in the intended headless Chromium environment before enabling unattended runs.
-- Persist the browser profile only on the encrypted private volume, with access restricted to the collector service account.
-- Keep passwords and any service secrets in the host's secret store / protected service credentials, never in Git, a database row, command-line arguments, CI artifacts, or logs.
-- Do not copy the current Windows browser profile or credentials to GitHub.
+- Establish the first login interactively through private remote access on the selected host.
+- Verify that ordinary Exleasingcar login and the persistent Chromium session remain stable there, including the site's normal additional verification flow if requested.
+- Keep the browser profile on the encrypted private volume, accessible only to the collector service account.
+- Keep credentials and service secrets in the host's protected secret store, never in Git, SQLite rows, command-line arguments, CI artifacts, or logs.
+- Never bypass CAPTCHA, MFA, or another verification step.
 
-If the site's login or verification flow cannot be kept safely and reliably in the proposed headless environment, stop at the controlled validation stage and revisit the runtime design rather than bypassing verification.
+If the site session cannot be maintained safely and reliably, stop; do not attempt to defeat the site's authentication controls.
 
-### SQLite, backups, and R2
+### SQLite backups and R2
 
-- Keep one SQLite database on the VM's durable local volume. Use SQLite's supported backup API for consistent backups; do not copy a live database file while ignoring its WAL state.
-- Take encrypted backups to a separate private backup destination and test restoration before schema migrations. The backup destination/provider is still a decision; do not assume the media bucket is automatically the database backup target.
-- Cloudflare R2 is the selected object store for binary media. Keep the bucket private and credentials in the runtime secret store. The media pipeline remains separate from scheduler activation.
-- This proposal does not authorize live R2 reads, writes, bucket checks, uploads, downloads, or usage queries.
+- Keep one SQLite database on the VM's durable local volume and use SQLite's backup API for consistent backups. Do not copy a live database while ignoring WAL state.
+- Store encrypted backups in a separate private backup destination. Test restoration before schema migrations.
+- R2 remains the selected object store for original photos, reports, and derived previews. The production bucket must remain private.
+- Database backups are not implicitly stored in the media bucket.
+- This design does not authorize R2 reads, writes, usage queries, bucket checks, uploads, downloads, or preview serving. Those require separate explicit owner authorization for the specific operation and the project's usage guard.
 
-## 4. One bounded planner
+## 5. One persisted due-work planner
 
-Use one planner that returns a bounded batch of work items. Do not create independent full-scan loops for each cadence.
+The existing planner is a pure bounded selection component. Runtime integration still needs a persisted source of due work.
 
-Each run has validated, configurable budgets:
+One invocation should ask a single planner to choose among:
+1. positively confirmed live-auction refreshes;
+2. unfinished one-time bootstrap work;
+3. pre-start refreshes for verified start times;
+4. overdue 12-hour routine refreshes and catalogue discovery;
+5. lower-frequency detail enrichment and safe retries.
 
-- maximum wall-clock duration;
-- maximum catalogue pages;
-- maximum lots handled by a live batch;
-- maximum detail pages;
-- allowed work modes and their intervals;
-- freshness/staleness limits for auction and lot observations;
-- night enrichment window and its maximum share of the run.
-
-The planner reads persisted state, calculates what is due, and chooses work. It does not infer state from a schedule tick alone. Missed intervals make work overdue once; they do not cause an unbounded burst of back-to-back catch-up runs.
-
-### Priority and fairness
-
-1. Positively confirmed live-auction refreshes, due every five minutes.
-2. The one-time bootstrap until every discovered auction catalogue has been fully traversed.
-3. The pre-start refresh for auctions with a verified scheduled start in the configured two-hour window.
-4. The 12-hour refresh of known auctions/lots and catalogue discovery.
-5. Night-time detail enrichment and lower-priority retries.
-
-Priority 1 must not consume the entire run indefinitely. Reserve a configurable part of each run for overdue bootstrap/routine work and detail enrichment. Within a class, process the oldest overdue item first; break ties deterministically by auction ID and page/lot ID. The planner reports deferred work and its reason so the next invocation can resume fairly.
-
-### Progress and idempotency
+The five-minute live work must not permanently starve bootstrap, routine refresh, or detail enrichment. Keep a configurable background reservation or weighted fairness rule. Within each class, select the oldest overdue item first with stable identifier tie-breaks.
 
 Persist at least:
+- work type, auction/lot target, due time, next due time, last attempted time, last successful time, and last result;
+- scan generation, page cursor, completed-page checkpoints, and full-scan completion;
+- run ID, start/end time, selected work, consumed budgets, deferred items, and stop reason;
+- scheduled start value, source, observation time, timezone, and verification status after a trustworthy source is confirmed.
 
-- work type, target auction/lot, due time, next-due time, last successful time, last attempted time, and last result;
-- the current catalogue scan generation, page cursor/URL, completed pages, and whether the full scan completed;
-- run ID, start/end time, selected priorities, consumed page/time budget, result, and stop reason;
-- the scheduled-start value together with its source, observation timestamp, and verification status once a reliable source is found.
+Missed timer ticks must result in overdue work being selected once, not unbounded catch-up bursts. A partial catalogue scan must never imply that an absent lot was sold or unavailable. Missing lots may be evaluated only after a complete scan, and disappearance alone is not proof of sale.
 
-Checkpoint after each successfully parsed catalogue page. A run stopped by its time/page budget resumes from its saved cursor. Mark an auction scan complete only after all discovered catalogue pages have completed. Never mark a lot unavailable or sold because it was absent from a partial scan. Missing lots are only classified after a complete scan, and disappearance alone is not a sale signal.
+## 6. Source-verification gates
 
-Use an idempotency key for a pre-start refresh (auction ID plus the verified scheduled-start observation/version) so a delayed trigger does not repeat the same pre-start action. A new verified start time creates a new due event.
+Before enabling auction-level scheduling, a controlled real-site comparison must establish:
 
-## 5. Source-verification gates
+1. Where the scheduled **trading start** is exposed (catalogue HTML, auction detail page, or API), its timezone, and whether it changes.
+2. Which source field positively confirms that the auction has started and later become inactive. Do not use `FINAL CALL`, an end time, or a stale lot countdown as a substitute.
+3. Whether catalogue/bulk API values are reliable during active trading. Compare displayed prices and per-lot states against the corresponding detail pages.
+4. The public meaning, if any, of `highest_offer`. Keep it named as the raw API field until verified.
+5. The exact meaning and visibility of `minimum_price` and `indicative_price`. Seller references alone do not qualify a lot as having a public starting price.
+6. How the catalogue represents a lot whose bidding ended while other lots in the same auction remain active.
+7. How a completed/closed lot with and without a verified public Buy Now price is represented.
 
-Do not implement auction-level scheduling based on assumptions. A controlled, bounded real-site check must establish:
+For every observation, retain the raw field name, source (catalogue HTML, detail HTML, or API), normalized value, and observation timestamp. Missing or stale values are unknown/unavailable, not zero. Never store `user_offer` or `actual_car_price` as archive prices.
 
-1. Where the site's **scheduled trading start** is actually displayed or returned (catalogue HTML, auction detail, or API), its timezone, and whether it changes.
-2. Which source field/page positively confirms that auction trading has started and later become inactive. Do not infer this from `FINAL CALL`, an end time, or a stale per-lot countdown.
-3. Whether the catalogue/bulk API reliably exposes current public prices and per-lot status during live trading. Compare a sample against the corresponding detail page and record source plus observation time.
-4. The public meaning of `highest_offer`. Keep it labelled as a raw API field until the controlled comparison confirms it represents a public bid. Do not use account-specific `user_offer` or `actual_car_price` as archive prices or qualification evidence.
-5. The exact meaning and visibility of `minimum_price` and `indicative_price`. Do not treat seller reference values as public starting prices without evidence.
-6. How completed lots are represented in the catalogue while other lots in the auction remain live.
+## 7. Remaining implementation and acceptance phases
 
-For each source observation, preserve the raw field name, normalized value, source, and observation timestamp. A missing or stale live price is unavailable/stale, not zero. If catalogue data is not reliable for a lot, leave it out of the five-minute price path and let a lower-frequency detail refresh revisit it.
+1. **Finish API capture reliability:** review and merge PR #98 after successful CI; then repeat a bounded real-site run against a representative auction and verify API response capture.
+2. **Complete real-site qualification:** process the pending detail queue in bounded runs; verify price categories, completed-lot behavior, excluded hidden-bid lots, Buy Now eligibility, and media associations.
+3. **Complete bootstrap coverage:** traverse all 93+ discovered auctions and all catalogue pages using a persisted fair work queue. Do not mark bootstrap complete globally until every discovered auction scan is complete.
+4. **Integrate the planner:** persist due-work state and connect live, bootstrap, pre-start, routine, and detail work to the real collector adapters. Add tests for fairness, missed triggers, stale/missing signals, crash resume, and one-writer operation.
+5. **Choose and provision the runtime:** select provider/region, monthly budget, private access, durable disk, secret handling, and separate encrypted backup destination.
+6. **Operational rehearsal:** manually run bounded jobs on the private host; test crash recovery, delayed/missed triggers, session expiry, and database restoration. Keep the Dashboard private.
+7. **R2 media archive:** only after the separate usage guard and explicit operation-level authorization are ready; no live R2 operations before that.
+8. **Release v0.4.0:** only after real-site acceptance, migrations, CI, security, and recovery checks pass.
 
-The current qualification rule remains separate: accept a positive public displayed auction price, a verified positive Buy Now price, or a positive public bid whose source semantics have been confirmed. A zero placeholder or seller reference alone is not sufficient.
+## 8. Owner decisions still needed
 
-## 6. Proposed implementation phases
+- **Cloud provider and region:** preferred provider/region, or permission to compare EU providers; maximum monthly budget for compute and persistent disk.
+- **Private administration:** VPN or SSH tunnel for login and maintenance; whether remote Dashboard access is required at all.
+- **Database backups:** separate destination, retention period, and maximum monthly budget. The backup destination must not be the R2 media bucket by default.
+- **Authentication:** whether ordinary login requires MFA/additional confirmation and how often the session currently expires. Do not send passwords, cookies, or browser-profile files.
+- **R2 operations:** when the media workstream is ready, authorize the specific read/write/usage-check operation separately; no credentials need to be sent in chat.
 
-1. **Owner decision:** agree on the private VM/provider and budget, persistent-volume/backups, authentication/session approach, and remote Dashboard access policy.
-2. **Source validation:** use an explicitly named temporary SQLite database and bounded real-site runs to verify the source fields listed above. Keep R2 operations disabled.
-3. **Planner foundation:** implement configuration validation, due-work calculation, deterministic priority/fairness, run budgets, progress checkpoints, and process locking. Test with synthetic data only.
-4. **Collector adapters:** split lightweight catalogue/API refresh from detail enrichment; add safe resume for catalogue pagination; persist source-confirmed auction/lot state independently.
-5. **Operational rehearsal:** manually trigger bounded runs on the private host, simulate missed triggers/crashes/session expiry, verify backup restoration, and inspect that no private data enters logs.
-6. **Enable scheduling:** only after owner acceptance of source validation, host security, persistence, backup, and operational tests.
-
-## 7. Decisions still needed
-
-- Which cloud provider/region and monthly budget should host the dedicated VM?
-- Which private access method should be used for initial login and Dashboard access (VPN or SSH tunnel)?
-- Does the site support a stable authenticated headless Chromium session on that host?
-- Which verified source field supplies scheduled trading start and auction-level live/inactive state?
-- Where should encrypted SQLite backups live, separately from the R2 media bucket?
-
-Until those decisions are made, keep collection manually triggered and bounded. No scheduled cloud collector should be enabled by this design document alone.
+Until these decisions and source-verification gates are satisfied, collection remains manually started and bounded. No unattended cloud collector or public Dashboard should be enabled.
