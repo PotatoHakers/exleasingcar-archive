@@ -281,11 +281,14 @@ def test_detail_enrichment_persists_fixed_sale_type_and_price(tmp_path, monkeypa
     class FakePage:
         url = "https://www.exleasingcar.com/ru/auto-details/19694139"
 
+        def __init__(self):
+            self.html = html
+
         def goto(self, url, **kwargs):
             self.url = url
 
         def content(self):
-            return html
+            return self.html
 
     monkeypatch.setattr(
         "exleasingcar_archive.collector._wait_for_dynamic_content",
@@ -319,6 +322,45 @@ def test_detail_enrichment_persists_fixed_sale_type_and_price(tmp_path, monkeypa
         ).fetchone()
 
     assert row == ("fixed_price", "fixed_price", "16900", "EUR")
+
+    # Rechecking an unchanged Buy Now amount updates freshness but not price history.
+    page = FakePage()
+    collector._enrich_vehicle_detail(
+        AuctionContext("auction-209633"),
+        "19694139",
+        "https://www.exleasingcar.com/ru/auto-details/19694139",
+        page,
+        datetime(2026, 11, 16, 16, 5, tzinfo=timezone.utc),
+        tmp_path / "snapshot",
+    )
+    assert collector.lot_price_observations_inserted == 1
+    assert collector.lot_price_observations_unchanged == 1
+
+    # A changed Buy Now amount adds one new observation while preserving the old one.
+    page.html = html.replace("16 900", "17 100")
+    collector._enrich_vehicle_detail(
+        AuctionContext("auction-209633"),
+        "19694139",
+        "https://www.exleasingcar.com/ru/auto-details/19694139",
+        page,
+        datetime(2026, 11, 16, 16, 10, tzinfo=timezone.utc),
+        tmp_path / "snapshot",
+    )
+    with sqlite3.connect(database.path) as connection:
+        prices = connection.execute(
+            """
+            SELECT p.amount
+            FROM lot_price_observations p
+            JOIN auction_lots l ON l.id = p.auction_lot_id
+            JOIN vehicles v ON v.id = l.vehicle_id
+            WHERE v.source_car_id = '19694139'
+            ORDER BY p.id
+            """
+        ).fetchall()
+
+    assert prices == [("16900",), ("17100",)]
+    assert collector.lot_price_observations_inserted == 2
+    assert collector.lot_price_observations_unchanged == 1
 
 
 def test_detail_enrichment_keeps_open_starting_price_out_of_bid_history(
