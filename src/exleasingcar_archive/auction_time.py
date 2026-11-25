@@ -60,7 +60,7 @@ def format_auction_time_for_user(value: str | None) -> str | None:
         if parsed.tzinfo is not None:
             return raw
         shifted = parsed + SITE_TO_USER_TIME_OFFSET
-        has_seconds = re.search(r":\\d{2}:\\d{2}(?:\\.|$)", raw) is not None
+        has_seconds = re.search(r":\d{2}:\d{2}(?:\.|$)", raw) is not None
         timespec = "microseconds" if shifted.microsecond else (
             "seconds" if has_seconds else "minutes"
         )
