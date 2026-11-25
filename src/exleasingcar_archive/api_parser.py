@@ -44,6 +44,12 @@ class ParsedCarUpdate:
         status = (self.bid_status or "").strip().casefold().replace("_", "-")
         if phase in terminal_values or status in terminal_values:
             return "api_terminal_status"
+        # At exactly zero the site may still be rendering the FINAL CALL
+        # transition. Require a negative timer before overriding that flag.
+        if self.final_call_active and (
+            self.remaining_seconds is None or self.remaining_seconds >= 0
+        ):
+            return None
         if (
             self.remaining_seconds is not None
             and self.remaining_seconds <= 0
