@@ -122,8 +122,7 @@ class ApiResponseRecorder:
         self.responses: list[CapturedApiResponse] = []
         self.errors: list[str] = []
         self.pending_requests: dict[int, Any] = {}
-        self._timed_out_request_ids: set[int] = set()
-        self._responses_received: set[int] = set()
+        self._responses_captured: set[int] = set()
 
     def attach(self, context: Any) -> None:
         # Read the body in the response handler. Response.body() waits until the
@@ -138,23 +137,33 @@ class ApiResponseRecorder:
         if API_ENDPOINT_MARKER in request.url:
             self.pending_requests[id(request)] = request
 
-    def _capture_response(self, response: Any) -> bool:
+    def _capture_response(
+        self,
+        response: Any,
+        *,
+        record_errors: bool = True,
+    ) -> bool:
         if API_ENDPOINT_MARKER not in response.url:
             return False
         if not response.ok:
-            self.errors.append(f"HTTP {response.status}: {response.url}")
+            if record_errors:
+                self.errors.append(f"HTTP {response.status}: {response.url}")
             return False
         try:
             payload = json.loads(response.body())
         except (PlaywrightError, ValueError, TypeError, UnicodeDecodeError) as exc:
-            content_type = getattr(response, "headers", {}).get("content-type", "unknown")
-            self.errors.append(
-                f"Could not read JSON from {response.url} "
-                f"(HTTP {response.status}, content-type={content_type}): {exc}"
-            )
+            if record_errors:
+                content_type = getattr(response, "headers", {}).get(
+                    "content-type", "unknown"
+                )
+                self.errors.append(
+                    f"Could not read JSON from {response.url} "
+                    f"(HTTP {response.status}, content-type={content_type}): {exc}"
+                )
             return False
         if not isinstance(payload, Mapping):
-            self.errors.append(f"Unexpected JSON response shape: {response.url}")
+            if record_errors:
+                self.errors.append(f"Unexpected JSON response shape: {response.url}")
             return False
         self.responses.append(
             CapturedApiResponse(
@@ -169,41 +178,43 @@ class ApiResponseRecorder:
         if API_ENDPOINT_MARKER not in response.url:
             return
         request = response.request
-        self._responses_received.add(id(request))
-        self._capture_response(response)
+        request_id = id(request)
+        # Try immediately while the page is still on this document, but do not
+        # emit an error yet: the body may not be readable until requestfinished.
+        if self._capture_response(response, record_errors=False):
+            self._responses_captured.add(request_id)
 
     def _on_request_finished(self, request: Any) -> None:
         request_id = id(request)
         if self.pending_requests.pop(request_id, None) is None:
             return
-        self._timed_out_request_ids.discard(request_id)
-        if request_id not in self._responses_received:
-            # Keep a fallback for contexts where a response event was not
-            # observed, but the completed request still exposes its response.
+        if request_id not in self._responses_captured:
+            # Retry after the response body has fully downloaded. This covers
+            # transient Network.getResponseBody failures in the response event.
             try:
                 response = request.response()
             except PlaywrightError as exc:
                 self.errors.append(
                     f"Could not access completed API response from {request.url}: {exc}"
                 )
+                self._responses_captured.discard(request_id)
                 return
             if response is None:
                 self.errors.append(
                     f"API request finished without an HTTP response: {request.url}"
                 )
+                self._responses_captured.discard(request_id)
                 return
             self._capture_response(response)
-        self._responses_received.discard(request_id)
+        self._responses_captured.discard(request_id)
 
     def _on_request_failed(self, request: Any) -> None:
         request_id = id(request)
         if self.pending_requests.pop(request_id, None) is None:
             return
-        self._timed_out_request_ids.discard(request_id)
-        if request_id in self._responses_received:
-            # The response handler already recorded either the payload or its
-            # parsing/body-read error; avoid a second misleading abort warning.
-            self._responses_received.discard(request_id)
+        if request_id in self._responses_captured:
+            # The full response body was already retained successfully.
+            self._responses_captured.discard(request_id)
             return
         failure = getattr(request, "failure", None)
         if callable(failure):
@@ -212,6 +223,7 @@ class ApiResponseRecorder:
             "API request failed before its response body could be captured: "
             f"{request.url} ({failure or 'unknown network failure'})"
         )
+        self._responses_captured.discard(request_id)
 
     def wait_for_pending(self, page: Any, *, timeout_ms: int = 3_000) -> bool:
         """Wait briefly for target API bodies before the next page navigation."""
@@ -221,20 +233,9 @@ class ApiResponseRecorder:
         while self.pending_requests and time.monotonic() < deadline:
             page.wait_for_timeout(50)
 
-        pending_ids = set(self.pending_requests)
-        newly_timed_out = pending_ids - self._timed_out_request_ids
-        if newly_timed_out:
-            urls = sorted(
-                {
-                    str(self.pending_requests[request_id].url)
-                    for request_id in newly_timed_out
-                }
-            )
-            self.errors.append(
-                f"Timed out waiting for {len(newly_timed_out)} API request(s) "
-                f"before navigation: {'; '.join(urls)}"
-            )
-            self._timed_out_request_ids.update(newly_timed_out)
+        # A timeout is a pause signal, not a confirmed capture failure. The
+        # caller must stop before navigation, while the request may still
+        # complete and be captured by a later event.
         return not self.pending_requests
 
     # Compatibility hook for direct recorder tests.
@@ -1275,7 +1276,7 @@ class ExleasingcarCollector:
         try:
             page.goto(detail_url, wait_until="domcontentloaded", timeout=45_000)
             _wait_for_dynamic_content(page)
-            self.recorder.wait_for_pending(page)
+            self.recorder.wait_for_pending(page, timeout_ms=10_000)
         except PlaywrightError as exc:
             print(f"  Detail page {car_id} failed: {exc}")
             return None
@@ -1293,7 +1294,7 @@ class ExleasingcarCollector:
             try:
                 page.goto(detail_url, wait_until="domcontentloaded", timeout=45_000)
                 _wait_for_dynamic_content(page)
-                self.recorder.wait_for_pending(page)
+                self.recorder.wait_for_pending(page, timeout_ms=10_000)
             except PlaywrightError as exc:
                 print(f"  Detail retry after automatic login failed for {car_id}: {exc}")
                 return None
@@ -1306,7 +1307,7 @@ class ExleasingcarCollector:
             try:
                 page.goto(detail_url, wait_until="domcontentloaded", timeout=45_000)
                 _wait_for_dynamic_content(page)
-                self.recorder.wait_for_pending(page)
+                self.recorder.wait_for_pending(page, timeout_ms=10_000)
             except PlaywrightError as exc:
                 print(f"  Detail retry after Continue failed for {car_id}: {exc}")
                 return None
@@ -1795,6 +1796,11 @@ class ExleasingcarCollector:
                 observed_at,
                 auction_dir,
             )
+            # A slow detail-page API request must not be aborted by the next
+            # vehicle navigation. Give it one extended bounded wait, then stop
+            # this detail rotation if it is still pending.
+            if self.recorder.pending_requests:
+                self.recorder.wait_for_pending(page, timeout_ms=10_000)
             detail_api_responses = self.recorder.responses[detail_response_start:]
             if detail_api_responses:
                 page_id = lot_page_ids.get(car_id)
@@ -1827,6 +1833,12 @@ class ExleasingcarCollector:
                 else:
                     eligible_car_ids.discard(car_id)
                     open_auction_car_ids.discard(car_id)
+            if self.recorder.pending_requests:
+                print(
+                    "  Detail rotation paused because an API response is still "
+                    "pending; no next vehicle navigation will be started."
+                )
+                break
             if self.page_delay_seconds:
                 time.sleep(self.page_delay_seconds)
 
