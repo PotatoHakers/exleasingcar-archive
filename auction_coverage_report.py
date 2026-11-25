@@ -77,6 +77,7 @@ def main() -> int:
                 al.sale_type,
                 al.collection_eligible,
                 al.monitoring_completed_at,
+                al.monitoring_completion_reason,
                 al.first_seen_at,
                 al.last_detail_attempted_at,
                 al.last_detail_checked_at,
@@ -144,8 +145,13 @@ def main() -> int:
         return 0
 
     api_updated = 0
-    detail_opened = 0
+    detail_attempted_count = 0
+    detail_checked_count = 0
     already_archived = 0
+    sale_type_counts: dict[str, int] = {}
+    eligible_count = 0
+    completed_count = 0
+    completion_reasons: dict[str, int] = {}
     print(f"Auction {args.auction_id}: {len(rows)} archived lot(s)")
     if since:
         print(f"Run start (UTC): {since.isoformat()}")
@@ -153,7 +159,8 @@ def main() -> int:
 
     header = (
         "Car ID | Vehicle | Sale type | Eligible | API checked | "
-        "Detail checked | Latest highest_offer | Latest API price time | Event"
+        "Detail attempted | Detail checked | Monitoring | "
+        "Latest highest_offer | Latest API price time | Event"
     )
     print(header)
     print("-" * len(header))
@@ -163,6 +170,14 @@ def main() -> int:
         api_checked = parse_datetime(row["last_api_checked_at"])
         detail_checked = parse_datetime(row["last_detail_checked_at"])
         detail_attempted = parse_datetime(row["last_detail_attempted_at"])
+        monitoring_completed = parse_datetime(row["monitoring_completed_at"])
+        sale_type = row["sale_type"] or "unknown"
+        sale_type_counts[sale_type] = sale_type_counts.get(sale_type, 0) + 1
+        eligible_count += int(bool(row["collection_eligible"]))
+        if monitoring_completed is not None:
+            completed_count += 1
+            reason = row["monitoring_completion_reason"] or "unspecified"
+            completion_reasons[reason] = completion_reasons.get(reason, 0) + 1
 
         if since and first_seen and first_seen < since:
             already_archived += 1
@@ -170,25 +185,36 @@ def main() -> int:
             already_archived += 1
 
         was_api_updated = bool(since and api_checked and api_checked >= since)
-        was_detail_opened = bool(
-            since
-            and (
-                (detail_attempted and detail_attempted >= since)
-                or (detail_checked and detail_checked >= since)
-            )
+        was_detail_attempted = bool(
+            since and detail_attempted and detail_attempted >= since
+        )
+        was_detail_checked = bool(
+            since and detail_checked and detail_checked >= since
         )
         api_updated += int(was_api_updated)
-        detail_opened += int(was_detail_opened)
+        detail_attempted_count += int(was_detail_attempted)
+        detail_checked_count += int(was_detail_checked)
 
         api_label = (
             "YES " + row["last_api_checked_at"]
             if was_api_updated
             else (row["last_api_checked_at"] or "never")
         )
-        detail_label = (
+        detail_attempted_label = (
+            "YES " + row["last_detail_attempted_at"]
+            if was_detail_attempted
+            else (row["last_detail_attempted_at"] or "never")
+        )
+        detail_checked_label = (
             "YES " + row["last_detail_checked_at"]
-            if was_detail_opened
+            if was_detail_checked
             else (row["last_detail_checked_at"] or "never")
+        )
+        monitoring_label = (
+            f'COMPLETED {row["monitoring_completed_at"]} '
+            f'({row["monitoring_completion_reason"] or "unspecified"})'
+            if row["monitoring_completed_at"]
+            else "not completed"
         )
         event = "/".join(
             str(row[key]) if row[key] is not None else "-"
@@ -206,19 +232,35 @@ def main() -> int:
         )
         print(
             f'{row["source_car_id"]} | {row["vehicle"]} | '
-            f'{row["sale_type"] or "unknown"} | {row["collection_eligible"]} | '
-            f'{api_label} | {detail_label} | {price} | '
+            f'{sale_type} | {row["collection_eligible"]} | '
+            f'{api_label} | {detail_attempted_label} | {detail_checked_label} | '
+            f'{monitoring_label} | {price} | '
             f'{row["latest_price_observed_at"] or "-"} | {event}'
         )
 
     print()
     print(f"Lots in this auction already archived before run: {already_archived}")
+    print(
+        "Sale types: "
+        + ", ".join(f"{name}={count}" for name, count in sorted(sale_type_counts.items()))
+    )
+    print(f"Eligible lots: {eligible_count}; not eligible: {len(rows) - eligible_count}")
+    print(f"Open-lot monitoring completed: {completed_count}")
+    if completion_reasons:
+        print(
+            "Completion reasons: "
+            + ", ".join(
+                f"{name}={count}" for name, count in sorted(completion_reasons.items())
+            )
+        )
     if since:
-        print(f"API checked during run: {api_updated}")
-        print(f"Detail pages attempted/checked during run: {detail_opened}")
+        print(f"Distinct lots API checked during run: {api_updated}")
+        print(f"Detail attempts during run: {detail_attempted_count}")
+        print(f"Successful detail checks during run: {detail_checked_count}")
         print(
             "Note: API checked can be YES even when highest_offer is unchanged; "
-            "last_api_checked_at tracks freshness separately from price history."
+            "last_api_checked_at tracks freshness separately from price history. "
+            "Detail attempts and successful checks are reported separately."
         )
     return 0
 
