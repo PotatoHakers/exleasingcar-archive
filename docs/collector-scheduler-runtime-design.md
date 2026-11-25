@@ -12,11 +12,19 @@ The collector must support one shared due-work planner with configurable interva
 |---|---|---|
 | Initial bootstrap | One-time, explicitly started | Discover every available auction and traverse every catalogue page in bounded, resumable runs. Archive only lots with a qualifying public price. |
 | Routine refresh | Every 12 hours | Refresh known auctions/lots, discover newly listed lots, append observations, and preserve history when listings disappear. |
-| Pre-start refresh | Once about 2 hours before a verified scheduled start | Refresh eligible lots. Use a scheduled **start** time, never an end time or countdown. |
-| Live-auction refresh | Every 5 minutes after trading is positively confirmed | Prefer catalogue/bulk API updates; do not open every vehicle detail page on each cycle. |
+| Same-day end-time refresh | Every 2 hours for auctions with an explicit source end-time label today | Preserve the original visible end-time label and source server clock. Do not reinterpret an end time as a start time or convert it to UTC until the source timezone is verified. |
+| Live-auction refresh | Every 5 minutes for English/open auctions with a known end time within the next 30 minutes or a source FINAL CALL/HOT BID signal | Prefer catalogue/bulk API updates; do not open every vehicle detail page on each cycle. FINAL CALL is a live-priority hint only when the primary auction format is English/open. |
 | Detail enrichment | Lower-frequency rotation, preferably during night hours | Refresh slow-changing vehicle metadata and discover photo/report references. Night-time is an optimization, not an assumption that auctions are inactive. |
 
 Auction state and lot state are separate. An auction may remain active while individual lots have finished bidding. A source-confirmed terminal state stops live polling for that lot only. The end of bidding is not proof of a sale.
+
+Auction format, auction phase, and lot countdown are independent signals:
+
+- The auction card's primary format label distinguishes English/open, closed, and fixed-price-only offers. A fixed-price option marker beside an English/closed format is an additional Buy Now option, not a replacement for the primary format.
+- FINAL CALL/HOT BID on an auction card may prioritize live refresh only for an English/open auction. The same label on a closed or fixed-price-only card must not activate live bid monitoring.
+- A visible label such as "Конец Сегодня 10:28" is an auction end-time label, not proof that bidding has started. Preserve it as source text until the site's server-time timezone is verified.
+- Per-lot HOT BID imagery and `counter_to_car_auction_end` timers describe an individual lot; they must not be promoted to auction-level state.
+- Fixed-price-only lots are enriched once and then rechecked on the slower detail rotation. The fixed price is appended to history only when amount/currency/source field changes. Do not poll them on the live-bid cadence.
 
 Price categories must remain separate: displayed auction price, verified fixed Buy Now price, raw API `highest_offer`, seller `minimum_price`, and seller `indicative_price`. Account-specific `user_offer` and `actual_car_price` must never enter the archive.
 
