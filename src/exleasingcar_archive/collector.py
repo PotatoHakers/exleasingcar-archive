@@ -2017,11 +2017,17 @@ class ExleasingcarCollector:
                     )
 
                 print(f"Auction cards discovered: {len(auctions)}")
-                selected_auctions = auctions
+                # Open English auctions in FINAL CALL are most time-sensitive.
+                # Fixed-price-only and closed formats remain in the archive flow,
+                # but their labels must not outrank public live-bidding work.
+                selected_auctions = sorted(
+                    auctions,
+                    key=lambda item: item.collection_priority,
+                )
                 if auction_id:
                     selected_auctions = [
                         item
-                        for item in auctions
+                        for item in selected_auctions
                         if item.exleasingcar_auction_id == auction_id
                     ]
                     if not selected_auctions:
