@@ -2140,6 +2140,14 @@ def build_argument_parser() -> argparse.ArgumentParser:
         help="Maximum wall-clock duration for the entire invocation (default: 900)",
     )
     parser.add_argument(
+        "--no-time-limit",
+        action="store_true",
+        help=(
+            "Disable only the wall-clock deadline. Catalogue-page, live-lot, "
+            "and detail-page budgets remain enforced."
+        ),
+    )
+    parser.add_argument(
         "--max-catalog-pages-per-run",
         type=int,
         default=40,
@@ -2170,7 +2178,9 @@ def main() -> None:
         raise SystemExit("--page-delay cannot be negative")
     try:
         run_limits = RunLimits(
-            max_duration_seconds=args.max_run_seconds,
+            max_duration_seconds=(
+                None if args.no_time_limit else args.max_run_seconds
+            ),
             max_catalog_pages=args.max_catalog_pages_per_run,
             max_live_lots=args.max_live_lots_per_run,
             max_detail_pages=args.max_detail_pages_per_run,
@@ -2182,7 +2192,12 @@ def main() -> None:
     try:
         with CollectorProcessLock(lock_file):
             print("Effective run limits:")
-            print(f"  max_duration_seconds: {run_limits.max_duration_seconds}")
+            duration_label = (
+                "unlimited"
+                if run_limits.max_duration_seconds is None
+                else str(run_limits.max_duration_seconds)
+            )
+            print(f"  max_duration_seconds: {duration_label}")
             print(f"  max_catalog_pages: {run_limits.max_catalog_pages}")
             print(f"  max_live_lots: {run_limits.max_live_lots}")
             print(f"  max_detail_pages: {run_limits.max_detail_pages}")
