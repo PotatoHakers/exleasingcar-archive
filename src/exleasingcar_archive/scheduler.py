@@ -103,7 +103,7 @@ class CollectionWorkItem:
             WorkType.LIVE_REFRESH: "live lots",
             WorkType.DETAIL_ENRICHMENT: "detail pages",
             WorkType.BOOTSTRAP: "catalogue",
-            WorkType.PRESTART_REFRESH: "catalogue",
+            WorkType.SCHEDULED_END_REFRESH: "catalogue",
             WorkType.ROUTINE_REFRESH: "catalogue",
         }[self.work_type]
         if costs[expected_cost] <= 0:
