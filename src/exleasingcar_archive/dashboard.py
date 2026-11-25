@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlsplit
 
+from .auction_time import format_auction_time_for_user
 from .version import APP_VERSION
 
 LOT_PAGE_SIZE = 500
@@ -784,6 +785,12 @@ class DashboardHandler(BaseHTTPRequestHandler):
                     _safe_exleasingcar_url(raw_preview)
                     or _safe_exleasingcar_url(raw_source)
                 )
+                # Preserve the exact source label while displaying the owner's
+                # local clock (site time + 1 hour) in the dashboard.
+                lot["auction_status_label_source"] = lot.get("auction_status_label")
+                lot["auction_status_label"] = format_auction_time_for_user(
+                    lot.get("auction_status_label")
+                )
             markers_by_auction: dict[str, list[dict[str, Any]]] = {}
             auction_ids = sorted({
                 lot["auction_id"] for lot in lots if lot["auction_id"]
@@ -915,6 +922,11 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 """,
                 history_parameters,
             )]
+            for event in events:
+                event["auction_end_at_source"] = event.get("auction_end_at")
+                event["auction_end_at"] = format_auction_time_for_user(
+                    event.get("auction_end_at")
+                )
             lot_detail = None
             other_lots: list[dict[str, Any]] = []
             media: list[dict[str, Any]] = []
