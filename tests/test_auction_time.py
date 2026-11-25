@@ -22,7 +22,7 @@ def test_clock_shift_that_crosses_midnight_advances_relative_day():
     )
     assert (
         format_auction_time_for_user("End Tomorrow 23:30")
-        == "End the day after tomorrow 00:30"
+        == "End The day after tomorrow 00:30"
     )
 
 
