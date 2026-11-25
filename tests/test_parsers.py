@@ -15,6 +15,7 @@ def test_parse_auction_page_and_keep_price_types_separate():
     <body>
         <input type="hidden" name="aukciono_id" value="210411">
 
+        <img src="/assets/img/icons/ac.svg" alt="Английский аукцион">
         <h2>
             <button>FINAL CALL</button>
         </h2>
