@@ -44,3 +44,98 @@ def test_validation_report_fails_closed_for_an_old_schema(tmp_path):
     assert result.returncode == 1
     assert "expected current: 18" in result.stdout
     assert "CHECK FAILED" in result.stdout
+
+def test_validation_report_shows_safe_source_samples_without_identifiers(tmp_path):
+    database = ArchiveDatabase(tmp_path / "observations.sqlite3")
+    database.initialize()
+    database.upsert_auction("private-auction-id")
+    database.upsert_vehicle("private-car-id")
+    database.upsert_auction_lot("private-car-id", "private-auction-id")
+
+    with sqlite3.connect(database.path) as connection:
+        lot_id = connection.execute(
+            """
+            SELECT l.id
+            FROM auction_lots AS l
+            JOIN vehicles AS v ON v.id = l.vehicle_id
+            WHERE v.source_car_id = ?
+            """,
+            ("private-car-id",),
+        ).fetchone()[0]
+        connection.execute(
+            """
+            INSERT INTO price_observations (
+                auction_lot_id, highest_offer, currency, observed_at, source
+            ) VALUES (?, ?, ?, ?, ?)
+            """,
+            (lot_id, "12500.00", "EUR", "2026-11-25T08:00:00+00:00", "car_api"),
+        )
+        connection.execute(
+            """
+            INSERT INTO price_reference_observations (
+                auction_lot_id, minimum_price, indicative_price, currency,
+                observed_at, source
+            ) VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                lot_id,
+                "14000.00",
+                "15000.00",
+                "EUR",
+                "2026-11-25T08:01:00+00:00",
+                "car_api",
+            ),
+        )
+        connection.execute(
+            """
+            INSERT INTO lot_price_observations (
+                auction_lot_id, price_type, amount, currency, raw_text,
+                source_field, observed_at, source
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                lot_id,
+                "fixed_price",
+                "17500.00",
+                "EUR",
+                "Buy now for EUR 17,500",
+                "fixed_price",
+                "2026-11-25T08:02:00+00:00",
+                "detail_html",
+            ),
+        )
+        connection.execute(
+            """
+            INSERT INTO auction_events (
+                auction_lot_id, auction_phase, bid_status, final_call_active,
+                live_bidding, auction_end_at, remaining_seconds, observed_at, source
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                lot_id,
+                "LIVE",
+                "BIDDING",
+                0,
+                1,
+                "2026-11-25T09:00:00+00:00",
+                3600,
+                "2026-11-25T08:03:00+00:00",
+                "car_api",
+            ),
+        )
+
+    result = run_report(database.path)
+
+    assert result.returncode == 0, result.stderr + result.stdout
+    assert "highest_offer=12500.00 EUR" in result.stdout
+    assert "not independently verified as a public bid" in result.stdout
+    assert "minimum_price=14000.00; indicative_price=15000.00" in result.stdout
+    assert "price_type=fixed_price; amount=17500.00 EUR" in result.stdout
+    assert "source_field=fixed_price" in result.stdout
+    assert "phase=LIVE; bid_status=BIDDING" in result.stdout
+    assert "remaining_seconds=3600" in result.stdout
+    assert "Auction-level scheduled start: not stored in schema v18" in result.stdout
+    assert "private-auction-id" not in result.stdout
+    assert "private-car-id" not in result.stdout
+    assert "Buy now for EUR 17,500" not in result.stdout
+
