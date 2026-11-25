@@ -248,7 +248,7 @@ def print_source_observation_samples(
     connection: sqlite3.Connection, tables: set[str], *, limit: int = 3
 ) -> None:
     """Print a few latest source values without lot IDs, VINs, or source URLs."""
-    print("\\nRecent source observations (latest samples; IDs and URLs omitted):")
+    print("\nRecent source observations (latest samples; IDs and URLs omitted):")
 
     if "price_observations" in tables:
         rows = connection.execute(
