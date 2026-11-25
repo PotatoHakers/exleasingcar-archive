@@ -12,7 +12,7 @@ The collector must support one shared due-work planner with configurable interva
 |---|---|---|
 | Initial bootstrap | One-time, explicitly started | Discover every available auction and traverse every catalogue page in bounded, resumable runs. Archive only lots with a qualifying public price. |
 | Routine refresh | Every 12 hours | Refresh known auctions/lots, discover newly listed lots, append observations, and preserve history when listings disappear. |
-| Same-day end-time refresh | Every 2 hours for auctions with an explicit source end-time label today | Preserve the original visible end-time label and source server clock. Do not reinterpret an end time as a start time or convert it to UTC until the source timezone is verified. |
+| Same-day end-time refresh | Every 2 hours for auctions with an explicit source end-time label today | Preserve the original site value; for user-facing display add the confirmed +1 hour offset. Do not reinterpret an end time as a start time or invent a UTC timezone. |
 | Live-auction refresh | Every 5 minutes for English/open auctions with a known end time within the next 30 minutes or a source FINAL CALL/HOT BID signal | Prefer catalogue/bulk API updates; do not open every vehicle detail page on each cycle. FINAL CALL is a live-priority hint only when the primary auction format is English/open. |
 | Detail enrichment | Lower-frequency rotation, preferably during night hours | Refresh slow-changing vehicle metadata and discover photo/report references. Night-time is an optimization, not an assumption that auctions are inactive. |
 
@@ -22,7 +22,7 @@ Auction format, auction phase, and lot countdown are independent signals:
 
 - The auction card's primary format label distinguishes English/open, closed, and fixed-price-only offers. A fixed-price option marker beside an English/closed format is an additional Buy Now option, not a replacement for the primary format.
 - FINAL CALL/HOT BID on an auction card may prioritize live refresh only for an English/open auction. The same label on a closed or fixed-price-only card must not activate live bid monitoring.
-- A visible label such as "Конец Сегодня 10:28" is an auction end-time label, not proof that bidding has started. Preserve it as source text until the site's server-time timezone is verified.
+- A visible label such as "Конец Сегодня 10:28" is an auction end-time label, not proof that bidding has started. Preserve the source value in SQLite and display it one hour later in the owner's local clock (for example, 10:28 → 11:28).
 - Per-lot HOT BID imagery and `counter_to_car_auction_end` timers describe an individual lot; they must not be promoted to auction-level state.
 - Fixed-price-only lots are enriched once and then rechecked on the slower detail rotation. The fixed price is appended to history only when amount/currency/source field changes. Do not poll them on the live-bid cadence.
 
@@ -47,7 +47,7 @@ The earlier version of this document described the pre-PR #92 collector. That de
 - The pure planner is **not yet integrated** with `ExleasingcarCollector.run()` as a persisted due-work scheduler. The CLI still processes the selected auction list in its current order; it does not yet calculate and persist every auction's next due time for all cadences.
 - There is no host timer, systemd service, cloud worker, or unattended collection.
 - The collector still launches a visible persistent Chromium profile and uses the current local credential-store integration. This is not yet a supported cloud authentication design.
-- The auction-list card exposes a same-day end-time label on some auctions, but the timestamp is still raw display text and its server timezone has not been verified. There is no verified scheduled trading-start field or authoritative auction-level live/inactive signal.
+- The auction-list card exposes a same-day end-time label on some auctions. The owner confirmed that the site clock is +1 hour behind the owner's local clock; the 25 Nov API countdown sample independently corroborates this. Raw values remain stored unchanged; dashboard/report display is shifted by +1 hour. There is still no verified scheduled trading-start field or authoritative auction-level live/inactive signal.
 - The current API fields `auction_end_at`, `remaining_seconds`, `live_bidding`, `auction_phase`, and `bid_status` are lot-level observations. They must not be repurposed as an auction start-time signal.
 - The Dashboard remains loopback-only and has no remote authentication/TLS layer. Do not expose it publicly.
 
@@ -67,6 +67,29 @@ A controlled manual run used auction `211304` and the separate database `real_si
 The structural report passed. This is **not** full real-site acceptance: only six of 148 detail pages were checked, and only one of the 93 discovered auction cards was collected. The report does not prove the meaning of `highest_offer`, seller reference fields, the timezone/semantics of the visible end-time label, or auction-level trading state. It also does not establish that all 66 photo references are correctly associated without a sample audit.
 
 No media binaries were downloaded and no R2 operation was performed.
+
+## 3A. Real-site active auction runs — 25 November 2026
+
+The attached terminal transcript contains one run for auction 211300 and three runs for auction 211225.
+
+- Auction 211300: one catalogue page, 48 unique lot IDs (96 card appearances because the page rendered each lot twice), six detail pages checked, 26 API responses and 76 API car updates processed. Twelve API price observations were new and 64 unchanged. One response-body capture warning remained.
+- Auction 211225, run 1: one catalogue page, 166 unique lots, six detail pages checked, 14 API responses and 24 API car updates processed. Seven API prices were new and 17 unchanged. Three response-body capture warnings were logged.
+- Auction 211225, run 2: the command requested 150 detail pages but explicitly capped the run at six. Six detail pages were checked; 26 API responses and 48 API car updates were processed. Eight API prices were new and 40 unchanged. Two response-body capture warnings were logged.
+- Auction 211225, run 3: the command requested 150 detail pages, with the default per-run detail cap of 60. The 120-second wall-clock budget stopped it after 18 detail pages. API processing was deferred by the wall-clock limit (api_responses_seen=0); two more response-body capture warnings were logged.
+
+The final read-only report remained structurally healthy: schema v18, SQLite integrity ok, zero foreign-key violations, 146 auctions, 362 vehicle/lot rows, 62 lots with detail pages checked, 1,567 photo source references and 846 deferred API lot updates still pending. No photo binaries were downloaded; no R2 operation occurred. This is still partial coverage, not full auction acceptance.
+
+### Confirmed site-to-owner clock offset and expired FINAL CALL
+
+The final report showed per-lot API samples with auction_end_at=2026-11-25 11:59, final_call_active=1, live_bidding=0, and remaining_seconds from -2,679 to -2,687. The corresponding observation time was about 10:43:46Z. At the owner's local UTC+3 clock this was 13:43:46; adding the confirmed one-hour site-to-owner offset makes the end time 12:59. That is about 44 minutes 46 seconds in the past, matching the negative API countdown to within roughly one second.
+
+Implementation rule:
+- Keep raw site end times unchanged in SQLite for provenance.
+- Convert only user-facing date/time text by +1 hour; do not add 3,600 seconds to the API's relative remaining_seconds.
+- live_bidding=True prevents completion even when a stale countdown is negative.
+- live_bidding=False plus an expired per-lot countdown ends monitoring for that lot, even if the API's FINAL CALL flag is still set. FINAL CALL with a positive countdown remains uncompleted.
+
+The API body-capture race is not fully resolved by PR #98: this transcript still contains eight Network.getResponseBody: No resource with given identifier found warnings across the four runs. Keep those responses queued and investigate a separate capture fix; do not treat a structurally healthy report as proof that every API response was captured.
 
 ### API response capture follow-up
 
