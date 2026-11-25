@@ -2017,13 +2017,11 @@ class ExleasingcarCollector:
                     )
 
                 print(f"Auction cards discovered: {len(auctions)}")
-                # Open English auctions in FINAL CALL are most time-sensitive.
-                # Fixed-price-only and closed formats remain in the archive flow,
-                # but their labels must not outrank public live-bidding work.
-                selected_auctions = sorted(
-                    auctions,
-                    key=lambda item: item.collection_priority,
-                )
+                # Auction format/status classification is available to the
+                # persisted due-work planner. Keep this manual bounded path in
+                # source order until that planner owns fairness/rotation; sorting
+                # here would starve closed and fixed-price auctions with max_auctions=1.
+                selected_auctions = auctions
                 if auction_id:
                     selected_auctions = [
                         item
