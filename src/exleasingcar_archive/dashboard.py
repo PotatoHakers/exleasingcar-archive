@@ -248,7 +248,9 @@ function renderLotCard(lot,vehicle,otherLots,media,pdfFields,pdfDamages,prices){
   ['Ориентировочная цена продавца',prices?.indicative_price]
  ];
  const reports=reportItems.length?'<div class="lot-report-list">'+reportItems.map((report,index)=>{
-  const linkLabel=report.source_link_url?.includes('://portal.macadam.eu/reports/remarketing?')?'Открыть HTML-отчёт':(/\\.pdf(?:$|[?])/i.test(report.source_link_url||'')?'Открыть PDF':'Открыть отчёт');
+  const isMacadamHtml=report.source_link_url?.includes('://portal.macadam.eu/reports/remarketing?');
+  const isPdf=String(report.source_link_url||'').split('?')[0].toLowerCase().endsWith('.pdf');
+  const linkLabel=isMacadamHtml?'Открыть HTML-отчёт':(isPdf?'Открыть PDF':'Открыть отчёт');
   const link=report.source_link_url?'<a class="report-link" href="'+esc(report.source_link_url)+'" target="_blank" rel="noopener noreferrer">'+linkLabel+'</a>':'<span class="muted">Ссылка источника недоступна</span>';
   const label=report.label || 'Inspection report '+(index+1);
   return '<div class="lot-report"><div><strong>'+esc(label)+'</strong><div class="lot-note">Статус архива: '+esc(report.download_status || 'неизвестен')+'</div></div>'+link+'</div>';
