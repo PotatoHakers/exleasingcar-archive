@@ -976,7 +976,7 @@ def test_dashboard_shows_global_bootstrap_queue_progress(tmp_path):
     payload = handler._load_data()
 
     assert payload["bootstrap_queue"] == {
-        "total": 1,
+        "total": 2,
         "pending": 0,
         "in_progress": 1,
         "completed": 0,
