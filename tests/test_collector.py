@@ -1324,11 +1324,14 @@ def test_auction_listing_round_trips_from_persistent_queue():
 def test_global_auction_discovery_checkpoints_and_resumes_all_pages(
     monkeypatch, tmp_path
 ):
+    from pathlib import Path
+
+    from exleasingcar_archive import collector as collector_module
     from exleasingcar_archive.collector import ExleasingcarCollector
     from exleasingcar_archive.database import ArchiveDatabase
     from exleasingcar_archive.scheduler import RunBudget, RunLimits
 
-    fixture_path = __import__("pathlib").Path(__file__).parent / "fixtures" / "auction_listings.html"
+    fixture_path = Path(__file__).parent / "fixtures" / "auction_listings.html"
     first_html = fixture_path.read_text(encoding="utf-8")
     second_html = first_html.replace("210547", "210548").replace(
         "BCA DE 3.3", "BCA DE 3.4"
@@ -1376,9 +1379,9 @@ def test_global_auction_discovery_checkpoints_and_resumes_all_pages(
     )
     monkeypatch.setattr(collector.recorder, "wait_for_pending", lambda page: True)
     monkeypatch.setattr(collector, "_is_logged_in", lambda page: True)
-    monkeypatch.setattr(collector_module := __import__(
-        "exleasingcar_archive.collector", fromlist=["_wait_for_dynamic_content"]
-    ), "_wait_for_dynamic_content", lambda page: None)
+    monkeypatch.setattr(
+        collector_module, "_wait_for_dynamic_content", lambda page: None
+    )
 
     page = FakePage()
     first_budget = RunBudget(
