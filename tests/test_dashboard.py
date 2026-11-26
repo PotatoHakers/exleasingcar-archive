@@ -921,6 +921,44 @@ def test_dashboard_selected_lot_handles_empty_media_and_invalid_external_links(t
     assert payload["pdf_damages"] == []
 
 
+def test_dashboard_displays_tokenized_macadam_html_report_for_the_selected_lot(tmp_path):
+    from exleasingcar_archive.dashboard import (
+        PAGE,
+        DashboardHandler,
+        _safe_exleasingcar_url,
+    )
+
+    database = ArchiveDatabase(tmp_path / "dashboard-macadam.sqlite3")
+    database.initialize()
+    lot_id = database.upsert_auction_lot("car-macadam", "auction-macadam")
+    report_url = (
+        "https://portal.macadam.eu/reports/remarketing"
+        "?id=opaque%2Fsample&culture=fr-FR"
+    )
+    database.upsert_lot_media_source(
+        "car-macadam",
+        "auction-macadam",
+        "report",
+        report_url,
+        label="Отчет об экспертизе",
+    )
+
+    handler = object.__new__(DashboardHandler)
+    handler.database_path = database.path
+    payload = handler._load_data(selected_lot_id=lot_id)
+    report = next(item for item in payload["media"] if item["media_type"] == "report")
+
+    assert report["source_link_url"] == report_url
+    assert report["label"] == "Отчет об экспертизе"
+    assert _safe_exleasingcar_url(
+        "https://portal.macadam.eu/reports/remarketing"
+        "?id=opaque&culture=fr-FR&extra=blocked"
+    ) is None
+    assert "Открыть HTML-отчёт" in PAGE
+    assert "Открыть PDF" in PAGE
+    assert "Отчёты и документы" in PAGE
+
+
 def test_dashboard_page_includes_release_version_and_lot_detail_sections():
     from exleasingcar_archive.dashboard import PAGE
     from exleasingcar_archive.version import APP_VERSION
@@ -929,7 +967,7 @@ def test_dashboard_page_includes_release_version_and_lot_detail_sections():
     assert "__APP_VERSION__" in PAGE
     assert "function renderLotCard(" in PAGE
     assert "Фотографии" in PAGE
-    assert "PDF-отчёты" in PAGE
+    assert "Отчёты и документы" in PAGE
     assert "Другие аукционные лоты этой машины" in PAGE
 
 

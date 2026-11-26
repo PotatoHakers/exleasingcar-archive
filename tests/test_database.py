@@ -839,6 +839,30 @@ def test_media_registry_rejects_untrusted_urls_and_unsafe_object_keys(tmp_path):
         "report",
         "https://data.exleasingcar.com/auction_files/1/2/report.pdf",
     )
+
+    macadam_id = database.upsert_lot_media_source(
+        "car-1",
+        "auction-1",
+        "report",
+        "https://portal.macadam.eu/reports/remarketing?id=opaque%2Fsample&culture=fr-FR",
+        label="Отчет об экспертизе",
+    )
+    assert macadam_id != source_id
+
+    with pytest.raises(ValueError, match="valid MACADAM remarketing report"):
+        database.upsert_lot_media_source(
+            "car-1",
+            "auction-1",
+            "report",
+            "https://portal.macadam.eu/other?id=opaque&culture=fr-FR",
+        )
+    with pytest.raises(ValueError, match="valid MACADAM remarketing report"):
+        database.upsert_lot_media_source(
+            "car-1",
+            "auction-1",
+            "report",
+            "https://portal.macadam.eu/reports/remarketing?id=opaque&culture=fr-FR&extra=bad",
+        )
     with pytest.raises(ValueError, match="safe relative object key"):
         database.register_media_asset_for_source(
             source_id,

@@ -388,6 +388,14 @@ def test_parse_vehicle_media_extracts_gallery_originals_and_unique_reports():
             </td>
           </tr>
           <tr>
+            <td onclick="window.open('https://portal.macadam.eu/reports/remarketing?id=opaque%2Fsample&culture=fr-FR','Damages','width=775')">
+              <strong>Отчет об экспертизе</strong>
+            </td>
+            <td onclick="window.open('https://portal.macadam.eu/reports/remarketing?id=opaque%2Fsample&culture=fr-FR','Damages','width=775')">
+              Пересмотреть
+            </td>
+          </tr>
+          <tr>
             <td onclick="window.open('https://evil.example/private.pdf','Damages')">
               <strong>Inspection Report</strong>
             </td>
@@ -406,14 +414,19 @@ def test_parse_vehicle_media_extracts_gallery_originals_and_unique_reports():
     reports = [item for item in media if item.media_type == "report"]
 
     assert len(photos) == 2
-    assert len(reports) == 2
+    assert len(reports) == 3
     assert photos[0].source_url.endswith("car-normal_a.jpg")
     assert photos[0].preview_url.endswith("car-small_a.jpg")
     assert photos[1].source_url.endswith("car-normal_b.jpg")
     assert reports[0].source_url.endswith("report-a.pdf")
     assert reports[0].label == "Inspection Report"
     assert reports[1].source_url.endswith("report-b.pdf")
-    assert [item.source_order for item in media] == [0, 1, 2, 3]
+    assert reports[2].source_url == (
+        "https://portal.macadam.eu/reports/remarketing"
+        "?id=opaque%2Fsample&culture=fr-FR"
+    )
+    assert reports[2].label == "Отчет об экспертизе"
+    assert [item.source_order for item in media] == [0, 1, 2, 3, 4]
 
 
 
