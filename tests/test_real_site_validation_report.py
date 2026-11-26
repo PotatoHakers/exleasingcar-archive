@@ -42,7 +42,7 @@ def test_validation_report_accepts_current_schema_and_summarizes_scan_tables(tmp
 def test_validation_report_summarizes_discovery_and_bootstrap_without_urls_or_ids(
     tmp_path,
 ):
-    from datetime import timedelta
+    from datetime import datetime, timedelta, timezone
 
     from exleasingcar_archive.database import SCHEMA_VERSION
 
