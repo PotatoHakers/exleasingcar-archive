@@ -923,8 +923,8 @@ def test_dashboard_selected_lot_handles_empty_media_and_invalid_external_links(t
 
 def test_dashboard_displays_tokenized_macadam_html_report_for_the_selected_lot(tmp_path):
     from exleasingcar_archive.dashboard import (
-        DashboardHandler,
         PAGE,
+        DashboardHandler,
         _safe_exleasingcar_url,
     )
 
