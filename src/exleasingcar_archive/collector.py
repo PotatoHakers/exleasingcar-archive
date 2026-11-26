@@ -360,7 +360,7 @@ def _auction_listing_from_queue(listing_data: Mapping[str, Any]) -> ParsedAuctio
     values = dict(listing_data)
     raw_markers = values.get("markers", ())
     if not isinstance(raw_markers, (list, tuple)):
-        raise ValueError("Stored auction listing markers are invalid")
+        raise TypeError("Stored auction listing markers are invalid")
     values["markers"] = tuple(
         AuctionCardMarker(
             icon_filename=str(marker["icon_filename"]),
@@ -2389,7 +2389,7 @@ class ExleasingcarCollector:
                             details_processed += detail_count
                             auctions_processed += 1
                             consecutive_failures = 0
-                        except Exception as exc:
+                        except Exception as exc:  # noqa: BLE001 - isolate one auction and keep its queue item retryable
                             self.database.mark_auction_bootstrap_pending(
                                 work.exleasingcar_auction_id,
                                 error_kind=type(exc).__name__,
