@@ -16,7 +16,7 @@ from .parsers import PriceObservation
 from .pdf_damage import PDFDamageObservation, PDFDamagePhotoReference
 from .pdf_fields import PDFExtractedField, PDFFieldProvenance, PDFFieldState
 
-SCHEMA_VERSION = 18
+SCHEMA_VERSION = 19
 DEFAULT_SOURCE = "ajax_update_car_form.v3.1.php"
 
 
@@ -61,6 +61,7 @@ CREATE TABLE IF NOT EXISTS auctions (
     source_auction_country_name TEXT,
     auction_type_label TEXT,
     auction_status_label TEXT,
+    source_url TEXT,
     first_seen_at TEXT NOT NULL,
     last_seen_at TEXT NOT NULL
 )
@@ -396,6 +397,136 @@ CREATE TABLE IF NOT EXISTS pdf_damage_observations (
 """
 
 
+
+
+AUCTION_DISCOVERY_RUNS_SQL = """
+CREATE TABLE IF NOT EXISTS auction_discovery_runs (
+    id INTEGER PRIMARY KEY,
+    status TEXT NOT NULL DEFAULT 'in_progress' CHECK (
+        status IN ('in_progress', 'completed')
+    ),
+    initial_page_url TEXT NOT NULL,
+    next_page_url TEXT,
+    next_page_number INTEGER,
+    pages_completed INTEGER NOT NULL DEFAULT 0 CHECK (pages_completed >= 0),
+    auction_cards_seen INTEGER NOT NULL DEFAULT 0 CHECK (auction_cards_seen >= 0),
+    started_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    completed_at TEXT,
+    CHECK (
+        (next_page_url IS NULL AND next_page_number IS NULL)
+        OR (next_page_url IS NOT NULL AND next_page_number > 0)
+    ),
+    CHECK (
+        (status = 'in_progress' AND completed_at IS NULL)
+        OR (status = 'completed' AND completed_at IS NOT NULL
+            AND next_page_url IS NULL AND next_page_number IS NULL)
+    )
+)
+"""
+
+
+AUCTION_DISCOVERY_PAGES_SQL = """
+CREATE TABLE IF NOT EXISTS auction_discovery_pages (
+    id INTEGER PRIMARY KEY,
+    discovery_run_id INTEGER NOT NULL,
+    page_number INTEGER NOT NULL CHECK (page_number > 0),
+    page_url TEXT NOT NULL,
+    next_page_url TEXT,
+    auction_count INTEGER NOT NULL CHECK (auction_count >= 0),
+    observed_at TEXT NOT NULL,
+    FOREIGN KEY (discovery_run_id)
+        REFERENCES auction_discovery_runs(id) ON DELETE RESTRICT,
+    UNIQUE (discovery_run_id, page_number),
+    UNIQUE (discovery_run_id, page_url)
+)
+"""
+
+
+AUCTION_BOOTSTRAP_QUEUE_SQL = """
+CREATE TABLE IF NOT EXISTS auction_bootstrap_queue (
+    auction_id INTEGER PRIMARY KEY,
+    status TEXT NOT NULL DEFAULT 'pending' CHECK (
+        status IN ('pending', 'in_progress', 'completed')
+    ),
+    attempts INTEGER NOT NULL DEFAULT 0 CHECK (attempts >= 0),
+    first_queued_at TEXT NOT NULL,
+    last_attempted_at TEXT,
+    next_attempt_at TEXT,
+    completed_at TEXT,
+    last_error_code TEXT CHECK (
+        last_error_code IS NULL OR last_error_code IN (
+            'page_navigation_failed', 'authentication_required', 'collection_error'
+        )
+    ),
+    updated_at TEXT NOT NULL,
+    FOREIGN KEY (auction_id) REFERENCES auctions(id) ON DELETE RESTRICT,
+    CHECK (
+        (status = 'completed' AND completed_at IS NOT NULL AND next_attempt_at IS NULL)
+        OR
+        (status != 'completed' AND completed_at IS NULL)
+    )
+)
+
+
+
+@dataclass(frozen=True, slots=True)
+class AuctionDiscoveryProgress:
+    """Persisted cursor for a complete pass over the auction-list pages."""
+
+    run_id: int
+    status: str
+    initial_page_url: str
+    next_page_url: str | None
+    next_page_number: int | None
+    pages_completed: int
+    auction_cards_seen: int
+    started_at: str
+    updated_at: str
+    completed_at: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class AuctionDiscoveryPage:
+    """One safely checkpointed auction-list page."""
+
+    page_id: int
+    run_id: int
+    page_number: int
+    page_url: str
+    next_page_url: str | None
+    auction_count: int
+    observed_at: str
+
+
+@dataclass(frozen=True, slots=True)
+class BootstrapQueueItem:
+    """A discovered auction and its persistent initial-bootstrap state."""
+
+    auction_id: str
+    source_auction_name: str | None
+    source_auction_country_code: str | None
+    source_auction_country_name: str | None
+    auction_type_label: str | None
+    auction_status_label: str | None
+    source_url: str
+    markers: tuple[AuctionCardMarker, ...]
+    status: str
+    attempts: int
+    last_attempted_at: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class BootstrapQueueSummary:
+    """Aggregate state of the first-pass auction queue."""
+
+    total: int
+    pending: int
+    in_progress: int
+    completed: int
+    deferred: int
+
+
 class ArchiveDatabase:
     """SQLite storage for Exleasingcar Archive."""
 
@@ -454,6 +585,7 @@ class ArchiveDatabase:
                     (15, self._migrate_v15_to_v16),
                     (16, self._migrate_v16_to_v17),
                     (17, self._migrate_v17_to_v18),
+                    (18, self._migrate_v18_to_v19),
                 )
                 for from_version, migration in migrations:
                     if version <= from_version:
@@ -484,6 +616,9 @@ class ArchiveDatabase:
             CATALOG_SCAN_RUNS_SQL,
             CATALOG_SCAN_PAGES_SQL,
             CATALOG_DEFERRED_API_LOTS_SQL,
+            AUCTION_DISCOVERY_RUNS_SQL,
+            AUCTION_DISCOVERY_PAGES_SQL,
+            AUCTION_BOOTSTRAP_QUEUE_SQL,
         ):
             connection.execute(statement)
         ArchiveDatabase._create_indexes(connection)
@@ -578,6 +713,19 @@ class ArchiveDatabase:
             """
             CREATE INDEX IF NOT EXISTS idx_catalog_deferred_api_pending
             ON catalog_deferred_api_lots(source_car_id, processed_at, id)
+            """,
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_auction_discovery_one_active
+            ON auction_discovery_runs(status)
+            WHERE status = 'in_progress'
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_auction_discovery_pages_run
+            ON auction_discovery_pages(discovery_run_id, page_number)
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_auction_bootstrap_due
+            ON auction_bootstrap_queue(status, next_attempt_at, last_attempted_at)
             """,
         )
         for statement in statements:
@@ -841,6 +989,17 @@ class ArchiveDatabase:
         connection.execute(CATALOG_DEFERRED_API_LOTS_SQL)
 
     @classmethod
+    def _migrate_v18_to_v19(cls, connection: sqlite3.Connection) -> None:
+        """Persist auction discovery, the global bootstrap queue, and source URLs."""
+        cls._add_column_if_missing(connection, "auctions", "source_url", "TEXT")
+        for statement in (
+            AUCTION_DISCOVERY_RUNS_SQL,
+            AUCTION_DISCOVERY_PAGES_SQL,
+            AUCTION_BOOTSTRAP_QUEUE_SQL,
+        ):
+            connection.execute(statement)
+
+    @classmethod
     def _migrate_v16_to_v17(cls, connection: sqlite3.Connection) -> None:
         """Store replayable parsed page data and API response queues per checkpoint."""
         cls._add_column_if_missing(
@@ -1075,16 +1234,22 @@ class ArchiveDatabase:
         source_auction_country_name: str | None = None,
         auction_type_label: str | None = None,
         auction_status_label: str | None = None,
+        source_url: str | None = None,
     ) -> int:
+        validated_source_url = (
+            ArchiveDatabase._validate_catalog_page_url(source_url, "source_url")
+            if source_url is not None
+            else None
+        )
         connection.execute(
             """
             INSERT INTO auctions (
                 exleasingcar_auction_id, source_auction_name,
                 source_auction_country_code, source_auction_country_name,
-                auction_type_label, auction_status_label,
+                auction_type_label, auction_status_label, source_url,
                 first_seen_at, last_seen_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(exleasingcar_auction_id) DO UPDATE SET
                 first_seen_at = MIN(auctions.first_seen_at, excluded.first_seen_at),
                 last_seen_at = MAX(auctions.last_seen_at, excluded.last_seen_at),
@@ -1104,7 +1269,8 @@ class ArchiveDatabase:
                 ),
                 auction_status_label = COALESCE(
                     excluded.auction_status_label, auctions.auction_status_label
-                )
+                ),
+                source_url = COALESCE(excluded.source_url, auctions.source_url)
             """,
             (
                 exleasingcar_auction_id,
@@ -1113,6 +1279,7 @@ class ArchiveDatabase:
                 source_auction_country_name,
                 auction_type_label,
                 auction_status_label,
+                validated_source_url,
                 observed_at,
                 observed_at,
             ),
@@ -2204,6 +2371,7 @@ class ArchiveDatabase:
         source_auction_country_name: str | None = None,
         auction_type_label: str | None = None,
         auction_status_label: str | None = None,
+        source_url: str | None = None,
         markers: tuple[AuctionCardMarker, ...] | None = None,
         observed_at: datetime | None = None,
     ) -> int:
@@ -2223,6 +2391,7 @@ class ArchiveDatabase:
                 source_auction_country_name=source_auction_country_name,
                 auction_type_label=auction_type_label,
                 auction_status_label=auction_status_label,
+                source_url=source_url,
             )
             if markers is not None:
                 self._sync_auction_markers(
@@ -3988,3 +4157,656 @@ class ArchiveDatabase:
                 tuple(parameters),
             ).fetchall()
         return [dict(row) for row in observations]
+
+
+    @staticmethod
+    def _auction_discovery_progress(
+        connection: sqlite3.Connection,
+        run_id: int,
+    ) -> AuctionDiscoveryProgress | None:
+        row = connection.execute(
+            """
+            SELECT id, status, initial_page_url, next_page_url,
+                   next_page_number, pages_completed, auction_cards_seen,
+                   started_at, updated_at, completed_at
+            FROM auction_discovery_runs
+            WHERE id = ?
+            """,
+            (run_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        return AuctionDiscoveryProgress(
+            run_id=int(row["id"]),
+            status=str(row["status"]),
+            initial_page_url=str(row["initial_page_url"]),
+            next_page_url=(
+                str(row["next_page_url"]) if row["next_page_url"] is not None else None
+            ),
+            next_page_number=(
+                int(row["next_page_number"])
+                if row["next_page_number"] is not None
+                else None
+            ),
+            pages_completed=int(row["pages_completed"]),
+            auction_cards_seen=int(row["auction_cards_seen"]),
+            started_at=str(row["started_at"]),
+            updated_at=str(row["updated_at"]),
+            completed_at=(
+                str(row["completed_at"]) if row["completed_at"] is not None else None
+            ),
+        )
+
+    def start_or_resume_auction_discovery(
+        self,
+        first_page_url: str,
+        *,
+        force: bool = False,
+        refresh_after_seconds: int = 86_400,
+        observed_at: datetime | None = None,
+    ) -> AuctionDiscoveryProgress:
+        """Resume a partial list crawl or reuse a recent completed discovery.
+
+        A forced discovery creates a new generation only when no previous
+        generation is still in progress. The default refresh interval is one
+        day; missed runs do not trigger multiple catch-up scans.
+        """
+        if not isinstance(force, bool):
+            raise TypeError("force must be bool")
+        if (
+            isinstance(refresh_after_seconds, bool)
+            or not isinstance(refresh_after_seconds, int)
+            or refresh_after_seconds < 0
+        ):
+            raise ValueError("refresh_after_seconds must be a non-negative integer")
+        first_url = self._validate_catalog_page_url(first_page_url, "first_page_url")
+        timestamp = self._serialize_datetime(observed_at)
+        now_value = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+        refresh_boundary = self._serialize_datetime(
+            now_value - timedelta(seconds=refresh_after_seconds)
+        )
+
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            active = connection.execute(
+                """
+                SELECT id FROM auction_discovery_runs
+                WHERE status = 'in_progress'
+                ORDER BY id DESC LIMIT 1
+                """
+            ).fetchone()
+            if active is not None:
+                progress = self._auction_discovery_progress(
+                    connection, int(active["id"])
+                )
+                assert progress is not None
+                if progress.initial_page_url != first_url:
+                    raise RuntimeError(
+                        "An unfinished auction discovery uses a different starting URL"
+                    )
+                return progress
+
+            if not force:
+                latest = connection.execute(
+                    """
+                    SELECT id, completed_at FROM auction_discovery_runs
+                    WHERE status = 'completed'
+                    ORDER BY id DESC LIMIT 1
+                    """
+                ).fetchone()
+                if (
+                    latest is not None
+                    and latest["completed_at"] is not None
+                    and str(latest["completed_at"]) >= refresh_boundary
+                ):
+                    progress = self._auction_discovery_progress(
+                        connection, int(latest["id"])
+                    )
+                    assert progress is not None
+                    return progress
+
+            cursor = connection.execute(
+                """
+                INSERT INTO auction_discovery_runs (
+                    status, initial_page_url, next_page_url, next_page_number,
+                    pages_completed, auction_cards_seen, started_at,
+                    updated_at, completed_at
+                ) VALUES ('in_progress', ?, ?, 1, 0, 0, ?, ?, NULL)
+                """,
+                (first_url, first_url, timestamp, timestamp),
+            )
+            progress = self._auction_discovery_progress(
+                connection, int(cursor.lastrowid)
+            )
+            assert progress is not None
+            return progress
+
+    def get_latest_auction_discovery_progress(
+        self,
+    ) -> AuctionDiscoveryProgress | None:
+        """Return the most recent auction-list discovery generation, if any."""
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT id FROM auction_discovery_runs ORDER BY id DESC LIMIT 1"
+            ).fetchone()
+            if row is None:
+                return None
+            return self._auction_discovery_progress(connection, int(row["id"]))
+
+    def get_auction_discovery_pages(
+        self,
+        run_id: int,
+    ) -> tuple[AuctionDiscoveryPage, ...]:
+        """Read the compact page-level audit trail for one discovery generation."""
+        if isinstance(run_id, bool) or not isinstance(run_id, int) or run_id < 1:
+            raise ValueError("run_id must be a positive integer")
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT id, discovery_run_id, page_number, page_url,
+                       next_page_url, auction_count, observed_at
+                FROM auction_discovery_pages
+                WHERE discovery_run_id = ?
+                ORDER BY page_number, id
+                """,
+                (run_id,),
+            ).fetchall()
+        return tuple(
+            AuctionDiscoveryPage(
+                page_id=int(row["id"]),
+                run_id=int(row["discovery_run_id"]),
+                page_number=int(row["page_number"]),
+                page_url=str(row["page_url"]),
+                next_page_url=(
+                    str(row["next_page_url"])
+                    if row["next_page_url"] is not None
+                    else None
+                ),
+                auction_count=int(row["auction_count"]),
+                observed_at=str(row["observed_at"]),
+            )
+            for row in rows
+        )
+
+    def record_auction_discovery_page(
+        self,
+        run_id: int,
+        page_number: int,
+        page_url: str,
+        *,
+        next_page_url: str | None,
+        next_page_number: int | None,
+        auction_count: int,
+        observed_at: datetime | None = None,
+    ) -> bool:
+        """Checkpoint a fully parsed auction-list page and advance its cursor.
+
+        Auction rows and queue entries are upserted before this method is
+        called. If the process stops between those writes and this checkpoint,
+        replaying the page is safe because those writes are idempotent.
+        """
+        for value, name, minimum in (
+            (run_id, "run_id", 1),
+            (page_number, "page_number", 1),
+            (auction_count, "auction_count", 0),
+        ):
+            if isinstance(value, bool) or not isinstance(value, int):
+                raise TypeError(f"{name} must be an integer")
+            if value < minimum:
+                raise ValueError(f"{name} must be at least {minimum}")
+        current_url = self._validate_catalog_page_url(page_url, "page_url")
+        if next_page_url is None:
+            if next_page_number is not None:
+                raise ValueError("next_page_number must be None without next_page_url")
+            following_url = None
+        else:
+            following_url = self._validate_catalog_page_url(
+                next_page_url, "next_page_url"
+            )
+            if (
+                isinstance(next_page_number, bool)
+                or not isinstance(next_page_number, int)
+                or next_page_number <= page_number
+            ):
+                raise ValueError("next_page_number must be greater than page_number")
+            if following_url == current_url:
+                raise ValueError("next_page_url cannot repeat the current page URL")
+
+        timestamp = self._serialize_datetime(observed_at)
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            run = connection.execute(
+                """
+                SELECT status, next_page_url, next_page_number,
+                       pages_completed, auction_cards_seen
+                FROM auction_discovery_runs WHERE id = ?
+                """,
+                (run_id,),
+            ).fetchone()
+            if run is None:
+                raise KeyError(f"Unknown auction discovery run: {run_id}")
+
+            existing = connection.execute(
+                """
+                SELECT page_number, page_url, next_page_url, auction_count
+                FROM auction_discovery_pages
+                WHERE discovery_run_id = ?
+                  AND (page_number = ? OR page_url = ?)
+                """,
+                (run_id, page_number, current_url),
+            ).fetchone()
+            if existing is not None:
+                if (
+                    int(existing["page_number"]) == page_number
+                    and str(existing["page_url"]) == current_url
+                    and (
+                        str(existing["next_page_url"])
+                        if existing["next_page_url"] is not None
+                        else None
+                    ) == following_url
+                    and int(existing["auction_count"]) == auction_count
+                ):
+                    return False
+                raise ValueError("Auction discovery page conflicts with a saved checkpoint")
+
+            if str(run["status"]) != "in_progress":
+                raise ValueError("Cannot checkpoint a completed auction discovery")
+            if (
+                run["next_page_url"] is None
+                or run["next_page_number"] is None
+                or str(run["next_page_url"]) != current_url
+                or int(run["next_page_number"]) != page_number
+            ):
+                raise ValueError(
+                    "Auction discovery page does not match its persisted cursor"
+                )
+            if following_url is not None:
+                repeated = connection.execute(
+                    """
+                    SELECT 1 FROM auction_discovery_pages
+                    WHERE discovery_run_id = ? AND page_url = ?
+                    """,
+                    (run_id, following_url),
+                ).fetchone()
+                if repeated is not None:
+                    raise ValueError("Auction discovery pagination cycle detected")
+
+            connection.execute(
+                """
+                INSERT INTO auction_discovery_pages (
+                    discovery_run_id, page_number, page_url, next_page_url,
+                    auction_count, observed_at
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (run_id, page_number, current_url, following_url, auction_count, timestamp),
+            )
+            next_status = "completed" if following_url is None else "in_progress"
+            connection.execute(
+                """
+                UPDATE auction_discovery_runs
+                SET status = ?, next_page_url = ?, next_page_number = ?,
+                    pages_completed = pages_completed + 1,
+                    auction_cards_seen = auction_cards_seen + ?,
+                    updated_at = ?, completed_at = ?
+                WHERE id = ?
+                """,
+                (
+                    next_status,
+                    following_url,
+                    next_page_number,
+                    auction_count,
+                    timestamp,
+                    timestamp if following_url is None else None,
+                    run_id,
+                ),
+            )
+            return True
+
+    def enqueue_bootstrap_auction(
+        self,
+        exleasingcar_auction_id: str,
+        *,
+        observed_at: datetime | None = None,
+    ) -> bool:
+        """Add one discovered auction without re-queuing an existing completion."""
+        public_id = self._validate_identifier(
+            exleasingcar_auction_id, "exleasingcar_auction_id"
+        )
+        timestamp = self._serialize_datetime(observed_at)
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            auction = connection.execute(
+                """
+                SELECT id, source_url FROM auctions
+                WHERE exleasingcar_auction_id = ?
+                """,
+                (public_id,),
+            ).fetchone()
+            if auction is None:
+                raise KeyError(f"Auction is not stored: {public_id}")
+            if not auction["source_url"]:
+                raise ValueError("A discovered auction must have a source URL")
+            completed = connection.execute(
+                """
+                SELECT completed_at FROM catalog_scan_runs
+                WHERE auction_id = ? AND scan_type = 'bootstrap'
+                  AND status = 'completed'
+                ORDER BY id DESC LIMIT 1
+                """,
+                (int(auction["id"]),),
+            ).fetchone()
+            completed_at = (
+                str(completed["completed_at"])
+                if completed is not None and completed["completed_at"] is not None
+                else None
+            )
+            status = "completed" if completed_at is not None else "pending"
+            cursor = connection.execute(
+                """
+                INSERT OR IGNORE INTO auction_bootstrap_queue (
+                    auction_id, status, attempts, first_queued_at,
+                    last_attempted_at, next_attempt_at, completed_at,
+                    last_error_code, updated_at
+                ) VALUES (?, ?, 0, ?, NULL, NULL, ?, NULL, ?)
+                """,
+                (int(auction["id"]), status, timestamp, completed_at, timestamp),
+            )
+            if cursor.rowcount == 1:
+                return True
+            # Backfill completion when an older manual collector run already
+            # completed the bootstrap scan before this queue existed.
+            if completed_at is not None:
+                connection.execute(
+                    """
+                    UPDATE auction_bootstrap_queue
+                    SET status = 'completed', completed_at = ?,
+                        next_attempt_at = NULL, last_error_code = NULL,
+                        updated_at = ?
+                    WHERE auction_id = ? AND status != 'completed'
+                    """,
+                    (completed_at, timestamp, int(auction["id"])),
+                )
+            return False
+
+    def get_bootstrap_queue(
+        self,
+        *,
+        limit: int = 0,
+        exleasingcar_auction_id: str | None = None,
+        observed_at: datetime | None = None,
+    ) -> tuple[BootstrapQueueItem, ...]:
+        """Return due auctions in oldest-attempt-first order for fair resumption.
+
+        A zero limit means all currently due queue entries. Both pending and
+        interrupted in-progress work are eligible; deferred failures wait
+        until their persisted retry time.
+        """
+        if isinstance(limit, bool) or not isinstance(limit, int) or limit < 0:
+            raise ValueError("limit must be a non-negative integer")
+        public_id = (
+            self._validate_identifier(exleasingcar_auction_id, "exleasingcar_auction_id")
+            if exleasingcar_auction_id is not None
+            else None
+        )
+        timestamp = self._serialize_datetime(observed_at)
+        conditions = [
+            "queue.status IN ('pending', 'in_progress')",
+            "(queue.next_attempt_at IS NULL OR queue.next_attempt_at <= ?)",
+            "auction.source_url IS NOT NULL",
+        ]
+        parameters: list[Any] = [timestamp]
+        if public_id is not None:
+            conditions.append("auction.exleasingcar_auction_id = ?")
+            parameters.append(public_id)
+        sql = f"""
+            SELECT auction.id AS database_auction_id,
+                   auction.exleasingcar_auction_id, auction.source_auction_name,
+                   auction.source_auction_country_code,
+                   auction.source_auction_country_name,
+                   auction.auction_type_label, auction.auction_status_label,
+                   auction.source_url, queue.status, queue.attempts,
+                   queue.last_attempted_at
+            FROM auction_bootstrap_queue AS queue
+            JOIN auctions AS auction ON auction.id = queue.auction_id
+            WHERE {" AND ".join(conditions)}
+            ORDER BY COALESCE(queue.last_attempted_at, queue.first_queued_at),
+                     auction.exleasingcar_auction_id
+        """
+        if limit:
+            sql += " LIMIT ?"
+            parameters.append(limit)
+
+        with self._connect() as connection:
+            rows = connection.execute(sql, tuple(parameters)).fetchall()
+            items: list[BootstrapQueueItem] = []
+            for row in rows:
+                marker_rows = connection.execute(
+                    """
+                    SELECT icon_filename, marker_group, label
+                    FROM auction_markers
+                    WHERE auction_id = ? AND is_present = 1
+                    ORDER BY id
+                    """,
+                    (int(row["database_auction_id"]),),
+                ).fetchall()
+                markers = tuple(
+                    AuctionCardMarker(
+                        icon_filename=str(marker["icon_filename"]),
+                        marker_group=str(marker["marker_group"]),
+                        label=(
+                            str(marker["label"]) if marker["label"] is not None else None
+                        ),
+                    )
+                    for marker in marker_rows
+                )
+                items.append(
+                    BootstrapQueueItem(
+                        auction_id=str(row["exleasingcar_auction_id"]),
+                        source_auction_name=(
+                            str(row["source_auction_name"])
+                            if row["source_auction_name"] is not None
+                            else None
+                        ),
+                        source_auction_country_code=(
+                            str(row["source_auction_country_code"])
+                            if row["source_auction_country_code"] is not None
+                            else None
+                        ),
+                        source_auction_country_name=(
+                            str(row["source_auction_country_name"])
+                            if row["source_auction_country_name"] is not None
+                            else None
+                        ),
+                        auction_type_label=(
+                            str(row["auction_type_label"])
+                            if row["auction_type_label"] is not None
+                            else None
+                        ),
+                        auction_status_label=(
+                            str(row["auction_status_label"])
+                            if row["auction_status_label"] is not None
+                            else None
+                        ),
+                        source_url=str(row["source_url"]),
+                        markers=markers,
+                        status=str(row["status"]),
+                        attempts=int(row["attempts"]),
+                        last_attempted_at=(
+                            str(row["last_attempted_at"])
+                            if row["last_attempted_at"] is not None
+                            else None
+                        ),
+                    )
+                )
+        return tuple(items)
+
+    def get_bootstrap_queue_summary(
+        self,
+        *,
+        observed_at: datetime | None = None,
+    ) -> BootstrapQueueSummary:
+        """Return privacy-safe aggregate counts for the bootstrap queue."""
+        timestamp = self._serialize_datetime(observed_at)
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT COUNT(*) AS total,
+                       COALESCE(SUM(status = 'pending'), 0) AS pending,
+                       COALESCE(SUM(status = 'in_progress'), 0) AS in_progress,
+                       COALESCE(SUM(status = 'completed'), 0) AS completed,
+                       COALESCE(SUM(
+                           status = 'pending' AND next_attempt_at > ?
+                       ), 0) AS deferred
+                FROM auction_bootstrap_queue
+                """,
+                (timestamp,),
+            ).fetchone()
+        return BootstrapQueueSummary(
+            total=int(row["total"]),
+            pending=int(row["pending"]),
+            in_progress=int(row["in_progress"]),
+            completed=int(row["completed"]),
+            deferred=int(row["deferred"]),
+        )
+
+    def mark_bootstrap_auction_started(
+        self,
+        exleasingcar_auction_id: str,
+        *,
+        observed_at: datetime | None = None,
+    ) -> None:
+        public_id = self._validate_identifier(
+            exleasingcar_auction_id, "exleasingcar_auction_id"
+        )
+        timestamp = self._serialize_datetime(observed_at)
+        with self._connect() as connection:
+            cursor = connection.execute(
+                """
+                UPDATE auction_bootstrap_queue
+                SET status = 'in_progress', attempts = attempts + 1,
+                    last_attempted_at = ?, next_attempt_at = NULL,
+                    last_error_code = NULL, updated_at = ?
+                WHERE auction_id = (
+                    SELECT id FROM auctions WHERE exleasingcar_auction_id = ?
+                ) AND status != 'completed'
+                """,
+                (timestamp, timestamp, public_id),
+            )
+            if cursor.rowcount != 1:
+                raise KeyError(f"Auction is not in the bootstrap queue: {public_id}")
+
+    def mark_bootstrap_auction_paused(
+        self,
+        exleasingcar_auction_id: str,
+        *,
+        observed_at: datetime | None = None,
+    ) -> None:
+        """Retain in-progress status when a run stops cleanly at its resource budget."""
+        public_id = self._validate_identifier(
+            exleasingcar_auction_id, "exleasingcar_auction_id"
+        )
+        timestamp = self._serialize_datetime(observed_at)
+        with self._connect() as connection:
+            cursor = connection.execute(
+                """
+                UPDATE auction_bootstrap_queue
+                SET status = 'in_progress', next_attempt_at = NULL,
+                    last_error_code = NULL, updated_at = ?
+                WHERE auction_id = (
+                    SELECT id FROM auctions WHERE exleasingcar_auction_id = ?
+                ) AND status != 'completed'
+                """,
+                (timestamp, public_id),
+            )
+            if cursor.rowcount != 1:
+                raise KeyError(f"Auction is not in the bootstrap queue: {public_id}")
+
+    def mark_bootstrap_auction_failed(
+        self,
+        exleasingcar_auction_id: str,
+        *,
+        error_code: str = "collection_error",
+        retry_after_seconds: int = 300,
+        observed_at: datetime | None = None,
+    ) -> None:
+        """Persist a bounded retry delay without storing exception text or URLs."""
+        public_id = self._validate_identifier(
+            exleasingcar_auction_id, "exleasingcar_auction_id"
+        )
+        if error_code not in {
+            "page_navigation_failed",
+            "authentication_required",
+            "collection_error",
+        }:
+            raise ValueError("unsupported bootstrap error_code")
+        if (
+            isinstance(retry_after_seconds, bool)
+            or not isinstance(retry_after_seconds, int)
+            or not 1 <= retry_after_seconds <= 86_400
+        ):
+            raise ValueError("retry_after_seconds must be from 1 to 86400")
+        timestamp = self._serialize_datetime(observed_at)
+        due = datetime.fromisoformat(timestamp.replace("Z", "+00:00")) + timedelta(
+            seconds=retry_after_seconds
+        )
+        next_attempt_at = self._serialize_datetime(due)
+        with self._connect() as connection:
+            cursor = connection.execute(
+                """
+                UPDATE auction_bootstrap_queue
+                SET status = 'pending', next_attempt_at = ?,
+                    completed_at = NULL, last_error_code = ?, updated_at = ?
+                WHERE auction_id = (
+                    SELECT id FROM auctions WHERE exleasingcar_auction_id = ?
+                ) AND status != 'completed'
+                """,
+                (next_attempt_at, error_code, timestamp, public_id),
+            )
+            if cursor.rowcount != 1:
+                raise KeyError(f"Auction is not in the bootstrap queue: {public_id}")
+
+    def mark_bootstrap_auction_completed(
+        self,
+        exleasingcar_auction_id: str,
+        *,
+        observed_at: datetime | None = None,
+    ) -> None:
+        """Mark a queue item done only when its bootstrap catalogue scan is complete."""
+        public_id = self._validate_identifier(
+            exleasingcar_auction_id, "exleasingcar_auction_id"
+        )
+        timestamp = self._serialize_datetime(observed_at)
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            queue_row = connection.execute(
+                """
+                SELECT queue.auction_id
+                FROM auction_bootstrap_queue AS queue
+                JOIN auctions ON auctions.id = queue.auction_id
+                WHERE auctions.exleasingcar_auction_id = ?
+                """,
+                (public_id,),
+            ).fetchone()
+            if queue_row is None:
+                raise KeyError(f"Auction is not in the bootstrap queue: {public_id}")
+            completed_scan = connection.execute(
+                """
+                SELECT 1 FROM catalog_scan_runs
+                WHERE auction_id = ? AND scan_type = 'bootstrap'
+                  AND status = 'completed'
+                LIMIT 1
+                """,
+                (int(queue_row["auction_id"]),),
+            ).fetchone()
+            if completed_scan is None:
+                raise ValueError("Cannot complete bootstrap queue item before its scan")
+            connection.execute(
+                """
+                UPDATE auction_bootstrap_queue
+                SET status = 'completed', completed_at = ?,
+                    next_attempt_at = NULL, last_error_code = NULL,
+                    updated_at = ?
+                WHERE auction_id = ?
+                """,
+                (timestamp, timestamp, int(queue_row["auction_id"])),
+            )
