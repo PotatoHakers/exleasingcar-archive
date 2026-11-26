@@ -101,7 +101,7 @@ apply. The queue chooses the least-recently attempted auction first, so a large
 auction cannot permanently hold the front of the queue. Re-run the same command
 to continue the remaining work. A clean budget stop leaves the current auction
 in progress with its catalogue cursor saved; a failed auction receives a
-bounded retry delay and a sanitized error category.
+bounded retry delay and a sanitized error category. Cards with an auction ID but no navigable source URL remain visible as blocked queue entries; they do not stop the other auctions. A later discovery can release a blocked entry if a valid link appears.
 
 Use `--auction-id <ID>` to run a single known queue entry. Use
 `--rediscover-auctions` together with `--bootstrap` to force a fresh
