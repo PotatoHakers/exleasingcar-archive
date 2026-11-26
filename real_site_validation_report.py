@@ -148,7 +148,7 @@ def print_auction_discovery_summary(
     tables: set[str],
 ) -> None:
     """Print only aggregate auction-list discovery and bootstrap queue state."""
-    print("\\nGlobal auction bootstrap:")
+    print("\nGlobal auction bootstrap:")
     required = {
         "auction_discovery_runs",
         "auction_discovery_pages",
@@ -207,7 +207,7 @@ def print_auction_discovery_summary(
     blocked = sum(int(row["blocked"]) for row in rows)
     total = sum(totals.values())
     print(
-        "  bootstrap queue: "
+        "  Bootstrap queue: "
         f"total={total}; completed={totals.get('completed', 0)}; "
         f"in_progress={totals.get('in_progress', 0)}; "
         f"pending={totals.get('pending', 0) - blocked}; "
