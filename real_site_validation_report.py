@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import sqlite3
+from datetime import datetime, timezone
 import sys
 from pathlib import Path
 from urllib.parse import quote
@@ -176,19 +177,25 @@ def print_auction_discovery_summary(
             f"completed_at={latest['completed_at'] or 'not completed'}"
         )
 
+    now = (
+        datetime.now(timezone.utc)
+        .isoformat(timespec="microseconds")
+        .replace("+00:00", "Z")
+    )
     rows = connection.execute(
         """
         SELECT status, COUNT(*) AS count,
                COALESCE(SUM(
                    CASE WHEN status != 'completed'
                          AND next_attempt_at IS NOT NULL
-                         AND next_attempt_at > strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+                         AND next_attempt_at > ?
                         THEN 1 ELSE 0 END
                ), 0) AS deferred
         FROM auction_bootstrap_queue
         GROUP BY status
         ORDER BY status
-        """
+        """,
+        (now,),
     ).fetchall()
     totals = {str(row["status"]): int(row["count"]) for row in rows}
     deferred = sum(int(row["deferred"]) for row in rows)
