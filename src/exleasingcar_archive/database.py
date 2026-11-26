@@ -456,7 +456,8 @@ CREATE TABLE IF NOT EXISTS auction_bootstrap_queue (
     completed_at TEXT,
     last_error_code TEXT CHECK (
         last_error_code IS NULL OR last_error_code IN (
-            'page_navigation_failed', 'authentication_required', 'collection_error'
+            'page_navigation_failed', 'authentication_required', 'collection_error',
+            'missing_source_url'
         )
     ),
     updated_at TEXT NOT NULL,
@@ -525,6 +526,7 @@ class BootstrapQueueSummary:
     in_progress: int
     completed: int
     deferred: int
+    blocked: int = 0
 
 
 class ArchiveDatabase:
@@ -4486,8 +4488,7 @@ class ArchiveDatabase:
             ).fetchone()
             if auction is None:
                 raise KeyError(f"Auction is not stored: {public_id}")
-            if not auction["source_url"]:
-                raise ValueError("A discovered auction must have a source URL")
+            missing_source_url = not bool(auction["source_url"])
             completed = connection.execute(
                 """
                 SELECT completed_at FROM catalog_scan_runs
@@ -4503,15 +4504,27 @@ class ArchiveDatabase:
                 else None
             )
             status = "completed" if completed_at is not None else "pending"
+            error_code = (
+                "missing_source_url"
+                if missing_source_url and completed_at is None
+                else None
+            )
             cursor = connection.execute(
                 """
                 INSERT OR IGNORE INTO auction_bootstrap_queue (
                     auction_id, status, attempts, first_queued_at,
                     last_attempted_at, next_attempt_at, completed_at,
                     last_error_code, updated_at
-                ) VALUES (?, ?, 0, ?, NULL, NULL, ?, NULL, ?)
+                ) VALUES (?, ?, 0, ?, NULL, NULL, ?, ?, ?)
                 """,
-                (int(auction["id"]), status, timestamp, completed_at, timestamp),
+                (
+                    int(auction["id"]),
+                    status,
+                    timestamp,
+                    completed_at,
+                    error_code,
+                    timestamp,
+                ),
             )
             if cursor.rowcount == 1:
                 return True
@@ -4527,6 +4540,19 @@ class ArchiveDatabase:
                     WHERE auction_id = ? AND status != 'completed'
                     """,
                     (completed_at, timestamp, int(auction["id"])),
+                )
+            elif not missing_source_url:
+                # A later discovery may reveal a valid detail URL for a card
+                # that was previously visible only as a restricted/unlinked row.
+                connection.execute(
+                    """
+                    UPDATE auction_bootstrap_queue
+                    SET last_error_code = NULL, next_attempt_at = NULL,
+                        updated_at = ?
+                    WHERE auction_id = ? AND status = 'pending'
+                      AND last_error_code = 'missing_source_url'
+                    """,
+                    (timestamp, int(auction["id"])),
                 )
             return False
 
@@ -4653,12 +4679,17 @@ class ArchiveDatabase:
             row = connection.execute(
                 """
                 SELECT COUNT(*) AS total,
-                       COALESCE(SUM(status = 'pending'), 0) AS pending,
+                       COALESCE(SUM(
+                           status = 'pending' AND last_error_code IS NOT 'missing_source_url'
+                       ), 0) AS pending,
                        COALESCE(SUM(status = 'in_progress'), 0) AS in_progress,
                        COALESCE(SUM(status = 'completed'), 0) AS completed,
                        COALESCE(SUM(
                            status = 'pending' AND next_attempt_at > ?
-                       ), 0) AS deferred
+                       ), 0) AS deferred,
+                       COALESCE(SUM(
+                           status = 'pending' AND last_error_code = 'missing_source_url'
+                       ), 0) AS blocked
                 FROM auction_bootstrap_queue
                 """,
                 (timestamp,),
@@ -4669,6 +4700,7 @@ class ArchiveDatabase:
             in_progress=int(row["in_progress"]),
             completed=int(row["completed"]),
             deferred=int(row["deferred"]),
+            blocked=int(row["blocked"]),
         )
 
     def mark_bootstrap_auction_started(
