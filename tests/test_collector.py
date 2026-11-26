@@ -179,6 +179,10 @@ def test_discover_auction_pages_checkpoints_every_page_and_enqueues_cards(
                 "https://www.exleasingcar.com/ru/auction-1",
                 (),
             ),
+            ParsedAuctionListing(
+                "auction-unlinked", "Contract only", "DE", "Germany", None,
+                None, None, None, (),
+            ),
         ),
         second_html: (
             ParsedAuctionListing(
@@ -251,7 +255,7 @@ def test_discover_auction_pages_checkpoints_every_page_and_enqueues_cards(
 
     assert progress.status == "completed"
     assert progress.pages_completed == 2
-    assert progress.auction_cards_seen == 2
+    assert progress.auction_cards_seen == 3
     assert pages_processed == 2
     assert page.goto_calls == [second_url]
     assert [
@@ -261,7 +265,10 @@ def test_discover_auction_pages_checkpoints_every_page_and_enqueues_cards(
     assert [item.auction_id for item in queue] == ["auction-1", "auction-2"]
     assert queue[0].source_url.endswith("/auction-1")
     assert queue[1].source_url.endswith("/auction-2")
-    assert database.get_bootstrap_queue_summary().total == 2
+    queue_summary = database.get_bootstrap_queue_summary()
+    assert queue_summary.total == 3
+    assert queue_summary.pending == 2
+    assert queue_summary.blocked == 1
 
 
 def test_auction_discovery_resumes_at_saved_page_and_obeys_page_budget(
