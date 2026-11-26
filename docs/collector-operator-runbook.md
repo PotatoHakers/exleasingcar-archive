@@ -125,7 +125,7 @@ substitute for the future routine-refresh scheduler.
 
 After the first batch, run `--plan-only` and
 `python real_site_validation_report.py data/exleasingcar_archive.sqlite3`.
-Review the queue totals before continuing with larger batches.
+Review the queue totals before continuing with larger batches. The `blocked (no source URL)` count is not runnable work; inspect those auction cards separately or wait for a later discovery to expose a navigable link.
 
 ## Controlled real-site validation
 
