@@ -108,6 +108,44 @@ def _catalog_detail_coverage(
     )
 
 
+def _catalog_observation_tie_key(lot: ParsedLot) -> tuple[Any, ...]:
+    """Provide deterministic ordering when two catalogue snapshots share a timestamp."""
+    price = lot.current_price
+    return (
+        int(lot.status is VehicleStatus.COMPLETED),
+        lot.status.value,
+        lot.raw_status or "",
+        lot.is_hot_bid,
+        lot.title or "",
+        lot.source_url or "",
+        price.price_type.value if price is not None else "",
+        str(price.amount) if price is not None else "",
+        (price.currency or "") if price is not None else "",
+        price.raw_text if price is not None else "",
+        price.source_field if price is not None else "",
+    )
+
+
+def _merge_catalog_lot_observation(
+    observations: dict[str, tuple[ParsedLot, datetime]],
+    lot: ParsedLot,
+    observed_at: datetime,
+) -> None:
+    """Keep the newest observation, with an order-independent timestamp tie-break."""
+    current = observations.get(lot.source_car_id)
+    if current is None:
+        observations[lot.source_car_id] = (lot, observed_at)
+        return
+
+    current_lot, current_observed_at = current
+    if observed_at > current_observed_at or (
+        observed_at == current_observed_at
+        and _catalog_observation_tie_key(lot)
+        > _catalog_observation_tie_key(current_lot)
+    ):
+        observations[lot.source_car_id] = (lot, observed_at)
+
+
 @dataclass(frozen=True, slots=True)
 class CapturedApiResponse:
     url: str
@@ -1657,12 +1695,10 @@ class ExleasingcarCollector:
             lot_page_ids.update(
                 {item.source_car_id: saved_page.page_id for item in page_metadata}
             )
-            catalog_lot_observations.update(
-                {
-                    item.source_car_id: (item, page_observed_at)
-                    for item in parsed_lots
-                }
-            )
+            for item in parsed_lots:
+                _merge_catalog_lot_observation(
+                    catalog_lot_observations, item, page_observed_at
+                )
             detail_urls.update(saved_detail_urls)
             lots_seen += page_lots_seen
 
@@ -1691,12 +1727,10 @@ class ExleasingcarCollector:
             lot_page_ids.update(
                 {item.source_car_id: pending_page.page_id for item in page_metadata}
             )
-            catalog_lot_observations.update(
-                {
-                    item.source_car_id: (item, page_observed_at)
-                    for item in parsed_lots
-                }
-            )
+            for item in parsed_lots:
+                _merge_catalog_lot_observation(
+                    catalog_lot_observations, item, page_observed_at
+                )
             detail_urls.update(saved_detail_urls)
             lots_seen += page_lots_seen
 
@@ -1725,12 +1759,10 @@ class ExleasingcarCollector:
             lot_page_ids.update(
                 {item.source_car_id: deferred_page.page_id for item in page_metadata}
             )
-            catalog_lot_observations.update(
-                {
-                    item.source_car_id: (item, page_observed_at)
-                    for item in parsed_lots
-                }
-            )
+            for item in parsed_lots:
+                _merge_catalog_lot_observation(
+                    catalog_lot_observations, item, page_observed_at
+                )
             detail_urls.update(saved_detail_urls)
             lots_seen += page_lots_seen
 
@@ -1746,15 +1778,6 @@ class ExleasingcarCollector:
                 "The completed catalogue scan may still be incomplete."
             )
 
-        ordered_car_ids = self.database.get_detail_check_order(
-            listing.exleasingcar_auction_id,
-            set(detail_urls),
-        )
-        detail_items = [
-            (car_id, detail_urls[car_id])
-            for car_id in ordered_car_ids
-            if car_id in detail_urls
-        ]
         previously_eligible = self.database.get_collection_eligible_lots(
             listing.exleasingcar_auction_id,
             set(all_lot_metadata),
@@ -1765,6 +1788,52 @@ class ExleasingcarCollector:
             for car_id, sale_type in previously_eligible.items()
             if sale_type == SaleType.OPEN_AUCTION.value
         }
+        open_auction_candidate_ids = self.database.get_open_auction_lot_ids(
+            listing.exleasingcar_auction_id,
+            set(all_lot_metadata),
+        )
+
+        # Qualify catalogue-price candidates and persist public API snapshots
+        # before terminal catalogue states. This preserves the final bid/price
+        # captured for the same page, then prevents completed lots from detail
+        # rotation below.
+        self._qualify_open_candidates_from_catalog(
+            auction,
+            catalog_lot_observations,
+            open_auction_candidate_ids,
+            eligible_car_ids,
+            open_auction_car_ids,
+        )
+        self._persist_api_updates(
+            auction,
+            eligible_car_ids,
+            all_lot_metadata,
+            open_auction_car_ids=open_auction_car_ids,
+            open_auction_candidate_ids=open_auction_candidate_ids,
+            run_budget=run_budget,
+        )
+        completed_before_detail = self.database.get_completed_open_auction_lots(
+            listing.exleasingcar_auction_id,
+            eligible_car_ids,
+        )
+        completed_before_detail.update(
+            self._persist_catalog_lot_observations(
+                auction,
+                catalog_lot_observations,
+                open_auction_car_ids,
+                completed_before_run=completed_before_detail,
+            )
+        )
+
+        ordered_car_ids = self.database.get_detail_check_order(
+            listing.exleasingcar_auction_id,
+            set(detail_urls),
+        )
+        detail_items = [
+            (car_id, detail_urls[car_id])
+            for car_id in ordered_car_ids
+            if car_id in detail_urls and car_id not in completed_before_detail
+        ]
         if max_detail_pages == 0:
             detail_items = []
         elif max_detail_pages > 0:
@@ -1842,22 +1911,24 @@ class ExleasingcarCollector:
             if self.page_delay_seconds:
                 time.sleep(self.page_delay_seconds)
 
-        # Only known open lots can be promoted by a positive public API bid.
-        # Unknown sale modes stay queued until detail enrichment classifies them.
-        completed_before_api = self.database.get_completed_open_auction_lots(
-            listing.exleasingcar_auction_id,
-            eligible_car_ids,
-        )
-        open_auction_candidate_ids = self.database.get_open_auction_lot_ids(
-            listing.exleasingcar_auction_id,
-            set(all_lot_metadata),
-        )
+        # Detail-page API responses are appended to the durable queue during
+        # rotation. Replay them here; already completed lots remain filtered.
         self._qualify_open_candidates_from_catalog(
             auction,
             catalog_lot_observations,
             open_auction_candidate_ids,
             eligible_car_ids,
             open_auction_car_ids,
+        )
+        completed_before_api = self.database.get_completed_open_auction_lots(
+            listing.exleasingcar_auction_id,
+            eligible_car_ids,
+        )
+        self._persist_catalog_lot_observations(
+            auction,
+            catalog_lot_observations,
+            open_auction_car_ids,
+            completed_before_run=completed_before_api,
         )
         self._persist_api_updates(
             auction,
@@ -1866,12 +1937,6 @@ class ExleasingcarCollector:
             open_auction_car_ids=open_auction_car_ids,
             open_auction_candidate_ids=open_auction_candidate_ids,
             run_budget=run_budget,
-        )
-        self._persist_catalog_lot_observations(
-            auction,
-            catalog_lot_observations,
-            open_auction_car_ids,
-            completed_before_run=completed_before_api,
         )
 
         coverage = _catalog_detail_coverage(
