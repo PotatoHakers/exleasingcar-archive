@@ -468,7 +468,7 @@ CREATE TABLE IF NOT EXISTS auction_bootstrap_queue (
         (status != 'completed' AND completed_at IS NULL)
     )
 )
-
+"""
 
 
 @dataclass(frozen=True, slots=True)
