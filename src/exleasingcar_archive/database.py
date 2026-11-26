@@ -2297,7 +2297,7 @@ class ArchiveDatabase:
         exleasingcar_auction_id: str | None = None,
         include_completed: bool = False,
         observed_at: datetime | None = None,
-        stale_after_minutes: int = 30,
+        stale_after_minutes: int = 2,
     ) -> AuctionBootstrapWorkItem | None:
         """Atomically claim one pending queue item; stale claims recover after crashes."""
         if not isinstance(include_completed, bool):
