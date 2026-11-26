@@ -30,8 +30,56 @@ def test_validation_report_accepts_current_schema_and_summarizes_scan_tables(tmp
     assert "catalog_scan_runs:" in result.stdout
     assert "catalog_scan_pages:" in result.stdout
     assert "catalog_deferred_api_lots:" in result.stdout
+    assert "auction_discovery_runs:" in result.stdout
+    assert "auction_discovery_pages:" in result.stdout
+    assert "auction_bootstrap_queue:" in result.stdout
+    assert "Global auction bootstrap:" in result.stdout
+    assert "Bootstrap queue:" in result.stdout
     assert "Catalogue progress:" in result.stdout
     assert "STRUCTURAL CHECKS PASSED" in result.stdout
+
+
+def test_validation_report_summarizes_discovery_and_bootstrap_without_urls_or_ids(
+    tmp_path,
+):
+    from datetime import timedelta
+
+    from exleasingcar_archive.database import SCHEMA_VERSION
+
+    database = ArchiveDatabase(tmp_path / "global-bootstrap-report.sqlite3")
+    database.initialize()
+    first_page = "https://www.exleasingcar.com/ru/auto-auctions"
+    auction_url = "https://www.exleasingcar.com/ru/auction-private-id"
+    now = datetime(2026, 11, 26, 10, 0, tzinfo=timezone.utc)
+    discovery = database.start_or_resume_auction_discovery(
+        first_page, observed_at=now
+    )
+    database.record_auction_discovery_page(
+        discovery.run_id,
+        1,
+        first_page,
+        next_page_url=None,
+        next_page_number=None,
+        auction_count=1,
+        observed_at=now,
+    )
+    database.upsert_auction("private-auction-id", source_url=auction_url)
+    database.enqueue_bootstrap_auction(
+        "private-auction-id", observed_at=now
+    )
+    database.mark_bootstrap_auction_started(
+        "private-auction-id", observed_at=now + timedelta(seconds=1)
+    )
+
+    result = run_report(database.path)
+
+    assert result.returncode == 0, result.stderr + result.stdout
+    assert f"SQLite schema version: {SCHEMA_VERSION}" in result.stdout
+    assert "auction-list discovery: completed; pages=1; auction-card appearances=1" in result.stdout
+    assert "bootstrap queue: total=1; completed=0; in_progress=1" in result.stdout
+    assert "private-auction-id" not in result.stdout
+    assert auction_url not in result.stdout
+    assert first_page not in result.stdout
 
 
 def test_validation_report_fails_closed_for_an_old_schema(tmp_path):
@@ -42,7 +90,7 @@ def test_validation_report_fails_closed_for_an_old_schema(tmp_path):
     result = run_report(database_path)
 
     assert result.returncode == 1
-    assert "expected current: 18" in result.stdout
+    assert "expected current: 19" in result.stdout
     assert "CHECK FAILED" in result.stdout
 
 def test_validation_report_shows_safe_source_samples_without_identifiers(tmp_path):
