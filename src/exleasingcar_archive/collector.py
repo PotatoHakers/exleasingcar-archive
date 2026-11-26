@@ -2126,7 +2126,7 @@ class ExleasingcarCollector:
                         break
                 current_html = page.content()
 
-            page_url = page.url if current_html != initial_page_html else initial_page_url
+            page_url = page.url
             listings = parse_auction_listings(current_html, page_url)
             if not listings and progress.pages_completed == 0 and pages_processed == 0:
                 raise RuntimeError(
