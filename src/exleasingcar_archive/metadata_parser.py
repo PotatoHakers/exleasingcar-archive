@@ -6,7 +6,7 @@ import re
 from collections.abc import Iterable
 from dataclasses import dataclass
 from html import unescape
-from urllib.parse import unquote, urljoin, urlsplit
+from urllib.parse import parse_qs, unquote, urljoin, urlsplit
 
 from bs4 import BeautifulSoup, Tag
 
@@ -137,7 +137,7 @@ class ParsedMediaReference:
     source_order: int = 0
 
 
-MEDIA_SOURCE_HOSTS = frozenset({"data.exleasingcar.com"})
+MEDIA_SOURCE_HOSTS = frozenset({"data.exleasingcar.com", "portal.macadam.eu"})
 
 
 @dataclass(frozen=True, slots=True)
@@ -726,15 +726,33 @@ def _trusted_media_url(value: str | None, page_url: str | None) -> str | None:
     if not value:
         return None
     candidate = urljoin(page_url or "https://www.exleasingcar.com/", value.strip())
-    parts = urlsplit(candidate)
+    try:
+        parts = urlsplit(candidate)
+        port = parts.port
+    except ValueError:
+        return None
+    host = (parts.hostname or "").casefold()
     if (
         parts.scheme.casefold() != "https"
-        or (parts.hostname or "").casefold() not in MEDIA_SOURCE_HOSTS
+        or host not in MEDIA_SOURCE_HOSTS
         or parts.username is not None
         or parts.password is not None
+        or port not in (None, 443)
         or not parts.path
+        or parts.fragment
     ):
         return None
+    if host == "portal.macadam.eu":
+        query = parse_qs(parts.query, keep_blank_values=True)
+        if (
+            parts.path != "/reports/remarketing"
+            or set(query) != {"id", "culture"}
+            or len(query.get("id", ())) != 1
+            or len(query.get("culture", ())) != 1
+            or not query["id"][0]
+            or not query["culture"][0]
+        ):
+            return None
     return candidate
 
 
