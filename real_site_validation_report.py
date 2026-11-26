@@ -186,11 +186,16 @@ def print_auction_discovery_summary(
         """
         SELECT status, COUNT(*) AS count,
                COALESCE(SUM(
-                   CASE WHEN status != 'completed'
+                   CASE WHEN status = 'pending'
                          AND next_attempt_at IS NOT NULL
                          AND next_attempt_at > ?
                         THEN 1 ELSE 0 END
-               ), 0) AS deferred
+               ), 0) AS deferred,
+               COALESCE(SUM(
+                   CASE WHEN status = 'pending'
+                         AND last_error_code = 'missing_source_url'
+                        THEN 1 ELSE 0 END
+               ), 0) AS blocked
         FROM auction_bootstrap_queue
         GROUP BY status
         ORDER BY status
@@ -199,12 +204,14 @@ def print_auction_discovery_summary(
     ).fetchall()
     totals = {str(row["status"]): int(row["count"]) for row in rows}
     deferred = sum(int(row["deferred"]) for row in rows)
+    blocked = sum(int(row["blocked"]) for row in rows)
     total = sum(totals.values())
     print(
         "  bootstrap queue: "
         f"total={total}; completed={totals.get('completed', 0)}; "
         f"in_progress={totals.get('in_progress', 0)}; "
-        f"pending={totals.get('pending', 0)}; deferred={deferred}"
+        f"pending={totals.get('pending', 0) - blocked}; "
+        f"deferred={deferred}; blocked_no_source_url={blocked}"
     )
 
 
