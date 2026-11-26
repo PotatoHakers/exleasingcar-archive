@@ -1677,6 +1677,7 @@ class ExleasingcarCollector:
         lot_page_ids: dict[str, int] = {}
         metadata_page_ranks: dict[str, tuple[datetime, int]] = {}
         detail_page_ranks: dict[str, tuple[datetime, int]] = {}
+        default_page_rank = (datetime.min.replace(tzinfo=timezone.utc), 0)
 
         def merge_restored_page_data(
             page_id: int,
@@ -1688,7 +1689,7 @@ class ExleasingcarCollector:
             page_rank = (page_observed_at, page_id)
             for item in page_metadata:
                 car_id = item.source_car_id
-                if page_rank > metadata_page_ranks.get(car_id, (datetime.min.replace(tzinfo=timezone.utc), 0)):
+                if page_rank > metadata_page_ranks.get(car_id, default_page_rank):
                     newest = _lot_metadata(item)
                     previous = all_lot_metadata.get(car_id)
                     if previous is not None:
@@ -1701,13 +1702,17 @@ class ExleasingcarCollector:
                                 newest.listing_code_attribute
                                 or previous.listing_code_attribute
                             ),
-                            mileage_km=newest.mileage_km or previous.mileage_km,
+                            mileage_km=(
+                                newest.mileage_km
+                                if newest.mileage_km is not None
+                                else previous.mileage_km
+                            ),
                         )
                     all_lot_metadata[car_id] = newest
                     metadata_page_ranks[car_id] = page_rank
 
             for car_id, detail_url in saved_detail_urls.items():
-                if page_rank > detail_page_ranks.get(car_id, (datetime.min.replace(tzinfo=timezone.utc), 0)):
+                if page_rank > detail_page_ranks.get(car_id, default_page_rank):
                     detail_urls[car_id] = detail_url
                     lot_page_ids[car_id] = page_id
                     detail_page_ranks[car_id] = page_rank
