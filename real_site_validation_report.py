@@ -23,7 +23,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent / "src"))
 from exleasingcar_archive.auction_time import format_auction_time_for_user
 
 
-EXPECTED_SCHEMA_VERSION = 18
+EXPECTED_SCHEMA_VERSION = 19
 REQUIRED_TABLES = (
     "auctions",
     "vehicles",
@@ -31,6 +31,9 @@ REQUIRED_TABLES = (
     "catalog_scan_runs",
     "catalog_scan_pages",
     "catalog_deferred_api_lots",
+    "auction_discovery_runs",
+    "auction_discovery_pages",
+    "auction_bootstrap_queue",
 )
 
 TABLES = (
@@ -50,6 +53,9 @@ TABLES = (
     "catalog_scan_runs",
     "catalog_scan_pages",
     "catalog_deferred_api_lots",
+    "auction_discovery_runs",
+    "auction_discovery_pages",
+    "auction_bootstrap_queue",
 )
 
 
@@ -134,6 +140,65 @@ def print_media_summary(connection: sqlite3.Connection, tables: set[str]) -> Non
         )
         if by_type["photo"] != 43 or by_type["report"] != 4:
             print("  NOTE: a different auction/lot scope can legitimately produce different totals.")
+
+
+def print_auction_discovery_summary(
+    connection: sqlite3.Connection,
+    tables: set[str],
+) -> None:
+    """Print only aggregate auction-list discovery and bootstrap queue state."""
+    print("\\nGlobal auction bootstrap:")
+    required = {
+        "auction_discovery_runs",
+        "auction_discovery_pages",
+        "auction_bootstrap_queue",
+    }
+    missing = required - tables
+    if missing:
+        print("  unavailable: " + ", ".join(sorted(missing)))
+        return
+
+    latest = connection.execute(
+        """
+        SELECT status, pages_completed, auction_cards_seen, started_at, completed_at
+        FROM auction_discovery_runs
+        ORDER BY id DESC
+        LIMIT 1
+        """
+    ).fetchone()
+    if latest is None:
+        print("  auction-list discovery: not started")
+    else:
+        print(
+            "  auction-list discovery: "
+            f"{latest['status']}; pages={latest['pages_completed']}; "
+            f"auction-card appearances={latest['auction_cards_seen']}; "
+            f"completed_at={latest['completed_at'] or 'not completed'}"
+        )
+
+    rows = connection.execute(
+        """
+        SELECT status, COUNT(*) AS count,
+               COALESCE(SUM(
+                   CASE WHEN status != 'completed'
+                         AND next_attempt_at IS NOT NULL
+                         AND next_attempt_at > strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+                        THEN 1 ELSE 0 END
+               ), 0) AS deferred
+        FROM auction_bootstrap_queue
+        GROUP BY status
+        ORDER BY status
+        """
+    ).fetchall()
+    totals = {str(row["status"]): int(row["count"]) for row in rows}
+    deferred = sum(int(row["deferred"]) for row in rows)
+    total = sum(totals.values())
+    print(
+        "  bootstrap queue: "
+        f"total={total}; completed={totals.get('completed', 0)}; "
+        f"in_progress={totals.get('in_progress', 0)}; "
+        f"pending={totals.get('pending', 0)}; deferred={deferred}"
+    )
 
 
 def print_scheduler_summary(connection: sqlite3.Connection, tables: set[str]) -> None:
@@ -419,6 +484,7 @@ def main() -> int:
         print_media_summary(connection, tables)
         print_price_summary(connection, tables)
         print_source_observation_samples(connection, tables)
+        print_auction_discovery_summary(connection, tables)
         print_scheduler_summary(connection, tables)
 
         if "auction_lots" in tables:
