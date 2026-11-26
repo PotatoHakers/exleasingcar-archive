@@ -70,14 +70,22 @@ def test_validation_report_summarizes_discovery_and_bootstrap_without_urls_or_id
     database.mark_bootstrap_auction_started(
         "private-auction-id", observed_at=now + timedelta(seconds=1)
     )
+    database.upsert_auction("private-auction-without-link")
+    database.enqueue_bootstrap_auction(
+        "private-auction-without-link", observed_at=now
+    )
 
     result = run_report(database.path)
 
     assert result.returncode == 0, result.stderr + result.stdout
     assert f"SQLite schema version: {SCHEMA_VERSION}" in result.stdout
     assert "auction-list discovery: completed; pages=1; auction-card appearances=1" in result.stdout
-    assert "bootstrap queue: total=1; completed=0; in_progress=1" in result.stdout
+    assert (
+        "bootstrap queue: total=2; completed=0; in_progress=1; "
+        "pending=0; deferred=0; blocked_no_source_url=1"
+    ) in result.stdout
     assert "private-auction-id" not in result.stdout
+    assert "private-auction-without-link" not in result.stdout
     assert auction_url not in result.stdout
     assert first_page not in result.stdout
 
