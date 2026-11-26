@@ -435,7 +435,7 @@ def test_collector_defaults_to_bounded_detail_batch_for_selected_auction():
     from exleasingcar_archive.collector import build_argument_parser
 
     args = build_argument_parser().parse_args([])
-    assert args.max_auctions == 1
+    assert args.max_auctions == 0
     assert args.max_detail_pages == 30
 
 
@@ -1281,6 +1281,141 @@ def test_collector_cli_exposes_safe_run_wide_limits():
     assert args.max_catalog_pages_per_run == 40
     assert args.max_live_lots_per_run == 500
     assert args.max_detail_pages_per_run == 60
+
+
+def test_auction_listing_round_trips_from_persistent_queue():
+    from dataclasses import asdict
+
+    from exleasingcar_archive.collector import _auction_listing_from_queue
+    from exleasingcar_archive.metadata_parser import ParsedAuctionListing
+    from exleasingcar_archive.models import AuctionCardMarker
+
+    original = ParsedAuctionListing(
+        exleasingcar_auction_id="auction-queue",
+        source_auction_name="Test fleet",
+        source_auction_country_code="DE",
+        source_auction_country_name="Germany",
+        auction_type_label="English auction",
+        auction_status_label="FINAL CALL",
+        vehicle_count=18,
+        source_url="https://www.exleasingcar.com/ru/авто-аукционы/аукцион-queue",
+        markers=(
+            AuctionCardMarker("ac.svg", "auction_format", "English auction"),
+        ),
+    )
+
+    restored = _auction_listing_from_queue(asdict(original))
+
+    assert restored == original
+
+
+def test_global_auction_discovery_checkpoints_and_resumes_all_pages(
+    monkeypatch, tmp_path
+):
+    from exleasingcar_archive.collector import ExleasingcarCollector
+    from exleasingcar_archive.database import ArchiveDatabase
+    from exleasingcar_archive.scheduler import RunBudget, RunLimits
+
+    fixture_path = __import__("pathlib").Path(__file__).parent / "fixtures" / "auction_listings.html"
+    first_html = fixture_path.read_text(encoding="utf-8")
+    second_html = first_html.replace("210547", "210548").replace(
+        "BCA DE 3.3", "BCA DE 3.4"
+    )
+    first_url = "https://www.exleasingcar.com/ru/авто-аукционы"
+    second_url = "https://www.exleasingcar.com/ru/авто-аукционы?page=2"
+
+    def with_pagination(html, current, *, has_next):
+        next_link = (
+            f'<a class="pagination-next" href="{second_url}">Next</a>'
+            if has_next
+            else ""
+        )
+        return html + f"""
+        <nav><ul class="pagination">
+          <li><a class="pagination-page {'current' if current == 1 else ''}" href="{first_url}">1</a></li>
+          <li><a class="pagination-page {'current' if current == 2 else ''}" href="{second_url}">2</a></li>
+          {next_link}
+        </ul></nav>
+        """
+
+    pages = {
+        first_url: with_pagination(first_html, 1, has_next=True),
+        second_url: with_pagination(second_html, 2, has_next=False),
+    }
+
+    class FakePage:
+        def __init__(self):
+            self.url = first_url
+            self.goto_calls = []
+
+        def goto(self, url, **kwargs):
+            self.goto_calls.append(url)
+            self.url = url
+
+        def content(self):
+            return pages[self.url]
+
+    database = ArchiveDatabase(tmp_path / "global-discovery.sqlite3")
+    database.initialize()
+    collector = ExleasingcarCollector(
+        database,
+        tmp_path / "raw",
+        page_delay_seconds=0,
+    )
+    monkeypatch.setattr(collector.recorder, "wait_for_pending", lambda page: True)
+    monkeypatch.setattr(collector, "_is_logged_in", lambda page: True)
+    monkeypatch.setattr(collector_module := __import__(
+        "exleasingcar_archive.collector", fromlist=["_wait_for_dynamic_content"]
+    ), "_wait_for_dynamic_content", lambda page: None)
+
+    page = FakePage()
+    first_budget = RunBudget(
+        RunLimits(
+            max_duration_seconds=60,
+            max_catalog_pages=1,
+            max_live_lots=100,
+            max_detail_pages=0,
+        )
+    )
+    first_discovered, first_processed = collector._discover_auction_listings(
+        page,
+        auction_list_url=first_url,
+        snapshot_dir=tmp_path / "snapshots",
+        initial_page_html=pages[first_url],
+        initial_page_url=first_url,
+        run_budget=first_budget,
+    )
+
+    assert (first_discovered, first_processed) == (1, 1)
+    assert page.goto_calls == []
+    progress = database.start_or_resume_auction_discovery(first_url)
+    assert progress.status == "in_progress"
+    assert progress.next_page_url == second_url
+    assert database.get_auction_bootstrap_queue_summary()["pending"] == 1
+
+    second_budget = RunBudget(
+        RunLimits(
+            max_duration_seconds=60,
+            max_catalog_pages=2,
+            max_live_lots=100,
+            max_detail_pages=0,
+        )
+    )
+    second_discovered, second_processed = collector._discover_auction_listings(
+        page,
+        auction_list_url=first_url,
+        snapshot_dir=tmp_path / "snapshots-resume",
+        initial_page_html=pages[first_url],
+        initial_page_url=first_url,
+        run_budget=second_budget,
+    )
+
+    assert (second_discovered, second_processed) == (1, 1)
+    assert page.goto_calls == [second_url]
+    completed = database.start_or_resume_auction_discovery(first_url)
+    assert completed.status == "completed"
+    assert completed.pages_completed == 2
+    assert database.get_auction_bootstrap_queue_summary()["pending"] == 2
 
 
 def test_unknown_sale_mode_does_not_block_public_updates_for_known_lots(tmp_path):
