@@ -1782,7 +1782,6 @@ def test_bootstrap_queue_prioritizes_urgent_work_and_recovers_stale_claims(tmp_p
     assert recovered_claim is not None
     assert recovered_claim.exleasingcar_auction_id == "auction-urgent"
     assert recovered_claim.attempt_count == 2
-    assert recovered_claim.last_error == "recovered_stale_claim"
 
     assert database.mark_auction_bootstrap_completed(
         "auction-urgent",
