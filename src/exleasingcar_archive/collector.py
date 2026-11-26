@@ -90,6 +90,7 @@ class CollectorSummary:
     bootstrap_queue_in_progress: int = 0
     bootstrap_queue_completed: int = 0
     bootstrap_queue_deferred: int = 0
+    bootstrap_queue_blocked: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -1594,11 +1595,6 @@ class ExleasingcarCollector:
 
             observed_at = datetime.now(timezone.utc)
             for listing in listings:
-                if not listing.source_url:
-                    raise RuntimeError(
-                        "An auction card has no source URL; refusing to mark "
-                        f"list page {page_number} complete."
-                    )
                 self.database.upsert_auction(
                     listing.exleasingcar_auction_id,
                     source_auction_name=listing.source_auction_name,
@@ -1614,6 +1610,11 @@ class ExleasingcarCollector:
                     listing.exleasingcar_auction_id,
                     observed_at=observed_at,
                 )
+                if not listing.source_url:
+                    print(
+                        f"  Auction {listing.exleasingcar_auction_id} is recorded "
+                        "but blocked from bootstrap: no navigable source URL."
+                    )
 
             next_page_number = (
                 (pagination.current_page_number or page_number) + 1
@@ -2338,7 +2339,8 @@ class ExleasingcarCollector:
                             f"{queue_summary.completed} completed, "
                             f"{queue_summary.in_progress} in progress, "
                             f"{queue_summary.pending} pending, "
-                            f"{queue_summary.deferred} deferred."
+                            f"{queue_summary.deferred} deferred, "
+                            f"{queue_summary.blocked} blocked (no source URL)."
                         )
                         for item, listing in zip(queue_items, selected_auctions):
                             budget_state = run_budget.snapshot()
@@ -2404,7 +2406,8 @@ class ExleasingcarCollector:
                         f"{queue_summary.completed}/{queue_summary.total} completed; "
                         f"{queue_summary.pending} pending, "
                         f"{queue_summary.in_progress} resumable, "
-                        f"{queue_summary.deferred} waiting for retry."
+                        f"{queue_summary.deferred} waiting for retry, "
+                        f"{queue_summary.blocked} blocked (no source URL)."
                     )
                 else:
                     if not auctions:
@@ -2490,6 +2493,7 @@ class ExleasingcarCollector:
             bootstrap_queue_in_progress=queue_summary.in_progress if bootstrap else 0,
             bootstrap_queue_completed=queue_summary.completed if bootstrap else 0,
             bootstrap_queue_deferred=queue_summary.deferred if bootstrap else 0,
+            bootstrap_queue_blocked=queue_summary.blocked if bootstrap else 0,
         )
 
 
@@ -2653,6 +2657,7 @@ def main() -> None:
                 print(f"  in_progress: {queue.in_progress}")
                 print(f"  pending: {queue.pending}")
                 print(f"  deferred: {queue.deferred}")
+                print(f"  blocked (no source URL): {queue.blocked}")
                 print("No browser was opened and no collection work was performed.")
                 return
 
