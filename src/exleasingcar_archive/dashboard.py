@@ -312,6 +312,7 @@ async function refresh(){
    metrics.push(['Первичный сбор · завершено',d.bootstrap_queue.completed]);
    metrics.push(['Первичный сбор · в очереди',d.bootstrap_queue.pending]);
    metrics.push(['Первичный сбор · в работе',d.bootstrap_queue.in_progress]);
+   metrics.push(['Первичный сбор · без ссылки',d.bootstrap_queue.blocked]);
   }
   document.getElementById('metrics').innerHTML=metrics.map(x=>`<div class="card"><div class="k">${esc(x[0])}</div><div class="v">${esc(x[1])}</div></div>`).join('');
   if(selectedLotId){
@@ -499,9 +500,16 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 queue_row = connection.execute(
                     """
                     SELECT COUNT(*) AS total,
-                           COALESCE(SUM(status = 'pending'), 0) AS pending,
+                           COALESCE(SUM(
+                               status = 'pending'
+                               AND last_error_code IS NOT 'missing_source_url'
+                           ), 0) AS pending,
                            COALESCE(SUM(status = 'in_progress'), 0) AS in_progress,
-                           COALESCE(SUM(status = 'completed'), 0) AS completed
+                           COALESCE(SUM(status = 'completed'), 0) AS completed,
+                           COALESCE(SUM(
+                               status = 'pending'
+                               AND last_error_code = 'missing_source_url'
+                           ), 0) AS blocked
                     FROM auction_bootstrap_queue
                     """
                 ).fetchone()
@@ -510,6 +518,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
                     "pending": int(queue_row["pending"]),
                     "in_progress": int(queue_row["in_progress"]),
                     "completed": int(queue_row["completed"]),
+                    "blocked": int(queue_row["blocked"]),
                 }
 
             counts = {
