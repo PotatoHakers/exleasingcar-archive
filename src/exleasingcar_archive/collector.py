@@ -2126,6 +2126,7 @@ class ExleasingcarCollector:
                         break
                 current_html = page.content()
 
+            request_url = current_url
             page_url = page.url
             listings = parse_auction_listings(current_html, page_url)
             if not listings and progress.pages_completed == 0 and pages_processed == 0:
@@ -2135,12 +2136,13 @@ class ExleasingcarCollector:
                 )
 
             pagination = parse_auction_list_pagination(current_html, page_url)
+            visited_urls.update({request_url, page_url})
             next_url = pagination.next_page_url
             if next_url is None:
                 next_candidates = [
                     candidate
                     for candidate in pagination.page_urls
-                    if candidate != page_url and candidate not in visited_urls
+                    if candidate not in visited_urls
                 ]
                 next_url = next_candidates[0] if next_candidates else None
             if next_url is not None and next_url in visited_urls:
@@ -2181,13 +2183,12 @@ class ExleasingcarCollector:
             self.database.record_auction_discovery_page_completed(
                 progress.scan_id,
                 page_number,
-                page_url,
+                request_url,
                 next_page_url=next_url,
                 next_page_number=next_page_number,
                 discovered_count=len(listings),
                 observed_at=page_observed_at,
             )
-            visited_urls.add(page_url)
             discovered_this_run += len(listings)
             pages_processed += 1
 
