@@ -1779,7 +1779,7 @@ def test_schema_v16_migrates_catalogue_page_payload_columns(tmp_path):
         }
         integrity_errors = connection.execute("PRAGMA foreign_key_check").fetchall()
 
-    assert version == SCHEMA_VERSION == 18
+    assert version == SCHEMA_VERSION == 19
     assert {
         "page_data_json",
         "api_responses_json",
