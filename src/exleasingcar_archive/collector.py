@@ -2336,7 +2336,8 @@ class ExleasingcarCollector:
                     print("Plan-only mode: no auction catalogue or vehicle pages were collected.")
                 else:
                     consecutive_failures = 0
-                    while max_auctions == 0 or auctions_processed < max_auctions:
+                    auction_limit = 1 if auction_id is not None else max_auctions
+                    while auction_limit == 0 or auctions_processed < auction_limit:
                         if run_budget.snapshot().expired:
                             print("  Global auction queue paused: wall-clock budget exhausted.")
                             break
