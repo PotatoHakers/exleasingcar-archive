@@ -115,7 +115,7 @@ substitute for the future routine-refresh scheduler.
   catalogue/API bootstrap queue. It does **not** enable the 12-hour routine
   cadence, the two-hour same-day cadence, the five-minute live cadence, or an
   unattended Windows Task Scheduler job.
-- The existing catalogue scan still performs the bounded detail rotation.
+- The existing catalogue scan still performs the bounded detail rotation. Unlinked auction cards are counted separately as blocked rather than silently dropped.
   Bootstrap completion means the auction catalogue scan completed; it does
   not mean every vehicle detail page, photo binary, or report content has been
   archived.
