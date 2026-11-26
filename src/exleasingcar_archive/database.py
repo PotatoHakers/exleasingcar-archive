@@ -2200,7 +2200,7 @@ class ArchiveDatabase:
         except (TypeError, ValueError) as exc:
             raise ValueError("Stored auction bootstrap listing is invalid JSON") from exc
         if not isinstance(listing_data, dict):
-            raise ValueError("Stored auction bootstrap listing must be a JSON object")
+            raise TypeError("Stored auction bootstrap listing must be a JSON object")
         return AuctionBootstrapWorkItem(
             exleasingcar_auction_id=str(row["exleasingcar_auction_id"]),
             priority=int(row["priority"]),
