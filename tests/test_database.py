@@ -266,6 +266,38 @@ def test_bootstrap_queue_is_idempotent_and_completes_only_after_catalog_scan(tmp
     assert database.get_bootstrap_queue(observed_at=UTC_THIRD) == ()
 
 
+def test_bootstrap_queue_keeps_unlinked_cards_visible_until_a_source_url_appears(
+    tmp_path,
+):
+    database = ArchiveDatabase(tmp_path / "bootstrap-unlinked.sqlite3")
+    database.initialize()
+    auction_id = "auction-unlinked"
+
+    database.upsert_auction(auction_id)
+    assert database.enqueue_bootstrap_auction(
+        auction_id, observed_at=UTC_FIRST
+    ) is True
+    blocked = database.get_bootstrap_queue_summary(observed_at=UTC_FIRST)
+    assert blocked.total == 1
+    assert blocked.pending == 0
+    assert blocked.blocked == 1
+    assert database.get_bootstrap_queue(observed_at=UTC_FIRST) == ()
+
+    source_url = "https://www.exleasingcar.com/ru/auction-unlinked"
+    database.upsert_auction(auction_id, source_url=source_url)
+    assert database.enqueue_bootstrap_auction(
+        auction_id, observed_at=UTC_SECOND
+    ) is False
+
+    unblocked = database.get_bootstrap_queue_summary(observed_at=UTC_SECOND)
+    assert unblocked.total == 1
+    assert unblocked.pending == 1
+    assert unblocked.blocked == 0
+    queued = database.get_bootstrap_queue(observed_at=UTC_SECOND)
+    assert len(queued) == 1
+    assert queued[0].source_url == source_url
+
+
 def test_bootstrap_queue_applies_retry_backoff_and_keeps_other_auctions_moving(tmp_path):
     from datetime import timedelta
 
