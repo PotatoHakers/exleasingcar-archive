@@ -1675,6 +1675,48 @@ class ExleasingcarCollector:
         catalog_lot_observations: dict[str, tuple[ParsedLot, datetime]] = {}
         detail_urls: dict[str, str] = {}
         lot_page_ids: dict[str, int] = {}
+        metadata_page_ranks: dict[str, tuple[datetime, int]] = {}
+        detail_page_ranks: dict[str, tuple[datetime, int]] = {}
+
+        def merge_restored_page_data(
+            page_id: int,
+            page_metadata: tuple[ParsedAuctionLotMetadata, ...],
+            parsed_lots: tuple[ParsedLot, ...],
+            saved_detail_urls: Mapping[str, str],
+            page_observed_at: datetime,
+        ) -> None:
+            page_rank = (page_observed_at, page_id)
+            for item in page_metadata:
+                car_id = item.source_car_id
+                if page_rank > metadata_page_ranks.get(car_id, (datetime.min.replace(tzinfo=timezone.utc), 0)):
+                    newest = _lot_metadata(item)
+                    previous = all_lot_metadata.get(car_id)
+                    if previous is not None:
+                        newest = LotMetadata(
+                            displayed_lot_reference=(
+                                newest.displayed_lot_reference
+                                or previous.displayed_lot_reference
+                            ),
+                            listing_code_attribute=(
+                                newest.listing_code_attribute
+                                or previous.listing_code_attribute
+                            ),
+                            mileage_km=newest.mileage_km or previous.mileage_km,
+                        )
+                    all_lot_metadata[car_id] = newest
+                    metadata_page_ranks[car_id] = page_rank
+
+            for car_id, detail_url in saved_detail_urls.items():
+                if page_rank > detail_page_ranks.get(car_id, (datetime.min.replace(tzinfo=timezone.utc), 0)):
+                    detail_urls[car_id] = detail_url
+                    lot_page_ids[car_id] = page_id
+                    detail_page_ranks[car_id] = page_rank
+
+            for item in parsed_lots:
+                _merge_catalog_lot_observation(
+                    catalog_lot_observations, item, page_observed_at
+                )
+
         lots_seen = 0
         saved_pages = self.database.get_catalog_scan_pages(scan.scan_id)
         restored_page_ids = {saved_page.page_id for saved_page in saved_pages}
@@ -1689,17 +1731,13 @@ class ExleasingcarCollector:
                 saved_page.page_data,
                 fallback_observed_at=saved_page.completed_at,
             )
-            all_lot_metadata.update(
-                {item.source_car_id: _lot_metadata(item) for item in page_metadata}
+            merge_restored_page_data(
+                saved_page.page_id,
+                page_metadata,
+                parsed_lots,
+                saved_detail_urls,
+                page_observed_at,
             )
-            lot_page_ids.update(
-                {item.source_car_id: saved_page.page_id for item in page_metadata}
-            )
-            for item in parsed_lots:
-                _merge_catalog_lot_observation(
-                    catalog_lot_observations, item, page_observed_at
-                )
-            detail_urls.update(saved_detail_urls)
             lots_seen += page_lots_seen
 
         # Older unfinished API queues may belong to a previous scan generation.
@@ -1721,17 +1759,13 @@ class ExleasingcarCollector:
                 pending_page.page_data,
                 fallback_observed_at=pending_page.completed_at,
             )
-            all_lot_metadata.update(
-                {item.source_car_id: _lot_metadata(item) for item in page_metadata}
+            merge_restored_page_data(
+                pending_page.page_id,
+                page_metadata,
+                parsed_lots,
+                saved_detail_urls,
+                page_observed_at,
             )
-            lot_page_ids.update(
-                {item.source_car_id: pending_page.page_id for item in page_metadata}
-            )
-            for item in parsed_lots:
-                _merge_catalog_lot_observation(
-                    catalog_lot_observations, item, page_observed_at
-                )
-            detail_urls.update(saved_detail_urls)
             lots_seen += page_lots_seen
 
         # Deferred API lot rows can outlive their original bulk-response cursor.
@@ -1753,17 +1787,13 @@ class ExleasingcarCollector:
                 deferred_page.page_data,
                 fallback_observed_at=deferred_page.completed_at,
             )
-            all_lot_metadata.update(
-                {item.source_car_id: _lot_metadata(item) for item in page_metadata}
+            merge_restored_page_data(
+                deferred_page.page_id,
+                page_metadata,
+                parsed_lots,
+                saved_detail_urls,
+                page_observed_at,
             )
-            lot_page_ids.update(
-                {item.source_car_id: deferred_page.page_id for item in page_metadata}
-            )
-            for item in parsed_lots:
-                _merge_catalog_lot_observation(
-                    catalog_lot_observations, item, page_observed_at
-                )
-            detail_urls.update(saved_detail_urls)
             lots_seen += page_lots_seen
 
         if (
