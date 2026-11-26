@@ -339,6 +339,22 @@ def extract_vehicle_detail_urls(html: str, base_url: str) -> dict[str, str]:
     return result
 
 
+def _auction_bootstrap_is_drained(
+    database: ArchiveDatabase,
+    exleasingcar_auction_id: str,
+) -> bool:
+    """A catalogue bootstrap is drained only after actionable public API queues empty."""
+    if not database.has_completed_catalog_scan(
+        exleasingcar_auction_id,
+        "bootstrap",
+    ):
+        return False
+    return not (
+        database.get_pending_catalog_api_pages(exleasingcar_auction_id)
+        or database.get_pending_catalog_api_lot_updates(exleasingcar_auction_id)
+    )
+
+
 def _auction_listing_from_queue(listing_data: Mapping[str, Any]) -> ParsedAuctionListing:
     """Rebuild the parser model from the JSON-safe listing stored in SQLite."""
     values = dict(listing_data)
@@ -2393,9 +2409,9 @@ class ExleasingcarCollector:
                                 break
                             continue
 
-                        if self.database.has_completed_catalog_scan(
+                        if _auction_bootstrap_is_drained(
+                            self.database,
                             work.exleasingcar_auction_id,
-                            "bootstrap",
                         ):
                             self.database.mark_auction_bootstrap_completed(
                                 work.exleasingcar_auction_id,
@@ -2408,7 +2424,8 @@ class ExleasingcarCollector:
                             )
                             print(
                                 f"  Auction {work.exleasingcar_auction_id} remains "
-                                "queued at its saved catalogue checkpoint."
+                                "queued because the catalogue checkpoint or actionable API backlog "
+                                "is still incomplete."
                             )
                             break
 
