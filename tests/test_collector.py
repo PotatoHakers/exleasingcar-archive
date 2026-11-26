@@ -1433,6 +1433,79 @@ def test_global_auction_discovery_checkpoints_and_resumes_all_pages(
     assert database.get_auction_bootstrap_queue_summary()["pending"] == 2
 
 
+def test_bootstrap_queue_waits_for_actionable_api_backlogs_to_drain(tmp_path):
+    from datetime import datetime, timezone
+
+    from exleasingcar_archive.collector import _auction_bootstrap_is_drained
+    from exleasingcar_archive.database import ArchiveDatabase
+    from exleasingcar_archive.models import SaleType
+
+    database = ArchiveDatabase(tmp_path / "bootstrap-api-backlog.sqlite3")
+    database.initialize()
+    auction_id = "auction-api-backlog"
+    car_id = "car-api-backlog"
+    page_url = "https://www.exleasingcar.com/auction-api-backlog?page=1"
+    api_url = "https://www.exleasingcar.com/ajax_update_car_form.v3.1.php"
+    observed_at = datetime(2026, 11, 12, 12, 5, tzinfo=timezone.utc)
+
+    database.upsert_auction(auction_id, observed_at=observed_at)
+    database.upsert_vehicle(car_id, observed_at=observed_at)
+    database.upsert_auction_lot(
+        car_id,
+        auction_id,
+        sale_type=SaleType.OPEN_AUCTION,
+        collection_eligible=True,
+        observed_at=observed_at,
+    )
+    scan = database.start_or_resume_catalog_scan(
+        auction_id, "bootstrap", page_url, observed_at=observed_at
+    )
+    assert database.record_catalog_page_completed(
+        scan.scan_id,
+        1,
+        page_url,
+        next_page_url=None,
+        next_page_number=None,
+        item_count=1,
+        page_data={},
+        api_responses=(
+            {
+                "url": api_url,
+                "payload": {car_id: {"highest_offer": "12000"}},
+                "observed_at": observed_at,
+            },
+        ),
+        observed_at=observed_at,
+    )
+    assert database.complete_catalog_scan(
+        scan.scan_id, observed_at=observed_at
+    )
+
+    assert not _auction_bootstrap_is_drained(database, auction_id)
+    pending_page = database.get_pending_catalog_api_pages(auction_id)[0]
+    assert database.advance_catalog_api_response_cursor(
+        pending_page.page_id, 0
+    )
+    assert _auction_bootstrap_is_drained(database, auction_id)
+
+    assert database.defer_catalog_api_lot_updates(
+        pending_page.page_id,
+        {
+            "url": api_url,
+            "payload": {car_id: {"highest_offer": "12500"}},
+            "observed_at": observed_at,
+        },
+        {car_id},
+    ) == 1
+    pending_updates = database.get_pending_catalog_api_lot_updates(auction_id)
+    assert len(pending_updates) == 1
+    assert not _auction_bootstrap_is_drained(database, auction_id)
+    assert database.mark_catalog_api_lot_update_processed(
+        pending_updates[0]["id"], observed_at=observed_at
+    )
+    assert _auction_bootstrap_is_drained(database, auction_id)
+
+
 def test_unknown_sale_mode_does_not_block_public_updates_for_known_lots(tmp_path):
     import sqlite3
     from datetime import datetime, timezone
