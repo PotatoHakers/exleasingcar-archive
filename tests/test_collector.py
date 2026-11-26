@@ -684,6 +684,194 @@ def test_catalog_detail_coverage_separates_repeated_cards_from_missing_links():
 
 
 
+def test_catalogue_observation_merge_keeps_newest_and_breaks_timestamp_ties_deterministically():
+    from datetime import datetime, timedelta, timezone
+
+    from exleasingcar_archive.collector import _merge_catalog_lot_observation
+    from exleasingcar_archive.models import VehicleStatus
+    from exleasingcar_archive.parsers import ParsedLot
+
+    first_seen = datetime(2026, 11, 25, 10, 0, tzinfo=timezone.utc)
+    newer_seen = first_seen + timedelta(seconds=1)
+    older = ParsedLot(
+        "car-1", "Old title", None, VehicleStatus.ACTIVE, "Active", False, None
+    )
+    newer = ParsedLot(
+        "car-1", "New title", None, VehicleStatus.ACTIVE, "Active", False, None
+    )
+
+    observations = {}
+    _merge_catalog_lot_observation(observations, newer, newer_seen)
+    _merge_catalog_lot_observation(observations, older, first_seen)
+    assert observations["car-1"] == (newer, newer_seen)
+
+    active = ParsedLot(
+        "car-2", "Car", None, VehicleStatus.ACTIVE, "Active", False, None
+    )
+    completed = ParsedLot(
+        "car-2", "Car", None, VehicleStatus.COMPLETED, "Finished", False, None
+    )
+    forward = {}
+    reverse = {}
+    _merge_catalog_lot_observation(forward, active, first_seen)
+    _merge_catalog_lot_observation(forward, completed, first_seen)
+    _merge_catalog_lot_observation(reverse, completed, first_seen)
+    _merge_catalog_lot_observation(reverse, active, first_seen)
+
+    assert forward["car-2"] == reverse["car-2"]
+    assert forward["car-2"][0].status is VehicleStatus.COMPLETED
+
+
+def test_catalogue_terminal_status_is_saved_before_detail_rotation(monkeypatch, tmp_path):
+    import sqlite3
+    from datetime import datetime, timezone
+
+    from exleasingcar_archive import collector as collector_module
+    from exleasingcar_archive.collector import CapturedApiResponse, ExleasingcarCollector
+    from exleasingcar_archive.database import ArchiveDatabase
+    from exleasingcar_archive.metadata_parser import (
+        ParsedAuctionCatalogMetadata,
+        ParsedAuctionListing,
+        ParsedAuctionLotMetadata,
+        ParsedCatalogPagination,
+    )
+    from exleasingcar_archive.models import AuctionStatus, SaleType, VehicleStatus
+    from exleasingcar_archive.parsers import ParsedAuctionPage, ParsedLot
+
+    auction_id = "auction-terminal"
+    catalog_url = "https://www.exleasingcar.com/auction-terminal?page=1"
+    detail_url = "https://www.exleasingcar.com/ru/auto-details/car-terminal"
+    observed_at = datetime(2026, 11, 25, 10, 0, tzinfo=timezone.utc)
+    database = ArchiveDatabase(tmp_path / "terminal-before-detail.sqlite3")
+    database.initialize()
+    database.upsert_auction(auction_id)
+    database.upsert_vehicle("car-terminal", displayed_title="Volvo V90")
+    database.upsert_auction_lot(
+        "car-terminal",
+        auction_id,
+        sale_type=SaleType.OPEN_AUCTION,
+        collection_eligible=True,
+    )
+
+    listing = ParsedAuctionListing(
+        exleasingcar_auction_id=auction_id,
+        source_auction_name="Test auction",
+        source_auction_country_code="DE",
+        source_auction_country_name="Germany",
+        auction_type_label="English auction",
+        auction_status_label="ACTIVE",
+        vehicle_count=1,
+        source_url=catalog_url,
+        markers=(),
+    )
+    catalog_lot = ParsedAuctionLotMetadata(
+        source_car_id="car-terminal",
+        displayed_title="Volvo V90",
+        displayed_lot_reference="LOT-1",
+        listing_code_attribute="code-1",
+        make_label="Volvo",
+        mileage_km=100000,
+    )
+    terminal_lot = ParsedLot(
+        source_car_id="car-terminal",
+        title="Volvo V90",
+        source_url=detail_url,
+        status=VehicleStatus.COMPLETED,
+        raw_status="Finished",
+        is_hot_bid=False,
+        current_price=None,
+    )
+
+    monkeypatch.setattr(
+        collector_module, "_wait_for_dynamic_content", lambda page: None
+    )
+    monkeypatch.setattr(
+        collector_module,
+        "parse_auction_catalog_metadata",
+        lambda html, url: ParsedAuctionCatalogMetadata(
+            auction_id, (catalog_lot,)
+        ),
+    )
+    monkeypatch.setattr(
+        collector_module,
+        "parse_auction_list",
+        lambda html, url: ParsedAuctionPage(
+            auction_id, AuctionStatus.ACTIVE, "ACTIVE", (terminal_lot,)
+        ),
+    )
+    monkeypatch.setattr(
+        collector_module,
+        "parse_catalog_pagination",
+        lambda html, url: ParsedCatalogPagination(
+            catalog_url, 1, (catalog_url,), None
+        ),
+    )
+    monkeypatch.setattr(
+        collector_module,
+        "extract_vehicle_detail_urls",
+        lambda html, url: {"car-terminal": detail_url},
+    )
+
+    class FakePage:
+        def __init__(self):
+            self.url = ""
+            self.goto_calls = []
+
+        def goto(self, url, **kwargs):
+            self.goto_calls.append(url)
+            self.url = url
+            assert url == catalog_url, "completed lot must not be opened for detail"
+            collector.recorder.responses.append(
+                CapturedApiResponse(
+                    url="https://www.exleasingcar.com/ajax_update_car_form.v3.1.php",
+                    payload={"car-terminal": {"highest_offer": "1234"}},
+                    observed_at=observed_at,
+                )
+            )
+
+        def content(self):
+            return "<html><body>catalogue</body></html>"
+
+    collector = ExleasingcarCollector(
+        database, tmp_path / "raw-terminal", page_delay_seconds=0
+    )
+    monkeypatch.setattr(collector.recorder, "wait_for_pending", lambda page: True)
+    page = FakePage()
+
+    collector._collect_auction(
+        listing,
+        page,
+        tmp_path / "snapshots-terminal",
+        max_detail_pages=1,
+    )
+
+    assert page.goto_calls == [catalog_url]
+    assert database.get_completed_open_auction_lots(
+        auction_id, {"car-terminal"}
+    ) == {"car-terminal"}
+    with sqlite3.connect(database.path) as connection:
+        stored_price = connection.execute(
+            """
+            SELECT po.highest_offer
+            FROM price_observations po
+            JOIN auction_lots al ON al.id = po.auction_lot_id
+            JOIN vehicles v ON v.id = al.vehicle_id
+            WHERE v.source_car_id = 'car-terminal'
+            """
+        ).fetchone()
+        detail_attempted = connection.execute(
+            """
+            SELECT al.last_detail_attempted_at
+            FROM auction_lots al
+            JOIN vehicles v ON v.id = al.vehicle_id
+            WHERE v.source_car_id = 'car-terminal'
+            """
+        ).fetchone()[0]
+
+    assert stored_price == ("1234",)
+    assert detail_attempted is None
+
+
 def test_dismiss_notification_prompt_chooses_no_thanks_and_waits_for_it_to_close():
     from exleasingcar_archive.collector import ExleasingcarCollector
 
