@@ -17,7 +17,7 @@ MEDIA_SOURCE_HOSTS = frozenset({"data.exleasingcar.com", "www.exleasingcar.com"}
 
 
 def _safe_exleasingcar_url(value: str | None) -> str | None:
-    """Return a plain HTTPS source URL without credentials or query-string tokens."""
+    """Return an allowlisted HTTPS media URL, preserving only the known MACADAM token route."""
     if not isinstance(value, str) or not value.strip():
         return None
     try:
@@ -25,16 +25,29 @@ def _safe_exleasingcar_url(value: str | None) -> str | None:
         port = parts.port
     except ValueError:
         return None
+    host = (parts.hostname or "").casefold()
     if (
         parts.scheme.casefold() != "https"
-        or (parts.hostname or "").casefold() not in MEDIA_SOURCE_HOSTS
+        or host not in MEDIA_SOURCE_HOSTS | {"portal.macadam.eu"}
         or parts.username is not None
         or parts.password is not None
         or port not in (None, 443)
         or not parts.path
-        or parts.query
         or parts.fragment
     ):
+        return None
+    if host == "portal.macadam.eu":
+        query = parse_qs(parts.query, keep_blank_values=True)
+        if (
+            parts.path != "/reports/remarketing"
+            or set(query) != {"id", "culture"}
+            or len(query.get("id", ())) != 1
+            or len(query.get("culture", ())) != 1
+            or not query["id"][0]
+            or not query["culture"][0]
+        ):
+            return None
+    elif parts.query:
         return None
     return value.strip()
 
@@ -235,11 +248,12 @@ function renderLotCard(lot,vehicle,otherLots,media,pdfFields,pdfDamages,prices){
   ['Ориентировочная цена продавца',prices?.indicative_price]
  ];
  const reports=reportItems.length?'<div class="lot-report-list">'+reportItems.map((report,index)=>{
-  const link=report.source_link_url?'<a class="report-link" href="'+esc(report.source_link_url)+'" target="_blank" rel="noopener noreferrer">Открыть PDF</a>':'<span class="muted">Ссылка источника недоступна</span>';
+  const linkLabel=report.source_link_url?.includes('://portal.macadam.eu/reports/remarketing?')?'Открыть HTML-отчёт':(/\\.pdf(?:$|[?])/i.test(report.source_link_url||'')?'Открыть PDF':'Открыть отчёт');
+  const link=report.source_link_url?'<a class="report-link" href="'+esc(report.source_link_url)+'" target="_blank" rel="noopener noreferrer">'+linkLabel+'</a>':'<span class="muted">Ссылка источника недоступна</span>';
   const label=report.label || 'Inspection report '+(index+1);
   return '<div class="lot-report"><div><strong>'+esc(label)+'</strong><div class="lot-note">Статус архива: '+esc(report.download_status || 'неизвестен')+'</div></div>'+link+'</div>';
- }).join('')+'</div>':'<div class="lot-empty">Ссылки на PDF-отчёты для этого лота не найдены</div>';
- const observations=pdfFields?.length?'<div class="wrap"><table><thead><tr><th>Поле</th><th>Значение источника</th><th>Состояние</th><th>Страница</th><th>Метка отчёта</th><th>Парсер</th></tr></thead><tbody>'+pdfFields.map(field=>'<tr>'+cell(field.field_key)+cell(field.raw_text)+cell(field.state)+cell(field.page_number)+cell(field.source_label)+cell(field.parser_name+' '+field.parser_version)+'</tr>').join('')+'</tbody></table></div>':'<p class="lot-note">Извлечённые поля отчёта пока не сохранены. Сам PDF можно открыть по ссылке выше.</p>';
+ }).join('')+'</div>':'<div class="lot-empty">Ссылки на отчёты для этого лота не найдены</div>';
+ const observations=pdfFields?.length?'<div class="wrap"><table><thead><tr><th>Поле</th><th>Значение источника</th><th>Состояние</th><th>Страница</th><th>Метка отчёта</th><th>Парсер</th></tr></thead><tbody>'+pdfFields.map(field=>'<tr>'+cell(field.field_key)+cell(field.raw_text)+cell(field.state)+cell(field.page_number)+cell(field.source_label)+cell(field.parser_name+' '+field.parser_version)+'</tr>').join('')+'</tbody></table></div>':'<p class="lot-note">Извлечённые поля отчёта пока не сохранены. Сам отчёт можно открыть по ссылке выше.</p>';
  const damage=pdfDamages?.length?'<div class="wrap"><table><thead><tr><th>№</th><th>Категория</th><th>Компонент</th><th>Описание из отчёта</th><th>Страница</th><th>Фото в отчёте</th></tr></thead><tbody>'+pdfDamages.map(item=>'<tr>'+cell(item.item_number)+cell(item.category)+cell(item.component)+cell(item.damage_description)+cell(item.page_number)+cell(item.photo_page_number==null?null:'стр. '+item.photo_page_number+', фото '+item.photo_index)+'</tr>').join('')+'</tbody></table></div>':'<p class="lot-note">Сведения о повреждениях из PDF не извлекались или не сохранены.</p>';
  const otherHistory=otherLots?.length?'<div class="wrap"><table><thead><tr><th></th><th>Аукцион</th><th>Тип продажи</th><th>Пробег</th><th>Последний API highest_offer</th><th>Проверка API</th><th>Последнее появление</th></tr></thead><tbody>'+otherLots.map(other=>'<tr><td><button type="button" class="open-car" data-lot-id="'+esc(other.lot_id)+'">Открыть лот</button></td>'+cell(other.source_auction_name || other.auction_id)+cell(other.sale_type)+cell(other.mileage_km)+moneyCell(other.highest_offer)+cell(other.last_api_checked_at)+cell(other.last_seen_at)+'</tr>').join('')+'</tbody></table></div>':'<p class="lot-note">Других аукционных лотов этой машины в архиве нет.</p>';
  panel.innerHTML=
@@ -248,7 +262,7 @@ function renderLotCard(lot,vehicle,otherLots,media,pdfFields,pdfDamages,prices){
   '<div class="lot-subsection"><h3>Основная цена</h3><div class="lot-price-primary"><div class="k">API highest_offer · исходное значение API; ноль не считается ставкой</div><div class="v">'+esc(primaryValue)+'</div><div class="lot-note">Источник: '+esc(primary?.source || 'нет наблюдения')+' · последнее изменение значения: '+esc(primary?.observed_at || 'нет наблюдения')+' · последняя проверка API: '+esc(lot.last_api_checked_at || 'неизвестно')+'</div></div>'+
    '<div class="lot-prices">'+secondary.map(([label,price])=>'<div class="detail-item"><span class="k">'+esc(label)+'</span><span class="v">'+esc(price?.amount==null?'Не наблюдалась':money(price.amount))+'</span><p class="lot-note">Источник: '+esc(price?.source || '—')+' · наблюдение: '+esc(price?.observed_at || '—')+(price?.source_field?' · поле: '+esc(price.source_field):'')+'</p></div>').join('')+'</div></div>'+
   '<div class="lot-subsection"><h3>Автомобиль и лот</h3><div class="detail-grid">'+detailFields.map(([label,value])=>'<div class="detail-item"><span class="k">'+esc(label)+'</span><span class="v">'+esc(value)+'</span></div>').join('')+'</div><p class="lot-note">VIN показывается только в том виде, в котором он сохранён. Отсутствующие символы не восстанавливаются.</p></div>'+
-  '<div class="lot-subsection"><h3>PDF-отчёты</h3>'+reports+'</div>'+
+  '<div class="lot-subsection"><h3>Отчёты и документы</h3>'+reports+'</div>'+
   '<div class="lot-subsection"><h3>Сохранённые сведения из отчётов</h3>'+observations+damage+'</div>'+
   '<div class="lot-subsection"><h3>Другие аукционные лоты этой машины</h3>'+otherHistory+'</div>';
  panel.hidden=false;
