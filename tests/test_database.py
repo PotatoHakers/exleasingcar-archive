@@ -1513,7 +1513,7 @@ def test_schema_v15_migrates_to_v16_without_touching_archive_rows(tmp_path):
         }
         integrity_errors = connection.execute("PRAGMA foreign_key_check").fetchall()
 
-    assert version == SCHEMA_VERSION == 18
+    assert version == SCHEMA_VERSION == 19
     assert auction == ("210547", "BCA DE 3.3")
     assert {"catalog_scan_runs", "catalog_scan_pages"}.issubset(tables)
     assert integrity_errors == []
@@ -1885,7 +1885,7 @@ def test_schema_v16_migrates_catalogue_page_payload_columns(tmp_path):
         }
         integrity_errors = connection.execute("PRAGMA foreign_key_check").fetchall()
 
-    assert version == SCHEMA_VERSION == 18
+    assert version == SCHEMA_VERSION == 19
     assert {
         "page_data_json",
         "api_responses_json",
