@@ -959,6 +959,34 @@ def test_dashboard_displays_tokenized_macadam_html_report_for_the_selected_lot(t
     assert "Отчёты и документы" in PAGE
 
 
+def test_dashboard_shows_global_bootstrap_queue_progress(tmp_path):
+    database = ArchiveDatabase(tmp_path / "dashboard-bootstrap-queue.sqlite3")
+    database.initialize()
+    database.upsert_auction(
+        "auction-dashboard",
+        source_url="https://www.exleasingcar.com/ru/auction-dashboard",
+    )
+    database.enqueue_bootstrap_auction("auction-dashboard")
+    database.mark_bootstrap_auction_started("auction-dashboard")
+
+    handler = object.__new__(DashboardHandler)
+    handler.database_path = database.path
+    payload = handler._load_data()
+
+    assert payload["bootstrap_queue"] == {
+        "total": 1,
+        "pending": 0,
+        "in_progress": 1,
+        "completed": 0,
+    }
+
+    from exleasingcar_archive.dashboard import PAGE
+
+    assert "Первичный сбор · завершено" in PAGE
+    assert "Первичный сбор · в очереди" in PAGE
+    assert "Первичный сбор · в работе" in PAGE
+
+
 def test_dashboard_page_includes_release_version_and_lot_detail_sections():
     from exleasingcar_archive.dashboard import PAGE
     from exleasingcar_archive.version import APP_VERSION
