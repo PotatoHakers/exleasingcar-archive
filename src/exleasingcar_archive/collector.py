@@ -1196,7 +1196,7 @@ class ExleasingcarCollector:
         if not username or not password:
             raise RuntimeError(
                 "Exleasingcar credentials were not found in Windows Credential Manager. "
-                "Save them first using the instructions in README_AUTO_LOGIN.md."
+                "Save them first using the instructions in docs/FIRST_GLOBAL_RUN.md."
             )
         return username, password
 
@@ -2155,6 +2155,12 @@ class ExleasingcarCollector:
                 current_html,
             )
             for listing in listings:
+                if not listing.source_url:
+                    print(
+                        f"  Auction {listing.exleasingcar_auction_id} has no source URL; "
+                        "it was not added to the bootstrap queue."
+                    )
+                    continue
                 self.database.upsert_auction(
                     listing.exleasingcar_auction_id,
                     source_auction_name=listing.source_auction_name,
