@@ -688,6 +688,14 @@ def parse_catalog_pagination(
     )
 
 
+def parse_auction_list_pagination(
+    html: str,
+    page_url: str | None = None,
+) -> ParsedCatalogPagination:
+    """Parse the same numbered/next pagination controls on the global auction list."""
+    return parse_catalog_pagination(html, page_url)
+
+
 def _find_labeled_value(
     soup: BeautifulSoup,
     labels: set[str],
