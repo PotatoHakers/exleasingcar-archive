@@ -9,7 +9,7 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlsplit, urlunsplit
+from urllib.parse import parse_qs, urlsplit, urlunsplit
 
 from .models import AuctionCardMarker, PriceType, SaleType
 from .parsers import PriceObservation
@@ -2641,16 +2641,41 @@ class ArchiveDatabase:
         if not isinstance(value, str) or not value.strip():
             raise ValueError(f"{field_name} cannot be empty")
         normalized = value.strip()
-        parts = urlsplit(normalized)
+        try:
+            parts = urlsplit(normalized)
+            port = parts.port
+        except ValueError as exc:
+            raise ValueError(
+                f"{field_name} must be an HTTPS Exleasingcar media URL"
+            ) from exc
+        host = (parts.hostname or "").casefold()
         if (
             parts.scheme.casefold() != "https"
-            or (parts.hostname or "").casefold()
-            not in {"data.exleasingcar.com", "www.exleasingcar.com"}
+            or host not in {
+                "data.exleasingcar.com",
+                "www.exleasingcar.com",
+                "portal.macadam.eu",
+            }
             or parts.username is not None
             or parts.password is not None
+            or port not in (None, 443)
             or not parts.path
+            or parts.fragment
         ):
             raise ValueError(f"{field_name} must be an HTTPS Exleasingcar media URL")
+        if host == "portal.macadam.eu":
+            query = parse_qs(parts.query, keep_blank_values=True)
+            if (
+                parts.path != "/reports/remarketing"
+                or set(query) != {"id", "culture"}
+                or len(query.get("id", ())) != 1
+                or len(query.get("culture", ())) != 1
+                or not query["id"][0]
+                or not query["culture"][0]
+            ):
+                raise ValueError(
+                    f"{field_name} must be a valid MACADAM remarketing report URL"
+                )
         return normalized
 
     def upsert_lot_media_source(
