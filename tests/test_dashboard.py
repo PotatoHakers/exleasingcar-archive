@@ -968,6 +968,8 @@ def test_dashboard_shows_global_bootstrap_queue_progress(tmp_path):
     )
     database.enqueue_bootstrap_auction("auction-dashboard")
     database.mark_bootstrap_auction_started("auction-dashboard")
+    database.upsert_auction("auction-unlinked")
+    database.enqueue_bootstrap_auction("auction-unlinked")
 
     handler = object.__new__(DashboardHandler)
     handler.database_path = database.path
@@ -978,6 +980,7 @@ def test_dashboard_shows_global_bootstrap_queue_progress(tmp_path):
         "pending": 0,
         "in_progress": 1,
         "completed": 0,
+        "blocked": 1,
     }
 
     from exleasingcar_archive.dashboard import PAGE
@@ -985,6 +988,7 @@ def test_dashboard_shows_global_bootstrap_queue_progress(tmp_path):
     assert "Первичный сбор · завершено" in PAGE
     assert "Первичный сбор · в очереди" in PAGE
     assert "Первичный сбор · в работе" in PAGE
+    assert "Первичный сбор · без ссылки" in PAGE
 
 
 def test_dashboard_page_includes_release_version_and_lot_detail_sections():
