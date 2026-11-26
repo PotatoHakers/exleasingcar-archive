@@ -81,7 +81,7 @@ def test_validation_report_summarizes_discovery_and_bootstrap_without_urls_or_id
     assert f"SQLite schema version: {SCHEMA_VERSION}" in result.stdout
     assert "auction-list discovery: completed; pages=1; auction-card appearances=1" in result.stdout
     assert (
-        "bootstrap queue: total=2; completed=0; in_progress=1; "
+        "Bootstrap queue: total=2; completed=0; in_progress=1; "
         "pending=0; deferred=0; blocked_no_source_url=1"
     ) in result.stdout
     assert "private-auction-id" not in result.stdout
