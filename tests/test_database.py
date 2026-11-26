@@ -45,6 +45,266 @@ def test_database_initialization_creates_current_schema(tmp_path):
     }.issubset(tables)
 
 
+def test_schema_v18_migrates_to_v19_without_losing_auctions(tmp_path):
+    database = ArchiveDatabase(tmp_path / "archive-v18.sqlite3")
+    database.initialize()
+    database.upsert_auction("auction-existing")
+
+    with sqlite3.connect(database.path) as connection:
+        connection.execute("DROP TABLE auction_discovery_pages")
+        connection.execute("DROP TABLE auction_bootstrap_queue")
+        connection.execute("DROP TABLE auction_discovery_runs")
+        connection.execute("ALTER TABLE auctions DROP COLUMN source_url")
+        connection.execute("PRAGMA user_version = 18")
+
+    database.initialize()
+
+    with sqlite3.connect(database.path) as connection:
+        version = connection.execute("PRAGMA user_version").fetchone()[0]
+        columns = {
+            row[1] for row in connection.execute("PRAGMA table_info(auctions)")
+        }
+        tables = {
+            row[0]
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'"
+            )
+        }
+        auction_count = connection.execute(
+            "SELECT COUNT(*) FROM auctions WHERE exleasingcar_auction_id = ?",
+            ("auction-existing",),
+        ).fetchone()[0]
+        integrity = connection.execute("PRAGMA foreign_key_check").fetchall()
+
+    assert version == 19
+    assert "source_url" in columns
+    assert {
+        "auction_discovery_runs",
+        "auction_discovery_pages",
+        "auction_bootstrap_queue",
+    }.issubset(tables)
+    assert auction_count == 1
+    assert integrity == []
+
+
+def test_auction_source_url_is_persisted_and_not_erased_by_partial_updates(tmp_path):
+    database = ArchiveDatabase(tmp_path / "auction-source-url.sqlite3")
+    database.initialize()
+    source_url = "https://www.exleasingcar.com/ru/авто-аукционы/аукцион-210547"
+
+    database.upsert_auction(
+        "210547",
+        source_url=source_url,
+        source_auction_name="BCA DE",
+    )
+    database.upsert_auction("210547", auction_status_label="FINAL CALL")
+
+    with sqlite3.connect(database.path) as connection:
+        row = connection.execute(
+            """
+            SELECT source_url, source_auction_name, auction_status_label
+            FROM auctions WHERE exleasingcar_auction_id = ?
+            """,
+            ("210547",),
+        ).fetchone()
+
+    assert row == (source_url, "BCA DE", "FINAL CALL")
+
+
+def test_auction_discovery_checkpoints_resume_and_refresh_idempotently(tmp_path):
+    from datetime import timedelta
+
+    database = ArchiveDatabase(tmp_path / "auction-discovery.sqlite3")
+    database.initialize()
+    first_url = "https://www.exleasingcar.com/ru/авто-аукционы"
+    second_url = "https://www.exleasingcar.com/ru/авто-аукционы?page=2"
+
+    progress = database.start_or_resume_auction_discovery(
+        first_url, observed_at=UTC_FIRST
+    )
+    assert progress.status == "in_progress"
+    assert progress.next_page_url == first_url
+    assert progress.next_page_number == 1
+
+    database.record_auction_discovery_page(
+        progress.run_id,
+        1,
+        first_url,
+        next_page_url=second_url,
+        next_page_number=2,
+        auction_count=3,
+        observed_at=UTC_FIRST,
+    )
+    resumed = database.start_or_resume_auction_discovery(
+        first_url, observed_at=UTC_SECOND
+    )
+    assert resumed.run_id == progress.run_id
+    assert resumed.next_page_url == second_url
+    assert resumed.next_page_number == 2
+    assert resumed.pages_completed == 1
+    assert resumed.auction_cards_seen == 3
+
+    database.record_auction_discovery_page(
+        resumed.run_id,
+        2,
+        second_url,
+        next_page_url=None,
+        next_page_number=None,
+        auction_count=2,
+        observed_at=UTC_THIRD,
+    )
+    completed = database.get_latest_auction_discovery_progress()
+    assert completed is not None
+    assert completed.status == "completed"
+    assert completed.pages_completed == 2
+    assert completed.auction_cards_seen == 5
+    assert completed.next_page_url is None
+
+    recent = database.start_or_resume_auction_discovery(
+        first_url,
+        observed_at=UTC_THIRD + timedelta(hours=1),
+    )
+    assert recent.run_id == progress.run_id
+
+    forced = database.start_or_resume_auction_discovery(
+        first_url,
+        force=True,
+        observed_at=UTC_THIRD + timedelta(hours=1),
+    )
+    assert forced.run_id != progress.run_id
+    assert forced.status == "in_progress"
+
+
+def test_auction_discovery_rejects_a_pagination_cycle_without_checkpointing_it(tmp_path):
+    database = ArchiveDatabase(tmp_path / "auction-discovery-cycle.sqlite3")
+    database.initialize()
+    first_url = "https://www.exleasingcar.com/ru/авто-аукционы"
+    second_url = "https://www.exleasingcar.com/ru/авто-аукционы?page=2"
+    progress = database.start_or_resume_auction_discovery(
+        first_url, observed_at=UTC_FIRST
+    )
+    database.record_auction_discovery_page(
+        progress.run_id,
+        1,
+        first_url,
+        next_page_url=second_url,
+        next_page_number=2,
+        auction_count=1,
+        observed_at=UTC_FIRST,
+    )
+
+    with pytest.raises(ValueError, match="cycle"):
+        database.record_auction_discovery_page(
+            progress.run_id,
+            2,
+            second_url,
+            next_page_url=first_url,
+            next_page_number=3,
+            auction_count=1,
+            observed_at=UTC_SECOND,
+        )
+
+    current = database.get_latest_auction_discovery_progress()
+    assert current is not None
+    assert current.status == "in_progress"
+    assert current.next_page_url == second_url
+    assert current.pages_completed == 1
+
+
+def test_bootstrap_queue_is_idempotent_and_completes_only_after_catalog_scan(tmp_path):
+    database = ArchiveDatabase(tmp_path / "bootstrap-queue.sqlite3")
+    database.initialize()
+    auction_id = "210547"
+    source_url = "https://www.exleasingcar.com/ru/авто-аукционы/аукцион-210547"
+    database.upsert_auction(auction_id, source_url=source_url)
+
+    assert database.enqueue_bootstrap_auction(
+        auction_id, observed_at=UTC_FIRST
+    ) is True
+    assert database.enqueue_bootstrap_auction(
+        auction_id, observed_at=UTC_SECOND
+    ) is False
+    queued = database.get_bootstrap_queue(observed_at=UTC_SECOND)
+    assert len(queued) == 1
+    assert queued[0].auction_id == auction_id
+    assert queued[0].source_url == source_url
+    assert queued[0].status == "pending"
+
+    database.mark_bootstrap_auction_started(
+        auction_id, observed_at=UTC_SECOND
+    )
+    in_progress = database.get_bootstrap_queue(observed_at=UTC_SECOND)
+    assert in_progress[0].status == "in_progress"
+    assert in_progress[0].attempts == 1
+
+    scan = database.start_or_resume_catalog_scan(
+        auction_id, "bootstrap", source_url, observed_at=UTC_SECOND
+    )
+    database.record_catalog_page_completed(
+        scan.scan_id,
+        1,
+        source_url,
+        next_page_url=None,
+        next_page_number=None,
+        item_count=0,
+        page_data={},
+        observed_at=UTC_THIRD,
+    )
+    database.complete_catalog_scan(scan.scan_id, observed_at=UTC_THIRD)
+    database.mark_bootstrap_auction_completed(
+        auction_id, observed_at=UTC_THIRD
+    )
+
+    summary = database.get_bootstrap_queue_summary(observed_at=UTC_THIRD)
+    assert summary.total == 1
+    assert summary.completed == 1
+    assert summary.pending == 0
+    assert summary.in_progress == 0
+    assert database.enqueue_bootstrap_auction(
+        auction_id, observed_at=UTC_THIRD
+    ) is False
+    assert database.get_bootstrap_queue(observed_at=UTC_THIRD) == ()
+
+
+def test_bootstrap_queue_applies_retry_backoff_and_keeps_other_auctions_moving(tmp_path):
+    from datetime import timedelta
+
+    database = ArchiveDatabase(tmp_path / "bootstrap-backoff.sqlite3")
+    database.initialize()
+    for auction_id in ("auction-a", "auction-b"):
+        database.upsert_auction(
+            auction_id,
+            source_url=f"https://www.exleasingcar.com/ru/auto-auctions/{auction_id}",
+        )
+        database.enqueue_bootstrap_auction(auction_id, observed_at=UTC_FIRST)
+
+    database.mark_bootstrap_auction_started(
+        "auction-a", observed_at=UTC_FIRST
+    )
+    database.mark_bootstrap_auction_failed(
+        "auction-a",
+        error_code="page_navigation_failed",
+        retry_after_seconds=300,
+        observed_at=UTC_FIRST,
+    )
+
+    early = database.get_bootstrap_queue(
+        observed_at=UTC_FIRST + timedelta(seconds=30)
+    )
+    assert [item.auction_id for item in early] == ["auction-b"]
+    summary = database.get_bootstrap_queue_summary(
+        observed_at=UTC_FIRST + timedelta(seconds=30)
+    )
+    assert summary.total == 2
+    assert summary.pending == 2
+    assert summary.deferred == 1
+
+    retried = database.get_bootstrap_queue(
+        observed_at=UTC_FIRST + timedelta(seconds=301)
+    )
+    assert {item.auction_id for item in retried} == {"auction-a", "auction-b"}
+
+
 def test_auction_and_vehicle_metadata_are_upserted(tmp_path):
     database = ArchiveDatabase(tmp_path / "test_archive.sqlite3")
     database.initialize()
