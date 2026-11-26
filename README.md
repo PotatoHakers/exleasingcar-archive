@@ -3,6 +3,57 @@
 
 `Локальный архив публичных данных Exleasingcar.`
 
+
+## Первый локальный запуск (Windows)
+
+Сборщик запускается на локальном постоянно включённом ПК: база SQLite и
+профиль Chromium остаются на диске этого ПК. GitHub Actions используется только
+для Ruff/pytest CI. Автоматическое расписание пока не включено.
+
+Из PowerShell в корне репозитория:
+
+```powershell
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install -r requirements-collector.txt
+python -m playwright install chromium
+$env:PYTHONPATH = "src"
+python check_exleasingcar_keyring.py
+```
+
+Для первого глобального прохода используй отдельную долговременную БД
+`data/exleasingcar_archive.sqlite3`. Не подменяй ею временные базы проверки и
+не удаляй существующие данные.
+
+1. Обнаружь все страницы списка аукционов и заполни очередь первичного сбора:
+
+```powershell
+python -m exleasingcar_archive.collector --database data/exleasingcar_archive.sqlite3 --bootstrap --discover-only --max-auctions 0
+```
+
+2. Посмотри сохранённое состояние без запуска браузера:
+
+```powershell
+python -m exleasingcar_archive.collector --database data/exleasingcar_archive.sqlite3 --plan-only
+```
+
+3. Начни пакетный первичный сбор:
+
+```powershell
+python -m exleasingcar_archive.collector --database data/exleasingcar_archive.sqlite3 --bootstrap --max-auctions 0
+```
+
+Повторяй третий шаг, пока очередь не завершится. Ограничения страниц/времени
+действуют в каждом запуске; прерванные аукционы продолжаются с сохранённой
+позиции. Подробная последовательность, ручная диагностика и ограничения
+описаны в [operator runbook](docs/collector-operator-runbook.md).
+
+`--rediscover-auctions` вместе с `--bootstrap` принудительно обновляет список
+аукционов и добавляет новые записи в очередь, но не сбрасывает завершённые
+bootstrap-задачи. Не включай автоматическое расписание, не публикуй Dashboard
+в интернет и не запускай R2 операции в рамках первого прохода.
+
+
 ## GITHUB
 
 ### BRANCHES
