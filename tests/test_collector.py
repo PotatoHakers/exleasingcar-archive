@@ -1274,6 +1274,18 @@ def test_catalogue_scan_resumes_api_and_detail_data_after_a_run_budget_pause(
     )
 
 
+def test_collector_cli_defaults_to_global_queue_mode_and_supports_planning():
+    args = build_argument_parser().parse_args([])
+
+    assert args.max_auctions == 0
+    assert args.force_auction_discovery is False
+    assert args.plan_only is False
+
+    plan = build_argument_parser().parse_args(["--plan-only", "--force-auction-discovery"])
+    assert plan.plan_only is True
+    assert plan.force_auction_discovery is True
+
+
 def test_collector_cli_exposes_safe_run_wide_limits():
     args = build_argument_parser().parse_args([])
 
