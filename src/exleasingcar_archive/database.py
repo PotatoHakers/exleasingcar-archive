@@ -4249,13 +4249,15 @@ class ArchiveDatabase:
             if not force:
                 latest = connection.execute(
                     """
-                    SELECT id, completed_at FROM auction_discovery_runs
+                    SELECT id, initial_page_url, completed_at
+                    FROM auction_discovery_runs
                     WHERE status = 'completed'
                     ORDER BY id DESC LIMIT 1
                     """
                 ).fetchone()
                 if (
                     latest is not None
+                    and str(latest["initial_page_url"]) == first_url
                     and latest["completed_at"] is not None
                     and str(latest["completed_at"]) >= refresh_boundary
                 ):
