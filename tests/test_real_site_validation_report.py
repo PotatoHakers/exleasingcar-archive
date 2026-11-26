@@ -30,6 +30,10 @@ def test_validation_report_accepts_current_schema_and_summarizes_scan_tables(tmp
     assert "catalog_scan_runs:" in result.stdout
     assert "catalog_scan_pages:" in result.stdout
     assert "catalog_deferred_api_lots:" in result.stdout
+    assert "auction_discovery_runs:" in result.stdout
+    assert "auction_discovery_pages:" in result.stdout
+    assert "auction_bootstrap_queue:" in result.stdout
+    assert "Bootstrap queue:" in result.stdout
     assert "Catalogue progress:" in result.stdout
     assert "STRUCTURAL CHECKS PASSED" in result.stdout
 
@@ -42,7 +46,7 @@ def test_validation_report_fails_closed_for_an_old_schema(tmp_path):
     result = run_report(database_path)
 
     assert result.returncode == 1
-    assert "expected current: 18" in result.stdout
+    assert f"expected current: {SCHEMA_VERSION}" in result.stdout
     assert "CHECK FAILED" in result.stdout
 
 def test_validation_report_shows_safe_source_samples_without_identifiers(tmp_path):
@@ -134,7 +138,7 @@ def test_validation_report_shows_safe_source_samples_without_identifiers(tmp_pat
     assert "source_field=fixed_price" in result.stdout
     assert "phase=LIVE; bid_status=BIDDING" in result.stdout
     assert "remaining_seconds=3600" in result.stdout
-    assert "Auction-level scheduled start: not stored in schema v18" in result.stdout
+    assert "Auction-level scheduled start: not stored in schema v19" in result.stdout
     assert "private-auction-id" not in result.stdout
     assert "private-car-id" not in result.stdout
     assert "Buy now for EUR 17,500" not in result.stdout
