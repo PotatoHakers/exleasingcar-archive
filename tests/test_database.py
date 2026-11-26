@@ -1741,6 +1741,60 @@ def test_auction_bootstrap_queue_recovers_retries_and_keeps_completed_items_clos
     assert database.claim_next_auction_bootstrap_work() is None
 
 
+def test_bootstrap_queue_prioritizes_urgent_work_and_recovers_stale_claims(tmp_path):
+    database = ArchiveDatabase(tmp_path / "auction-bootstrap-priority.sqlite3")
+    database.initialize()
+    listings = (
+        (
+            "auction-routine",
+            4,
+            "https://www.exleasingcar.com/ru/авто-аукционы/аукцион-routine",
+        ),
+        (
+            "auction-urgent",
+            0,
+            "https://www.exleasingcar.com/ru/авто-аукционы/аукцион-urgent",
+        ),
+    )
+    for auction_id, priority, source_url in listings:
+        database.upsert_auction(auction_id, observed_at=UTC_FIRST)
+        database.enqueue_auction_bootstrap(
+            {
+                "exleasingcar_auction_id": auction_id,
+                "source_url": source_url,
+                "source_auction_name": auction_id,
+                "markers": [],
+            },
+            priority=priority,
+            observed_at=UTC_FIRST,
+        )
+
+    first_claim = database.claim_next_auction_bootstrap_work(
+        observed_at=UTC_SECOND
+    )
+    assert first_claim is not None
+    assert first_claim.exleasingcar_auction_id == "auction-urgent"
+    assert first_claim.attempt_count == 1
+
+    recovered_claim = database.claim_next_auction_bootstrap_work(
+        observed_at=UTC_SECOND + timedelta(minutes=3)
+    )
+    assert recovered_claim is not None
+    assert recovered_claim.exleasingcar_auction_id == "auction-urgent"
+    assert recovered_claim.attempt_count == 2
+    assert recovered_claim.last_error == "recovered_stale_claim"
+
+    assert database.mark_auction_bootstrap_completed(
+        "auction-urgent",
+        observed_at=UTC_SECOND + timedelta(minutes=4),
+    )
+    next_claim = database.claim_next_auction_bootstrap_work(
+        observed_at=UTC_SECOND + timedelta(minutes=5)
+    )
+    assert next_claim is not None
+    assert next_claim.exleasingcar_auction_id == "auction-routine"
+
+
 def test_schema_v16_migrates_catalogue_page_payload_columns(tmp_path):
     database = ArchiveDatabase(tmp_path / "legacy-v16.sqlite3")
     database.initialize()
