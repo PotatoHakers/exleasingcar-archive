@@ -1872,7 +1872,6 @@ def test_malformed_deferred_api_update_is_closed_without_losing_raw_snapshot(
     assert retained[1] is not None
 
 
-
 def test_catalogue_mismatch_is_saved_as_unexpected_page_and_left_uncheckpointed(
     monkeypatch,
     tmp_path,
@@ -1934,6 +1933,7 @@ def test_catalogue_mismatch_is_saved_as_unexpected_page_and_left_uncheckpointed(
         database,
         tmp_path / "raw",
         page_delay_seconds=0,
+        save_html_snapshots=True,
     )
     monkeypatch.setattr(collector.recorder, "wait_for_pending", lambda page: True)
 
