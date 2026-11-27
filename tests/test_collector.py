@@ -5,11 +5,11 @@ from exleasingcar_archive.collector import (
     build_argument_parser,
     extract_vehicle_detail_urls,
     filter_updates_for_catalog,
-    _next_unvisited_catalog_page_url,
 )
 
 
 def test_catalogue_pagination_skips_next_link_already_checkpointed():
+    from exleasingcar_archive import collector as collector_module
     from exleasingcar_archive.metadata_parser import ParsedCatalogPagination
 
     first_url = "https://www.exleasingcar.com/auction-198758/show-20/"
@@ -22,7 +22,7 @@ def test_catalogue_pagination_skips_next_link_already_checkpointed():
         next_page_url=first_url,
     )
 
-    assert _next_unvisited_catalog_page_url(
+    assert collector_module._next_unvisited_catalog_page_url(
         pagination,
         current_page_url=second_url,
         visited_page_urls={first_url, second_url},
@@ -30,6 +30,7 @@ def test_catalogue_pagination_skips_next_link_already_checkpointed():
 
 
 def test_catalogue_pagination_returns_none_when_all_links_are_checkpointed():
+    from exleasingcar_archive import collector as collector_module
     from exleasingcar_archive.metadata_parser import ParsedCatalogPagination
 
     first_url = "https://www.exleasingcar.com/auction-198758/show-20/"
@@ -41,7 +42,7 @@ def test_catalogue_pagination_returns_none_when_all_links_are_checkpointed():
         next_page_url=first_url,
     )
 
-    assert _next_unvisited_catalog_page_url(
+    assert collector_module._next_unvisited_catalog_page_url(
         pagination,
         current_page_url=second_url,
         visited_page_urls={first_url, second_url},
