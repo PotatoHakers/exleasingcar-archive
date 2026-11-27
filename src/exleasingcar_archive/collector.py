@@ -1854,7 +1854,7 @@ class ExleasingcarCollector:
                     html,
                 )
                 (auction_dir / f"catalogue_mismatch_page_{page_number:03d}.json").write_text(
-                    json.dumps(diagnostic, ensure_ascii=False, indent=2) + "\\n",
+                    json.dumps(diagnostic, ensure_ascii=False, indent=2) + "\n",
                     encoding="utf-8",
                 )
                 raise CataloguePageMismatchError(
