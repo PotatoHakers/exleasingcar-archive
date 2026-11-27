@@ -1910,7 +1910,6 @@ def test_schema_v16_migrates_catalogue_page_payload_columns(tmp_path):
     assert deferred_table == 1
 
 
-
 def test_catalogue_mismatch_bootstrap_failure_uses_retry_backoff_and_keeps_queue_moving(
     tmp_path,
 ):
