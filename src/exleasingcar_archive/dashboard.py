@@ -307,7 +307,7 @@ async function refresh(){
   modelFilter.disabled=(d.available_models||[]).length===0;
   document.getElementById('lot-sort').value=d.selected_sort || 'last_observation';
   document.getElementById('sort-direction').value=d.sort_direction || 'desc';
-  const metrics=[['Аукционов',d.counts.auctions],['Автомобилей',d.counts.vehicles],['Лотов',d.counts.auction_lots],['Наблюдений highest_offer (API)',d.counts.price_observations],['Цен продавца',d.counts.price_reference_observations],['Отображаемых/фиксированных цен',d.counts.lot_price_observations],['Событий',d.counts.auction_events],['Первичный сбор · в очереди',d.bootstrap_queue.pending],['Первичный сбор · завершён',d.bootstrap_queue.completed]];
+  const metrics=[['Аукционов',d.counts.auctions],['Автомобилей',d.counts.vehicles],['Лотов',d.counts.auction_lots],['Наблюдений highest_offer (API)',d.counts.price_observations],['Цен продавца',d.counts.price_reference_observations],['Отображаемых/фиксированных цен',d.counts.lot_price_observations],['Событий',d.counts.auction_events]];
   document.getElementById('metrics').innerHTML=metrics.map(x=>`<div class="card"><div class="k">${esc(x[0])}</div><div class="v">${esc(x[1])}</div></div>`).join('');
   if(selectedLotId){
    renderLotCard(d.selected_lot,d.selected_vehicle,d.other_lots,d.media,d.pdf_fields,d.pdf_damages,d.lot_prices_summary);
@@ -539,25 +539,6 @@ class DashboardHandler(BaseHTTPRequestHandler):
                     """
                 ).fetchone()[0]),
             }
-            bootstrap_queue = {
-                "pending": 0,
-                "in_progress": 0,
-                "completed": 0,
-                "total": 0,
-            }
-            if "auction_bootstrap_queue" in tables:
-                queue_rows = connection.execute(
-                    """
-                    SELECT status, COUNT(*) AS item_count
-                    FROM auction_bootstrap_queue
-                    GROUP BY status
-                    """
-                ).fetchall()
-                for queue_row in queue_rows:
-                    status = str(queue_row["status"])
-                    count = int(queue_row["item_count"])
-                    bootstrap_queue[status] = count
-                    bootstrap_queue["total"] += count
             normalized_search = " ".join((search_query or "").split())[:100]
             selected_car_id = " ".join((selected_car_id or "").split())[:100]
             if (
@@ -1177,7 +1158,6 @@ class DashboardHandler(BaseHTTPRequestHandler):
             "database": str(self.database_path),
             "schema_version": version,
             "counts": counts,
-            "bootstrap_queue": bootstrap_queue,
             "selected_vehicle": vehicle,
             "selected_lot": lot_detail,
             "other_lots": other_lots,

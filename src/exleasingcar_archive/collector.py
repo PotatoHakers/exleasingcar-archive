@@ -31,13 +31,12 @@ from .metadata_parser import (
     ParsedAuctionListing,
     ParsedAuctionLotMetadata,
     parse_auction_catalog_metadata,
-    parse_auction_list_pagination,
     parse_auction_listings,
     parse_catalog_pagination,
     parse_vehicle_media,
     parse_vehicle_metadata,
 )
-from .models import AuctionCardMarker, PriceType, SaleType, VehicleStatus
+from .models import PriceType, SaleType, VehicleStatus
 from .parsers import ParsedLot, PriceObservation, parse_auction_list
 from .process_lock import CollectorAlreadyRunning, CollectorProcessLock
 from .scheduler import RunBudget, RunLimits
@@ -337,42 +336,6 @@ def extract_vehicle_detail_urls(html: str, base_url: str) -> dict[str, str]:
             result[car_id] = detail_url
 
     return result
-
-
-def _auction_bootstrap_is_drained(
-    database: ArchiveDatabase,
-    exleasingcar_auction_id: str,
-) -> bool:
-    """A catalogue bootstrap is drained only after actionable public API queues empty."""
-    if not database.has_completed_catalog_scan(
-        exleasingcar_auction_id,
-        "bootstrap",
-    ):
-        return False
-    return not (
-        database.get_pending_catalog_api_pages(exleasingcar_auction_id)
-        or database.get_pending_catalog_api_lot_updates(exleasingcar_auction_id)
-    )
-
-
-def _auction_listing_from_queue(listing_data: Mapping[str, Any]) -> ParsedAuctionListing:
-    """Rebuild the parser model from the JSON-safe listing stored in SQLite."""
-    values = dict(listing_data)
-    raw_markers = values.get("markers", ())
-    if not isinstance(raw_markers, (list, tuple)):
-        raise TypeError("Stored auction listing markers are invalid")
-    values["markers"] = tuple(
-        AuctionCardMarker(
-            icon_filename=str(marker["icon_filename"]),
-            marker_group=str(marker["marker_group"]),
-            label=(
-                str(marker["label"]) if marker.get("label") is not None else None
-            ),
-        )
-        for marker in raw_markers
-        if isinstance(marker, Mapping)
-    )
-    return ParsedAuctionListing(**values)
 
 
 def _auction_context(listing: ParsedAuctionListing) -> AuctionContext:
@@ -1212,7 +1175,7 @@ class ExleasingcarCollector:
         if not username or not password:
             raise RuntimeError(
                 "Exleasingcar credentials were not found in Windows Credential Manager. "
-                "Save them first using the instructions in docs/FIRST_GLOBAL_RUN.md."
+                "Save them first using the instructions in README_AUTO_LOGIN.md."
             )
         return username, password
 
@@ -2053,176 +2016,6 @@ class ExleasingcarCollector:
             )
         return pages_processed, lots_seen, details_processed
 
-    def _discover_auction_listings(
-        self,
-        page: Any,
-        *,
-        auction_list_url: str,
-        snapshot_dir: Path,
-        initial_page_html: str,
-        initial_page_url: str,
-        run_budget: RunBudget,
-        force: bool = False,
-    ) -> tuple[int, int]:
-        """Discover every auction-list page with durable page-by-page checkpoints."""
-        progress = self.database.start_or_resume_auction_discovery(
-            auction_list_url,
-            observed_at=datetime.now(timezone.utc),
-            force=force,
-        )
-        if progress.status == "completed":
-            print(
-                "Auction-list discovery is fresh; using the saved queue "
-                f"({progress.completed_at or 'completed'})."
-            )
-            return 0, 0
-
-        visited_urls = {
-            saved_page.page_url
-            for saved_page in self.database.get_auction_discovery_pages(
-                progress.scan_id
-            )
-        }
-        current_url = progress.next_page_url
-        page_number = progress.next_page_number
-        current_html: str | None = (
-            initial_page_html
-            if current_url == initial_page_url
-            else None
-        )
-        discovered_this_run = 0
-        pages_processed = 0
-
-        while current_url is not None and page_number is not None:
-            blocked = run_budget.try_consume(catalog_pages=1)
-            if blocked is not None:
-                print(
-                    "  Auction-list discovery paused before page "
-                    f"{page_number}: {blocked.value}."
-                )
-                break
-
-            if current_html is None:
-                try:
-                    page.goto(
-                        current_url,
-                        wait_until="domcontentloaded",
-                        timeout=60_000,
-                    )
-                    _wait_for_dynamic_content(page)
-                    if not self.recorder.wait_for_pending(page):
-                        print(
-                            "  Auction-list page left uncheckpointed because "
-                            "its network responses did not finish in time."
-                        )
-                        break
-                except PlaywrightError as exc:
-                    print(
-                        f"  Auction-list page {page_number} failed "
-                        f"({type(exc).__name__}); it will resume next run."
-                    )
-                    break
-
-                if not self._is_logged_in(page):
-                    self._authenticate(
-                        page,
-                        reason="the session expired during global auction discovery",
-                    )
-                    page.goto(
-                        current_url,
-                        wait_until="domcontentloaded",
-                        timeout=60_000,
-                    )
-                    _wait_for_dynamic_content(page)
-                    if not self.recorder.wait_for_pending(page):
-                        print(
-                            "  Auction-list page left uncheckpointed after "
-                            "reauthentication; it will resume next run."
-                        )
-                        break
-                current_html = page.content()
-
-            request_url = current_url
-            page_url = page.url
-            listings = parse_auction_listings(current_html, page_url)
-            if not listings and progress.pages_completed == 0 and pages_processed == 0:
-                raise RuntimeError(
-                    "No auction cards were found on the first auction-list page. "
-                    "Discovery was not checkpointed; inspect the browser and page."
-                )
-
-            pagination = parse_auction_list_pagination(current_html, page_url)
-            visited_urls.update({request_url, page_url})
-            next_url = pagination.next_page_url
-            if next_url is None:
-                next_candidates = [
-                    candidate
-                    for candidate in pagination.page_urls
-                    if candidate not in visited_urls
-                ]
-                next_url = next_candidates[0] if next_candidates else None
-            if next_url is not None and next_url in visited_urls:
-                raise RuntimeError(
-                    "Auction-list pagination points to a page already visited in "
-                    "this discovery scan. The page was not checkpointed."
-                )
-
-            page_observed_at = datetime.now(timezone.utc)
-            self._save_html(
-                snapshot_dir / f"auction_list_page_{page_number:03d}.html",
-                current_html,
-            )
-            for listing in listings:
-                if not listing.source_url:
-                    print(
-                        f"  Auction {listing.exleasingcar_auction_id} has no source URL; "
-                        "it was not added to the bootstrap queue."
-                    )
-                    continue
-                self.database.upsert_auction(
-                    listing.exleasingcar_auction_id,
-                    source_auction_name=listing.source_auction_name,
-                    source_auction_country_code=listing.source_auction_country_code,
-                    source_auction_country_name=listing.source_auction_country_name,
-                    auction_type_label=listing.auction_type_label,
-                    auction_status_label=listing.auction_status_label,
-                    markers=listing.markers,
-                    observed_at=page_observed_at,
-                )
-                self.database.enqueue_auction_bootstrap(
-                    asdict(listing),
-                    priority=listing.collection_priority,
-                    observed_at=page_observed_at,
-                )
-
-            next_page_number = page_number + 1 if next_url is not None else None
-            self.database.record_auction_discovery_page_completed(
-                progress.scan_id,
-                page_number,
-                request_url,
-                next_page_url=next_url,
-                next_page_number=next_page_number,
-                discovered_count=len(listings),
-                observed_at=page_observed_at,
-            )
-            discovered_this_run += len(listings)
-            pages_processed += 1
-
-            if next_url is None:
-                self.database.complete_auction_discovery(
-                    progress.scan_id,
-                    observed_at=page_observed_at,
-                )
-                break
-
-            current_url = next_url
-            page_number = next_page_number
-            current_html = None
-            if self.page_delay_seconds:
-                time.sleep(self.page_delay_seconds)
-
-        return discovered_this_run, pages_processed
-
     def run(
         self,
         *,
@@ -2232,16 +2025,12 @@ class ExleasingcarCollector:
         auction_id: str | None,
         max_detail_pages: int,
         run_limits: RunLimits | None = None,
-        force_discovery: bool = False,
-        plan_only: bool = False,
     ) -> CollectorSummary:
-        """Discover all auctions, then consume the durable bootstrap queue within run budgets."""
+        """Open the persistent browser and collect a bounded auction scan."""
         if max_auctions < 0:
-            raise ValueError("max_auctions must be zero (all queued) or a positive integer")
+            raise ValueError("max_auctions must be zero (all) or a positive integer")
         if max_detail_pages < -1:
             raise ValueError("max_detail_pages must be -1 (all), 0 (none), or positive")
-        if not isinstance(force_discovery, bool) or not isinstance(plan_only, bool):
-            raise TypeError("force_discovery and plan_only must be bool")
 
         if run_limits is None:
             run_limits = RunLimits(
@@ -2270,8 +2059,6 @@ class ExleasingcarCollector:
         pages_processed = 0
         lots_seen = 0
         details_processed = 0
-        auctions_discovered = 0
-        auctions_processed = 0
 
         with sync_playwright() as playwright:
             context = playwright.chromium.launch_persistent_context(
@@ -2283,20 +2070,11 @@ class ExleasingcarCollector:
                 page = context.pages[0] if context.pages else context.new_page()
                 self.recorder.attach(context)
                 print("Opening Exleasingcar in the collector's own Chromium profile...")
-                page.goto(
-                    auction_list_url,
-                    wait_until="domcontentloaded",
-                    timeout=60_000,
-                )
+                page.goto(auction_list_url, wait_until="domcontentloaded", timeout=60_000)
                 _wait_for_dynamic_content(page)
-                if not self.recorder.wait_for_pending(page):
-                    raise RuntimeError(
-                        "The auction-list page's network responses did not finish. "
-                        "No discovery checkpoint was written."
-                    )
-
-                initial_page_html = page.content()
-                initial_page_url = page.url
+                self.recorder.wait_for_pending(page)
+                auctions_html = page.content()
+                auctions = parse_auction_listings(auctions_html, page.url)
 
                 # Public auction lists can remain visible after session expiry.
                 # Authenticate before collecting protected vehicle pages.
@@ -2311,141 +2089,71 @@ class ExleasingcarCollector:
                         timeout=60_000,
                     )
                     _wait_for_dynamic_content(page)
-                    if not self.recorder.wait_for_pending(page):
-                        raise RuntimeError(
-                            "The auction-list page did not finish loading after "
-                            "authentication. No discovery checkpoint was written."
-                        )
-                    initial_page_html = page.content()
-                    initial_page_url = page.url
+                    self.recorder.wait_for_pending(page)
+                    auctions_html = page.content()
+                    auctions = parse_auction_listings(auctions_html, page.url)
                 else:
                     self._click_continue_if_visible(page)
-                    initial_page_html = page.content()
-                    initial_page_url = page.url
 
-                auctions_discovered, discovery_pages = self._discover_auction_listings(
-                    page,
-                    auction_list_url=auction_list_url,
-                    snapshot_dir=snapshot_dir,
-                    initial_page_html=initial_page_html,
-                    initial_page_url=initial_page_url,
-                    run_budget=run_budget,
-                    force=force_discovery or auction_id is not None,
-                )
-                print(
-                    f"Auction-list discovery: {discovery_pages} page(s) this run, "
-                    f"{auctions_discovered} auction card(s) discovered."
-                )
-                # Do not attribute traffic generated by the global list pages
-                # to the first auction's captured API snapshots.
+                if not auctions:
+                    raise RuntimeError(
+                        "No auction cards were found after login. Check the page "
+                        "address and whether the account can access the auction list."
+                    )
+
+                self._save_html(snapshot_dir / "auction_list.html", auctions_html)
+                # Do not attribute endpoint traffic generated by the auction-list
+                # page to the first auction. Capture auction-specific requests only.
                 self.api_cursor = len(self.recorder.responses)
+                for listing in auctions:
+                    self.database.upsert_auction(
+                        listing.exleasingcar_auction_id,
+                        source_auction_name=listing.source_auction_name,
+                        source_auction_country_code=listing.source_auction_country_code,
+                        source_auction_country_name=listing.source_auction_country_name,
+                        auction_type_label=listing.auction_type_label,
+                        auction_status_label=listing.auction_status_label,
+                        markers=listing.markers,
+                    )
 
-                queue_summary = self.database.get_auction_bootstrap_queue_summary()
-                print(
-                    "Bootstrap queue: "
-                    f"{queue_summary['pending']} pending, "
-                    f"{queue_summary['in_progress']} in progress, "
-                    f"{queue_summary['completed']} completed "
-                    f"({queue_summary['total']} total)."
-                )
-
-                if plan_only:
-                    print("Plan-only mode: no auction catalogue or vehicle pages were collected.")
-                else:
-                    consecutive_failures = 0
-                    auction_limit = 1 if auction_id is not None else max_auctions
-                    while auction_limit == 0 or auctions_processed < auction_limit:
-                        if run_budget.snapshot().expired:
-                            print("  Global auction queue paused: wall-clock budget exhausted.")
-                            break
-
-                        if run_budget.snapshot().catalog_pages_used >= run_limits.max_catalog_pages:
-                            print("  Global auction queue paused: catalogue-page budget exhausted.")
-                            break
-
-                        work = self.database.claim_next_auction_bootstrap_work(
-                            exleasingcar_auction_id=auction_id,
-                            include_completed=auction_id is not None,
-                            observed_at=datetime.now(timezone.utc),
+                print(f"Auction cards discovered: {len(auctions)}")
+                # Auction format/status classification is available to the
+                # persisted due-work planner. Keep this manual bounded path in
+                # source order until that planner owns fairness/rotation; sorting
+                # here would starve closed and fixed-price auctions with max_auctions=1.
+                selected_auctions = auctions
+                if auction_id:
+                    selected_auctions = [
+                        item
+                        for item in selected_auctions
+                        if item.exleasingcar_auction_id == auction_id
+                    ]
+                    if not selected_auctions:
+                        raise ValueError(
+                            f"Auction {auction_id} is not present on the current list page"
                         )
-                        if work is None:
-                            if auction_id is not None and auctions_processed == 0:
-                                raise ValueError(
-                                    f"Auction {auction_id} was not found in the discovered auction list."
-                                )
-                            break
+                if max_auctions > 0:
+                    selected_auctions = selected_auctions[:max_auctions]
 
-                        listing = _auction_listing_from_queue(work.listing_data)
-                        try:
-                            page_count, lot_count, detail_count = self._collect_auction(
-                                listing,
-                                page,
-                                snapshot_dir,
-                                max_detail_pages=max_detail_pages,
-                                run_budget=run_budget,
-                            )
-                            pages_processed += page_count
-                            lots_seen += lot_count
-                            details_processed += detail_count
-                            auctions_processed += 1
-                            consecutive_failures = 0
-                        except Exception as exc:  # noqa: BLE001 - isolate one auction and keep its queue item retryable
-                            self.database.mark_auction_bootstrap_pending(
-                                work.exleasingcar_auction_id,
-                                error_kind=type(exc).__name__,
-                                observed_at=datetime.now(timezone.utc),
-                            )
-                            print(
-                                f"  Auction {work.exleasingcar_auction_id} failed "
-                                f"({type(exc).__name__}); queued for retry."
-                            )
-                            auctions_processed += 1
-                            consecutive_failures += 1
-                            if consecutive_failures >= 3:
-                                print(
-                                    "  Global queue paused after three consecutive "
-                                    "auction failures."
-                                )
-                                break
-                            continue
-
-                        if _auction_bootstrap_is_drained(
-                            self.database,
-                            work.exleasingcar_auction_id,
-                        ):
-                            self.database.mark_auction_bootstrap_completed(
-                                work.exleasingcar_auction_id,
-                                observed_at=datetime.now(timezone.utc),
-                            )
-                        else:
-                            self.database.mark_auction_bootstrap_pending(
-                                work.exleasingcar_auction_id,
-                                observed_at=datetime.now(timezone.utc),
-                            )
-                            print(
-                                f"  Auction {work.exleasingcar_auction_id} remains "
-                                "queued because the catalogue checkpoint or actionable API backlog "
-                                "is still incomplete."
-                            )
-                            break
-
-                        if run_budget.snapshot().catalog_pages_used >= run_limits.max_catalog_pages:
-                            print("  Global queue paused at the catalogue-page budget.")
-                            break
+                for listing in selected_auctions:
+                    page_count, lot_count, detail_count = self._collect_auction(
+                        listing,
+                        page,
+                        snapshot_dir,
+                        max_detail_pages=max_detail_pages,
+                        run_budget=run_budget,
+                    )
+                    pages_processed += page_count
+                    lots_seen += lot_count
+                    details_processed += detail_count
 
                 print(f"Raw snapshots saved under: {snapshot_dir}")
             finally:
                 context.close()
 
-        queue_summary = self.database.get_auction_bootstrap_queue_summary()
-        print(
-            "Bootstrap queue after run: "
-            f"{queue_summary['pending']} pending, "
-            f"{queue_summary['completed']} completed."
-        )
         return CollectorSummary(
-            auctions_discovered=auctions_discovered,
-            auctions_processed=auctions_processed,
+            auctions_discovered=len(auctions),
+            auctions_processed=len(selected_auctions),
             catalog_pages_processed=pages_processed,
             lots_seen=lots_seen,
             detail_pages_processed=details_processed,
@@ -2508,20 +2216,10 @@ def build_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument("--auction-list-url", default=AUCTION_LIST_URL)
     parser.add_argument("--auction-id", help="Process only this auction ID")
     parser.add_argument(
-        "--force-auction-discovery",
-        action="store_true",
-        help="Refresh every auction-list page even when the last discovery completed within 24 hours",
-    )
-    parser.add_argument(
-        "--plan-only",
-        action="store_true",
-        help="Discover auctions and show the persistent queue without collecting auction catalogues",
-    )
-    parser.add_argument(
         "--max-auctions",
         type=int,
-        default=0,
-        help="Maximum queued auctions per run; 0 means all pending work (default: 0)",
+        default=1,
+        help="Maximum auctions to scan; 0 means all auctions on the list page (default: 1)",
     )
     parser.add_argument(
         "--max-detail-pages",
@@ -2618,8 +2316,6 @@ def main() -> None:
                 auction_id=args.auction_id,
                 max_detail_pages=args.max_detail_pages,
                 run_limits=run_limits,
-                force_discovery=args.force_auction_discovery,
-                plan_only=args.plan_only,
             )
             print("\nCollection completed")
             for field, value in asdict(summary).items():

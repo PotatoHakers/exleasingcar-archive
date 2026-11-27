@@ -5,7 +5,6 @@ from urllib.parse import unquote
 from exleasingcar_archive.database import ArchiveDatabase
 from exleasingcar_archive.metadata_parser import (
     parse_auction_catalog_metadata,
-    parse_auction_list_pagination,
     parse_auction_listings,
     parse_vehicle_media,
     parse_vehicle_metadata,
@@ -35,25 +34,6 @@ def test_parse_auction_listing_with_source_name_country_and_status():
     assert auction.vehicle_count == 76
     assert auction.source_url is not None
     assert "аукцион-210547" in auction.source_url
-
-
-def test_parse_global_auction_list_pagination_uses_the_numbered_next_link():
-    first_url = "https://www.exleasingcar.com/ru/авто-аукционы"
-    second_url = "https://www.exleasingcar.com/ru/авто-аукционы?page=2"
-    html = f"""
-    <nav><ul class="pagination">
-      <li><a class="pagination-page current" href="{first_url}">1</a></li>
-      <li><a class="pagination-page" href="{second_url}">2</a></li>
-      <li><a class="pagination-next" href="{second_url}">Next</a></li>
-    </ul></nav>
-    """
-
-    pagination = parse_auction_list_pagination(html, first_url)
-
-    assert pagination.current_page_url == first_url
-    assert pagination.current_page_number == 1
-    assert pagination.page_urls == (first_url, second_url)
-    assert pagination.next_page_url == second_url
 
 
 def test_parse_auction_catalog_lot_identifiers():
