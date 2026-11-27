@@ -12,12 +12,12 @@ from pathlib import Path
 
 from .collector import (
     AUCTION_LIST_URL,
-    CataloguePageMismatchError,
-    PlaywrightError,
     DEFAULT_DATABASE,
     DEFAULT_PROFILE_DIR,
     DEFAULT_RAW_DIR,
+    CataloguePageMismatchError,
     ExleasingcarCollector,
+    PlaywrightError,
 )
 from .database import ArchiveDatabase, BootstrapQueueItem
 from .models import AuctionCardMarker
