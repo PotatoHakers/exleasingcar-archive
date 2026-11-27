@@ -7,5 +7,3 @@ pytest>=8,<10
 ruff>=0.9,<1
 typing_extensions>=4.10,<5
 Pillow>=10,<13
-keyring>=25,<27
-playwright>=1.49,<2
