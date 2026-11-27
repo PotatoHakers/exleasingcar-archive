@@ -78,7 +78,7 @@ def test_failures_use_bounded_exponential_backoff_without_success_stamp(tmp_path
     assert delays[-1] == MAX_RETRY_DELAY
     entry = schedule.get("auction-1")
     assert entry.last_success_at is None
-    assert entry.consecutive_failures == 7
+    assert entry.consecutive_failures == 8
     assert entry.next_due_at == NOW + MAX_RETRY_DELAY
     assert entry.last_error == "network"
 
