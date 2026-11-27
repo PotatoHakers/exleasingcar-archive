@@ -1927,7 +1927,7 @@ def test_catalogue_mismatch_bootstrap_failure_uses_retry_backoff_and_keeps_queue
     database.mark_bootstrap_auction_started("auction-a", observed_at=UTC_FIRST)
     database.mark_bootstrap_auction_failed(
         "auction-a",
-        error_code="catalogue_mismatch",
+        error_code="collection_error",
         retry_after_seconds=1_800,
         observed_at=UTC_FIRST,
     )
