@@ -308,6 +308,12 @@ async function refresh(){
   document.getElementById('lot-sort').value=d.selected_sort || 'last_observation';
   document.getElementById('sort-direction').value=d.sort_direction || 'desc';
   const metrics=[['Аукционов',d.counts.auctions],['Автомобилей',d.counts.vehicles],['Лотов',d.counts.auction_lots],['Наблюдений highest_offer (API)',d.counts.price_observations],['Цен продавца',d.counts.price_reference_observations],['Отображаемых/фиксированных цен',d.counts.lot_price_observations],['Событий',d.counts.auction_events]];
+  if(d.bootstrap_queue){
+   metrics.push(['Первичный сбор · завершено',d.bootstrap_queue.completed]);
+   metrics.push(['Первичный сбор · в очереди',d.bootstrap_queue.pending]);
+   metrics.push(['Первичный сбор · в работе',d.bootstrap_queue.in_progress]);
+   metrics.push(['Первичный сбор · без ссылки',d.bootstrap_queue.blocked]);
+  }
   document.getElementById('metrics').innerHTML=metrics.map(x=>`<div class="card"><div class="k">${esc(x[0])}</div><div class="v">${esc(x[1])}</div></div>`).join('');
   if(selectedLotId){
    renderLotCard(d.selected_lot,d.selected_vehicle,d.other_lots,d.media,d.pdf_fields,d.pdf_damages,d.lot_prices_summary);
@@ -488,6 +494,32 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 raise sqlite3.DatabaseError(
                     "Missing database tables: " + ", ".join(sorted(missing))
                 )
+
+            bootstrap_queue = None
+            if "auction_bootstrap_queue" in tables:
+                queue_row = connection.execute(
+                    """
+                    SELECT COUNT(*) AS total,
+                           COALESCE(SUM(
+                               status = 'pending'
+                               AND last_error_code IS NOT 'missing_source_url'
+                           ), 0) AS pending,
+                           COALESCE(SUM(status = 'in_progress'), 0) AS in_progress,
+                           COALESCE(SUM(status = 'completed'), 0) AS completed,
+                           COALESCE(SUM(
+                               status = 'pending'
+                               AND last_error_code = 'missing_source_url'
+                           ), 0) AS blocked
+                    FROM auction_bootstrap_queue
+                    """
+                ).fetchone()
+                bootstrap_queue = {
+                    "total": int(queue_row["total"]),
+                    "pending": int(queue_row["pending"]),
+                    "in_progress": int(queue_row["in_progress"]),
+                    "completed": int(queue_row["completed"]),
+                    "blocked": int(queue_row["blocked"]),
+                }
 
             counts = {
                 "auctions": int(connection.execute(
@@ -1158,6 +1190,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
             "database": str(self.database_path),
             "schema_version": version,
             "counts": counts,
+            "bootstrap_queue": bootstrap_queue,
             "selected_vehicle": vehicle,
             "selected_lot": lot_detail,
             "other_lots": other_lots,

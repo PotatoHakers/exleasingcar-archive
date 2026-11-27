@@ -135,6 +135,310 @@ def test_extract_vehicle_detail_urls_deduplicates_vehicle_cards():
     assert links == {"car-1": "https://www.exleasingcar.com/auto-details/car-1"}
 
 
+def test_collector_cli_exposes_global_bootstrap_modes_without_changing_manual_defaults():
+    default_args = build_argument_parser().parse_args([])
+    bootstrap_args = build_argument_parser().parse_args(
+        ["--bootstrap", "--max-auctions", "0"]
+    )
+    discovery_args = build_argument_parser().parse_args(
+        ["--bootstrap", "--discover-only"]
+    )
+    plan_args = build_argument_parser().parse_args(["--plan-only"])
+
+    assert default_args.bootstrap is False
+    assert default_args.max_auctions == 1
+    assert bootstrap_args.bootstrap is True
+    assert bootstrap_args.max_auctions == 0
+    assert discovery_args.bootstrap is True
+    assert discovery_args.discover_only is True
+    assert plan_args.plan_only is True
+
+
+def test_discover_auction_pages_checkpoints_every_page_and_enqueues_cards(
+    monkeypatch, tmp_path
+):
+    from exleasingcar_archive import collector as collector_module
+    from exleasingcar_archive.collector import ExleasingcarCollector
+    from exleasingcar_archive.database import ArchiveDatabase
+    from exleasingcar_archive.metadata_parser import (
+        ParsedAuctionListing,
+        ParsedCatalogPagination,
+    )
+    from exleasingcar_archive.scheduler import RunBudget, RunLimits
+
+    first_url = "https://www.exleasingcar.com/ru/auto-auctions"
+    second_url = "https://www.exleasingcar.com/ru/auto-auctions?page=2"
+    first_html = "<html>auction-list-page-1</html>"
+    second_html = "<html>auction-list-page-2</html>"
+    html_by_url = {first_url: first_html, second_url: second_html}
+    listings_by_html = {
+        first_html: (
+            ParsedAuctionListing(
+                "auction-1", "BCA DE", "DE", "Germany", "English auction",
+                "FINAL CALL", 10,
+                "https://www.exleasingcar.com/ru/auction-1",
+                (),
+            ),
+            ParsedAuctionListing(
+                "auction-unlinked", "Contract only", "DE", "Germany", None,
+                None, None, None, (),
+            ),
+        ),
+        second_html: (
+            ParsedAuctionListing(
+                "auction-2", "VPauto", "FR", "France", "Closed auction",
+                None, 5,
+                "https://www.exleasingcar.com/ru/auction-2",
+                (),
+            ),
+        ),
+    }
+    pagination_by_html = {
+        first_html: ParsedCatalogPagination(
+            first_url, 1, (first_url, second_url), second_url
+        ),
+        second_html: ParsedCatalogPagination(
+            second_url, 2, (first_url, second_url), None
+        ),
+    }
+
+    monkeypatch.setattr(
+        collector_module, "_wait_for_dynamic_content", lambda page: None
+    )
+    monkeypatch.setattr(
+        collector_module,
+        "parse_auction_listings",
+        lambda html, page_url: listings_by_html[html],
+    )
+    monkeypatch.setattr(
+        collector_module,
+        "parse_catalog_pagination",
+        lambda html, page_url: pagination_by_html[html],
+    )
+
+    class FakePage:
+        def __init__(self):
+            self.url = first_url
+            self.goto_calls = []
+
+        def goto(self, url, **kwargs):
+            self.goto_calls.append(url)
+            self.url = url
+
+        def content(self):
+            return html_by_url[self.url]
+
+    database = ArchiveDatabase(tmp_path / "global-discovery.sqlite3")
+    database.initialize()
+    collector = ExleasingcarCollector(
+        database, tmp_path / "raw-global-discovery", page_delay_seconds=0
+    )
+    monkeypatch.setattr(collector.recorder, "wait_for_pending", lambda page: True)
+    page = FakePage()
+    budget = RunBudget(
+        RunLimits(
+            max_duration_seconds=30,
+            max_catalog_pages=2,
+            max_live_lots=100,
+            max_detail_pages=10,
+        )
+    )
+
+    progress, pages_processed = collector._discover_auction_pages(
+        page,
+        initial_page_url=first_url,
+        initial_html=first_html,
+        snapshot_dir=tmp_path / "snapshots-global-discovery",
+        run_budget=budget,
+        force=False,
+    )
+
+    assert progress.status == "completed"
+    assert progress.pages_completed == 2
+    assert progress.auction_cards_seen == 3
+    assert pages_processed == 2
+    assert page.goto_calls == [second_url]
+    assert [
+        item.page_url for item in database.get_auction_discovery_pages(progress.run_id)
+    ] == [first_url, second_url]
+    queue = database.get_bootstrap_queue()
+    assert [item.auction_id for item in queue] == ["auction-1", "auction-2"]
+    assert queue[0].source_url.endswith("/auction-1")
+    assert queue[1].source_url.endswith("/auction-2")
+    queue_summary = database.get_bootstrap_queue_summary()
+    assert queue_summary.total == 3
+    assert queue_summary.pending == 2
+    assert queue_summary.blocked == 1
+
+
+def test_auction_discovery_resumes_at_saved_page_and_obeys_page_budget(
+    monkeypatch, tmp_path
+):
+    from exleasingcar_archive import collector as collector_module
+    from exleasingcar_archive.collector import ExleasingcarCollector
+    from exleasingcar_archive.database import ArchiveDatabase
+    from exleasingcar_archive.metadata_parser import (
+        ParsedAuctionListing,
+        ParsedCatalogPagination,
+    )
+    from exleasingcar_archive.scheduler import RunBudget, RunLimits
+
+    first_url = "https://www.exleasingcar.com/ru/auto-auctions"
+    second_url = "https://www.exleasingcar.com/ru/auto-auctions?page=2"
+    second_html = "<html>resumed-auction-list-page</html>"
+    listing = ParsedAuctionListing(
+        "auction-resumed", "BCA FR", "FR", "France", "English auction",
+        None, 4, "https://www.exleasingcar.com/ru/auction-resumed", (),
+    )
+
+    monkeypatch.setattr(
+        collector_module, "_wait_for_dynamic_content", lambda page: None
+    )
+    monkeypatch.setattr(
+        collector_module,
+        "parse_auction_listings",
+        lambda html, page_url: (listing,),
+    )
+    monkeypatch.setattr(
+        collector_module,
+        "parse_catalog_pagination",
+        lambda html, page_url: ParsedCatalogPagination(
+            second_url, 2, (first_url, second_url), None
+        ),
+    )
+
+    class FakePage:
+        url = first_url
+
+        def __init__(self):
+            self.goto_calls = []
+
+        def goto(self, url, **kwargs):
+            self.goto_calls.append(url)
+            self.url = url
+
+        def content(self):
+            assert self.url == second_url
+            return second_html
+
+    database = ArchiveDatabase(tmp_path / "global-discovery-resume.sqlite3")
+    database.initialize()
+    partial = database.start_or_resume_auction_discovery(first_url)
+    database.record_auction_discovery_page(
+        partial.run_id,
+        1,
+        first_url,
+        next_page_url=second_url,
+        next_page_number=2,
+        auction_count=1,
+    )
+
+    collector = ExleasingcarCollector(
+        database, tmp_path / "raw-global-resume", page_delay_seconds=0
+    )
+    monkeypatch.setattr(collector.recorder, "wait_for_pending", lambda page: True)
+    page = FakePage()
+    budget = RunBudget(
+        RunLimits(
+            max_duration_seconds=30,
+            max_catalog_pages=1,
+            max_live_lots=0,
+            max_detail_pages=0,
+        )
+    )
+
+    progress, pages_processed = collector._discover_auction_pages(
+        page,
+        initial_page_url=first_url,
+        initial_html="<html>stale-initial-page</html>",
+        snapshot_dir=tmp_path / "snapshots-global-resume",
+        run_budget=budget,
+        force=False,
+    )
+
+    assert page.goto_calls == [second_url]
+    assert pages_processed == 1
+    assert progress.status == "completed"
+    assert progress.pages_completed == 2
+    assert [item.auction_id for item in database.get_bootstrap_queue()] == [
+        "auction-resumed"
+    ]
+
+
+def test_auction_discovery_stops_on_pagination_cycle_without_marking_complete(
+    monkeypatch, tmp_path
+):
+    from exleasingcar_archive import collector as collector_module
+    from exleasingcar_archive.collector import ExleasingcarCollector
+    from exleasingcar_archive.database import ArchiveDatabase
+    from exleasingcar_archive.metadata_parser import (
+        ParsedAuctionListing,
+        ParsedCatalogPagination,
+    )
+    from exleasingcar_archive.scheduler import RunBudget, RunLimits
+
+    first_url = "https://www.exleasingcar.com/ru/auto-auctions"
+    second_url = "https://www.exleasingcar.com/ru/auto-auctions?page=2"
+    first_html = "<html>cycle-page-1</html>"
+    second_html = "<html>cycle-page-2</html>"
+    html_by_url = {first_url: first_html, second_url: second_html}
+    listing = ParsedAuctionListing(
+        "auction-cycle", "BCA", "DE", "Germany", "English auction",
+        None, 1, "https://www.exleasingcar.com/ru/auction-cycle", (),
+    )
+
+    monkeypatch.setattr(
+        collector_module, "_wait_for_dynamic_content", lambda page: None
+    )
+    monkeypatch.setattr(
+        collector_module, "parse_auction_listings", lambda html, url: (listing,)
+    )
+    monkeypatch.setattr(
+        collector_module,
+        "parse_catalog_pagination",
+        lambda html, url: (
+            ParsedCatalogPagination(first_url, 1, (first_url, second_url), second_url)
+            if html == first_html
+            else ParsedCatalogPagination(second_url, 2, (first_url, second_url), first_url)
+        ),
+    )
+
+    class FakePage:
+        url = first_url
+
+        def goto(self, url, **kwargs):
+            self.url = url
+
+        def content(self):
+            return html_by_url[self.url]
+
+    database = ArchiveDatabase(tmp_path / "global-discovery-cycle.sqlite3")
+    database.initialize()
+    collector = ExleasingcarCollector(
+        database, tmp_path / "raw-global-cycle", page_delay_seconds=0
+    )
+    monkeypatch.setattr(collector.recorder, "wait_for_pending", lambda page: True)
+    page = FakePage()
+    budget = RunBudget(RunLimits(30, 2, 0, 0))
+
+    with pytest.raises(RuntimeError, match="already visited"):
+        collector._discover_auction_pages(
+            page,
+            initial_page_url=first_url,
+            initial_html=first_html,
+            snapshot_dir=tmp_path / "snapshots-global-cycle",
+            run_budget=budget,
+            force=False,
+        )
+
+    progress = database.get_latest_auction_discovery_progress()
+    assert progress is not None
+    assert progress.status == "in_progress"
+    assert progress.pages_completed == 1
+    assert progress.next_page_url == second_url
+    assert database.get_auction_discovery_pages(progress.run_id)[0].page_url == first_url
+
+
 def test_api_response_recorder_accepts_only_target_endpoint_json():
     from exleasingcar_archive.collector import ApiResponseRecorder
 

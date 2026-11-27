@@ -1,7 +1,7 @@
 # Collector Runtime and Scheduler Design
 
-**Status:** implementation foundation in place; runtime and source-verification gates remain open for [Issue #45](https://github.com/PotatoHakers/exleasingcar-archive/issues/45).  
-**Current application schema:** SQLite v18.  
+**Status:** persistent global bootstrap foundation in place; recurring scheduler and source-verification gates remain open for [Issue #45](https://github.com/PotatoHakers/exleasingcar-archive/issues/45).  
+**Current application schema:** SQLite v19.  
 **Scope:** design and implementation status only. This document does not enable unattended collection, expose the Dashboard, or authorize any R2 operation.
 
 ## 1. Product requirements
@@ -36,15 +36,18 @@ The earlier version of this document described the pre-PR #92 collector. That de
 
 - **Bounded planner primitives:** `scheduler.py` defines work types and deterministic priority ordering for live refresh, bootstrap, scheduled refresh, routine refresh, and detail enrichment. Auction-card parsing now separately exposes primary format, FINAL CALL/HOT BID, and a raw same-day end-time label. These classification/priority properties are not yet connected to the persisted due-work runtime. The manual bounded path remains in source order to avoid starving closed/fixed-price auctions while fairness is not persisted.
 - **Hard per-run limits:** `RunBudget` uses a monotonic deadline and atomically reserves catalogue pages, live-lot updates, and detail-page visits. Failed attempts still consume their reserved budget.
-- **Resumable catalogue scans:** SQLite schema v18 stores scan generations, completed page checkpoints, page payloads, API response payloads, and cursors. An unfinished scan resumes from its saved cursor. A page is checkpointed only after successful parsing and ingestion.
+- **Resumable catalogue scans:** SQLite schema v18 stores per-auction scan generations, completed page checkpoints, page payloads, API response payloads, and cursors. Schema v19 adds a separate global auction-list discovery cursor and page audit trail. An unfinished discovery or per-auction scan resumes from its saved cursor. A page is checkpointed only after successful parsing and persistence.
+- **Persistent global bootstrap queue:** schema v19 stores each discovered auction's source URL and initial-bootstrap state. Queue entries survive process restarts, use oldest-attempt-first ordering, retain in-progress scans for resume, and apply bounded retry delays to failed work. Cards with an auction ID but no navigable source URL remain visible as blocked entries instead of stopping discovery or being silently discarded; a later discovery can release them if a link appears. A completed bootstrap scan is not re-queued by a repeated discovery pass. The `--bootstrap`, `--discover-only`, `--plan-only`, and `--rediscover-auctions` CLI modes expose this first-pass workflow.
+- **Bootstrap visibility:** the read-only Dashboard and `real_site_validation_report.py` show aggregate discovery and queue progress without displaying auction URLs or identifiers.
 - **Durable API queues:** bulk responses are replayed only after archive writes commit. API cursor advancement is durable. Unknown sale modes are split into per-lot deferred updates and replayed after detail enrichment establishes the sale type.
 - **Per-process exclusion:** the manual collector uses a non-blocking OS-level lock before database initialization or browser startup. The default lock is shared across CLI runs in the checkout.
 - **Read-only validation report:** `real_site_validation_report.py` checks schema version, SQLite integrity, foreign keys, expected tables, catalogue progress, pending deferred API work, price coverage, and media-discovery aggregates.
 - **Source-only CI:** GitHub Actions runs Ruff and pytest. It does not authenticate to Exleasingcar or access the private archive/R2.
+- **Local global bootstrap:** the collector can crawl and checkpoint the auction-list pages, persist a first-pass queue, resume bounded batches, and report queue completion. It remains manually invoked; no Task Scheduler job or remote collection runtime is installed.
 
 ### Still not implemented
 
-- The pure planner is **not yet integrated** with `ExleasingcarCollector.run()` as a persisted due-work scheduler. The CLI still processes the selected auction list in its current order; it does not yet calculate and persist every auction's next due time for all cadences.
+- The pure due-work planner is **not yet integrated** with the recurring collector runtime. The new persistent queue covers the one-time global bootstrap only; it does not yet calculate and persist next-due timestamps for the daily routine, same-day, five-minute live, or separate detail-enrichment cadences. Manual non-bootstrap collection retains its existing source/manual selection behavior.
 - There is no host timer, systemd service, cloud worker, or unattended collection.
 - The collector still launches a visible persistent Chromium profile and uses the current local credential-store integration. This is not yet a supported cloud authentication design.
 - The auction-list card exposes a same-day end-time label on some auctions. The owner confirmed that the site clock is +1 hour behind the owner's local clock; the 25 Nov API countdown sample independently corroborates this. Raw values remain stored unchanged; dashboard/report display is shifted by +1 hour. There is still no verified scheduled trading-start field or authoritative auction-level live/inactive signal.
