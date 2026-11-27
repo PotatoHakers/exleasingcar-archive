@@ -12,7 +12,6 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-
 DEFAULT_REFRESH_INTERVAL = timedelta(hours=12)
 MAX_RETRY_DELAY = timedelta(hours=6)
 
