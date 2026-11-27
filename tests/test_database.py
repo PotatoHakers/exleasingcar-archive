@@ -1908,3 +1908,37 @@ def test_schema_v16_migrates_catalogue_page_payload_columns(tmp_path):
             """
         ).fetchone()[0]
     assert deferred_table == 1
+
+
+def test_catalogue_mismatch_bootstrap_failure_uses_retry_backoff_and_keeps_queue_moving(
+    tmp_path,
+):
+    from datetime import timedelta
+
+    database = ArchiveDatabase(tmp_path / "bootstrap-catalogue-mismatch.sqlite3")
+    database.initialize()
+    for auction_id in ("auction-a", "auction-b"):
+        database.upsert_auction(
+            auction_id,
+            source_url=f"https://www.exleasingcar.com/ru/{auction_id}",
+        )
+        database.enqueue_bootstrap_auction(auction_id, observed_at=UTC_FIRST)
+
+    database.mark_bootstrap_auction_started("auction-a", observed_at=UTC_FIRST)
+    database.mark_bootstrap_auction_failed(
+        "auction-a",
+        error_code="collection_error",
+        retry_after_seconds=1_800,
+        observed_at=UTC_FIRST,
+    )
+
+    available = database.get_bootstrap_queue(
+        observed_at=UTC_FIRST + timedelta(seconds=30)
+    )
+    assert [item.auction_id for item in available] == ["auction-b"]
+
+    summary = database.get_bootstrap_queue_summary(
+        observed_at=UTC_FIRST + timedelta(seconds=30)
+    )
+    assert summary.total == 2
+    assert summary.deferred == 1
