@@ -1870,3 +1870,101 @@ def test_malformed_deferred_api_update_is_closed_without_losing_raw_snapshot(
     assert retained is not None
     assert '"not-a-number"' in retained[0]
     assert retained[1] is not None
+
+
+
+def test_catalogue_mismatch_is_saved_as_unexpected_page_and_left_uncheckpointed(
+    monkeypatch,
+    tmp_path,
+):
+    import json
+    from types import SimpleNamespace
+
+    import pytest
+
+    from exleasingcar_archive import collector as collector_module
+    from exleasingcar_archive.collector import (
+        CataloguePageMismatchError,
+        ExleasingcarCollector,
+    )
+    from exleasingcar_archive.database import ArchiveDatabase
+    from exleasingcar_archive.metadata_parser import ParsedAuctionListing
+
+    requested_url = "https://www.exleasingcar.com/ru/auction-210375"
+    final_url = "https://www.exleasingcar.com/ru/авто-аукционы"
+    wrong_page_html = """
+        <html><body>
+          <input name="aukciono_id" value="">
+          <div class="ac-list-item">
+            <a href="/ru/auction-210893">Another auction</a>
+          </div>
+        </body></html>
+    """
+    listing = ParsedAuctionListing(
+        exleasingcar_auction_id="210375",
+        source_auction_name="BCA",
+        source_auction_country_code="DE",
+        source_auction_country_name="Germany",
+        auction_type_label="English auction",
+        auction_status_label=None,
+        vehicle_count=1,
+        source_url=requested_url,
+        markers=(),
+    )
+
+    class FakePage:
+        url = requested_url
+
+        def goto(self, url, **kwargs):
+            assert url == requested_url
+            self.url = final_url
+            return SimpleNamespace(status=200, url=final_url)
+
+        def content(self):
+            return wrong_page_html
+
+    monkeypatch.setattr(
+        collector_module,
+        "_wait_for_dynamic_content",
+        lambda page: None,
+    )
+    database = ArchiveDatabase(tmp_path / "catalogue-mismatch.sqlite3")
+    database.initialize()
+    collector = ExleasingcarCollector(
+        database,
+        tmp_path / "raw",
+        page_delay_seconds=0,
+    )
+    monkeypatch.setattr(collector.recorder, "wait_for_pending", lambda page: True)
+
+    with pytest.raises(CataloguePageMismatchError) as raised:
+        collector._collect_auction(
+            listing,
+            FakePage(),
+            tmp_path / "snapshots",
+            max_detail_pages=0,
+        )
+
+    assert raised.value.expected_auction_id == "210375"
+    assert raised.value.received_auction_id is None
+    assert raised.value.page_kind == "auction_list"
+    assert database.has_completed_catalog_scan("210375", "bootstrap") is False
+
+    diagnostic_paths = list(
+        (tmp_path / "snapshots").rglob("catalogue_mismatch_page_001.json")
+    )
+    html_paths = list(
+        (tmp_path / "snapshots").rglob("unexpected_catalogue_page_001.html")
+    )
+    assert len(diagnostic_paths) == 1
+    assert len(html_paths) == 1
+    assert not list((tmp_path / "snapshots").rglob("catalog_page_001.html"))
+
+    diagnostic = json.loads(diagnostic_paths[0].read_text(encoding="utf-8"))
+    assert diagnostic["expected_auction_id"] == "210375"
+    assert diagnostic["received_auction_id"] is None
+    assert diagnostic["page_kind"] == "auction_list"
+    assert diagnostic["auction_cards_found"] == 1
+    assert diagnostic["http_status"] == 200
+    assert diagnostic["requested_url"] == requested_url
+    assert diagnostic["final_url"] == final_url
