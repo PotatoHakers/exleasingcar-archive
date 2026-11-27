@@ -2456,7 +2456,7 @@ class ExleasingcarCollector:
                             except CataloguePageMismatchError as exc:
                                 self.database.mark_bootstrap_auction_failed(
                                     listing.exleasingcar_auction_id,
-                                    error_code="catalogue_mismatch",
+                                    error_code="collection_error",
                                     retry_after_seconds=1_800,
                                 )
                                 print(
