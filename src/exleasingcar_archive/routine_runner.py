@@ -6,7 +6,6 @@ by Windows Task Scheduler. It does not install a background service.
 from __future__ import annotations
 
 import argparse
-import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -21,7 +20,7 @@ from .database import ArchiveDatabase, BootstrapQueueItem
 from .models import AuctionCardMarker
 from .process_lock import CollectorAlreadyRunning, CollectorProcessLock
 from .routine_schedule import RoutineSchedule
-from .scheduler import RunLimits
+from .scheduler import RunBudget, RunLimits
 
 
 def _completed_bootstrap_items(database: ArchiveDatabase) -> tuple[BootstrapQueueItem, ...]:
@@ -171,6 +170,7 @@ def main(argv: list[str] | None = None) -> int:
                 ) from exc
 
             processed = 0
+            run_budget = RunBudget(limits)
             with sync_playwright() as playwright:
                 context = playwright.chromium.launch_persistent_context(
                     user_data_dir=str(args.profile_dir),
@@ -225,10 +225,7 @@ def main(argv: list[str] | None = None) -> int:
                                 page,
                                 snapshot_dir,
                                 max_detail_pages=args.max_detail_pages,
-                                run_budget=__import__(
-                                    "exleasingcar_archive.scheduler",
-                                    fromlist=["RunBudget"],
-                                ).RunBudget(limits),
+                                run_budget=run_budget,
                             )
                         except Exception as exc:
                             delay = schedule.mark_failed(
@@ -242,9 +239,19 @@ def main(argv: list[str] | None = None) -> int:
                             )
                             continue
 
-                        if database.has_completed_catalog_scan(
-                            scheduled.auction_id, "routine"
-                        ):
+                        with database._connect() as connection:
+                            latest_scan = connection.execute(
+                                """
+                                SELECT runs.status
+                                FROM catalog_scan_runs AS runs
+                                JOIN auctions ON auctions.id = runs.auction_id
+                                WHERE auctions.exleasingcar_auction_id = ?
+                                  AND runs.scan_type = 'routine'
+                                ORDER BY runs.id DESC LIMIT 1
+                                """,
+                                (scheduled.auction_id,),
+                            ).fetchone()
+                        if latest_scan is not None and latest_scan["status"] == "completed":
                             schedule.mark_succeeded(
                                 scheduled.auction_id, at=datetime.now(timezone.utc)
                             )
@@ -255,6 +262,14 @@ def main(argv: list[str] | None = None) -> int:
                                 "it stays due for the next invocation"
                             )
                         processed += 1
+                        budget_state = run_budget.snapshot()
+                        if budget_state.expired or (
+                            budget_state.catalog_pages_used >= limits.max_catalog_pages
+                            or budget_state.live_lots_used >= limits.max_live_lots
+                            or budget_state.detail_pages_used >= limits.max_detail_pages
+                        ):
+                            print("  Batch stopped: shared per-run resource budget exhausted.")
+                            break
                 finally:
                     context.close()
 
