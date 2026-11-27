@@ -6,11 +6,14 @@ by Windows Task Scheduler. It does not install a background service.
 from __future__ import annotations
 
 import argparse
+import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
 
 from .collector import (
     AUCTION_LIST_URL,
+    CataloguePageMismatchError,
+    PlaywrightError,
     DEFAULT_DATABASE,
     DEFAULT_PROFILE_DIR,
     DEFAULT_RAW_DIR,
@@ -227,7 +230,7 @@ def main(argv: list[str] | None = None) -> int:
                                 max_detail_pages=args.max_detail_pages,
                                 run_budget=run_budget,
                             )
-                        except Exception as exc:
+                        except (CataloguePageMismatchError, PlaywrightError, OSError, RuntimeError, TypeError, ValueError, sqlite3.Error) as exc:
                             delay = schedule.mark_failed(
                                 scheduled.auction_id,
                                 at=datetime.now(timezone.utc),
