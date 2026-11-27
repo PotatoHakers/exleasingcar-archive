@@ -5,7 +5,47 @@ from exleasingcar_archive.collector import (
     build_argument_parser,
     extract_vehicle_detail_urls,
     filter_updates_for_catalog,
+    _next_unvisited_catalog_page_url,
 )
+
+
+def test_catalogue_pagination_skips_next_link_already_checkpointed():
+    from exleasingcar_archive.metadata_parser import ParsedCatalogPagination
+
+    first_url = "https://www.exleasingcar.com/auction-198758/show-20/"
+    second_url = "https://www.exleasingcar.com/auction-198758/show-20/2"
+    third_url = "https://www.exleasingcar.com/auction-198758/show-20/3"
+    pagination = ParsedCatalogPagination(
+        current_page_url=second_url,
+        current_page_number=2,
+        page_urls=(first_url, second_url, third_url),
+        next_page_url=first_url,
+    )
+
+    assert _next_unvisited_catalog_page_url(
+        pagination,
+        current_page_url=second_url,
+        visited_page_urls={first_url, second_url},
+    ) == third_url
+
+
+def test_catalogue_pagination_returns_none_when_all_links_are_checkpointed():
+    from exleasingcar_archive.metadata_parser import ParsedCatalogPagination
+
+    first_url = "https://www.exleasingcar.com/auction-198758/show-20/"
+    second_url = "https://www.exleasingcar.com/auction-198758/show-20/2"
+    pagination = ParsedCatalogPagination(
+        current_page_url=second_url,
+        current_page_number=2,
+        page_urls=(first_url, second_url),
+        next_page_url=first_url,
+    )
+
+    assert _next_unvisited_catalog_page_url(
+        pagination,
+        current_page_url=second_url,
+        visited_page_urls={first_url, second_url},
+    ) is None
 
 
 def test_save_html_snapshots_can_be_disabled(tmp_path):
