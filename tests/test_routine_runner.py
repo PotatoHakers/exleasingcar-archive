@@ -27,6 +27,15 @@ def test_routine_inventory_contains_only_completed_bootstrap_auctions(tmp_path):
         "https://www.exleasingcar.com/auction-completed-auction/show-20/",
         observed_at=observed_at,
     )
+    database.record_catalog_page_completed(
+        completed_scan.scan_id,
+        1,
+        "https://www.exleasingcar.com/auction-completed-auction/show-20/",
+        next_page_url=None,
+        next_page_number=None,
+        item_count=0,
+        observed_at=observed_at,
+    )
     database.complete_catalog_scan(completed_scan.scan_id, observed_at=observed_at)
     database.mark_bootstrap_auction_started(
         "completed-auction", observed_at=observed_at
