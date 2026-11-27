@@ -1362,6 +1362,35 @@ class ExleasingcarCollector:
             return False
         return True
 
+    def _wait_for_detail_api_capture(
+        self,
+        page: Any,
+        car_id: str,
+        *,
+        error_start: int,
+    ) -> bool:
+        """Prevent the next detail navigation from invalidating an API response."""
+        if self.recorder.pending_requests and not self.recorder.wait_for_pending(
+            page,
+            timeout_ms=10_000,
+        ):
+            print(
+                f"  Detail API response for lot {car_id} is still pending after "
+                "10 seconds; stopping this detail rotation before navigation. "
+                "The remaining lots stay due for a later run."
+            )
+            return False
+
+        new_errors = self.recorder.errors[error_start:]
+        if new_errors:
+            print(
+                f"  Detail API capture for lot {car_id} reported "
+                f"{len(new_errors)} warning(s); stopping this detail rotation "
+                "before navigating to another lot."
+            )
+            return False
+        return True
+
     def _enrich_vehicle_detail(
         self,
         auction: AuctionContext,
@@ -2159,6 +2188,7 @@ class ExleasingcarCollector:
             details_attempted += 1
             attempted_detail_ids.add(car_id)
             detail_response_start = len(self.recorder.responses)
+            detail_error_start = len(self.recorder.errors)
             qualification = self._enrich_vehicle_detail(
                 auction,
                 car_id,
@@ -2167,11 +2197,17 @@ class ExleasingcarCollector:
                 observed_at,
                 auction_dir,
             )
-            # A slow detail-page API request must not be aborted by the next
-            # vehicle navigation. Give it one extended bounded wait, then stop
-            # this detail rotation if it is still pending.
-            if self.recorder.pending_requests:
-                self.recorder.wait_for_pending(page, timeout_ms=10_000)
+            # A detail-page API response must be captured before the next
+            # vehicle navigation. Navigating away while a target request is still
+            # pending makes Chromium discard its response body; the recorder then
+            # cannot persist that snapshot. Stop this detail rotation and leave
+            # the remaining lots due for a later invocation instead.
+            if not self._wait_for_detail_api_capture(
+                page,
+                car_id,
+                error_start=detail_error_start,
+            ):
+                break
             detail_api_responses = self.recorder.responses[detail_response_start:]
             if detail_api_responses:
                 page_id = lot_page_ids.get(car_id)
