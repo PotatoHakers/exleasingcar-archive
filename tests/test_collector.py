@@ -784,6 +784,70 @@ def test_collector_defaults_to_bounded_detail_batch_for_selected_auction():
     assert args.max_detail_pages == 30
 
 
+def test_detail_rotation_stops_before_navigation_when_api_capture_is_pending():
+    class FakeRecorder:
+        pending_requests = {1: object()}
+        errors = []
+
+        def wait_for_pending(self, page, *, timeout_ms):
+            assert timeout_ms == 10_000
+            return False
+
+    collector = object.__new__(ExleasingcarCollector)
+    collector.recorder = FakeRecorder()
+
+    assert (
+        collector._wait_for_detail_api_capture(
+            object(),
+            "lot-123",
+            error_start=0,
+        )
+        is False
+    )
+
+
+def test_detail_rotation_stops_after_api_capture_warning():
+    class FakeRecorder:
+        pending_requests = {}
+        errors = ["response body unavailable after navigation"]
+
+        def wait_for_pending(self, page, *, timeout_ms):
+            raise AssertionError("no wait is needed when no requests are pending")
+
+    collector = object.__new__(ExleasingcarCollector)
+    collector.recorder = FakeRecorder()
+
+    assert (
+        collector._wait_for_detail_api_capture(
+            object(),
+            "lot-123",
+            error_start=0,
+        )
+        is False
+    )
+
+
+def test_detail_rotation_continues_when_api_capture_is_complete():
+    class FakeRecorder:
+        pending_requests = {}
+        errors = []
+
+        def wait_for_pending(self, page, *, timeout_ms):
+            raise AssertionError("no wait is needed when no requests are pending")
+
+    collector = object.__new__(ExleasingcarCollector)
+    collector.recorder = FakeRecorder()
+
+    assert (
+        collector._wait_for_detail_api_capture(
+            object(),
+            "lot-123",
+            error_start=0,
+        )
+        is True
+    )
+
+
 def test_api_response_recorder_retries_body_read_after_request_finished():
     from exleasingcar_archive.collector import ApiResponseRecorder, PlaywrightError
 
