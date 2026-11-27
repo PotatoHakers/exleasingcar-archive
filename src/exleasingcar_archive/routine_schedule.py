@@ -7,10 +7,10 @@ collection operation and mark its outcome only after it finishes.
 """
 from __future__ import annotations
 
-import sqlite3
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+import sqlite3
 
 
 DEFAULT_REFRESH_INTERVAL = timedelta(hours=12)
