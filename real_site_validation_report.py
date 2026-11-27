@@ -21,10 +21,9 @@ from urllib.parse import quote
 sys.path.insert(0, str(Path(__file__).resolve().parent / "src"))
 
 from exleasingcar_archive.auction_time import format_auction_time_for_user
-from exleasingcar_archive.database import SCHEMA_VERSION
 
 
-EXPECTED_SCHEMA_VERSION = SCHEMA_VERSION
+EXPECTED_SCHEMA_VERSION = 18
 REQUIRED_TABLES = (
     "auctions",
     "vehicles",
@@ -32,9 +31,6 @@ REQUIRED_TABLES = (
     "catalog_scan_runs",
     "catalog_scan_pages",
     "catalog_deferred_api_lots",
-    "auction_discovery_runs",
-    "auction_discovery_pages",
-    "auction_bootstrap_queue",
 )
 
 TABLES = (
@@ -54,9 +50,6 @@ TABLES = (
     "catalog_scan_runs",
     "catalog_scan_pages",
     "catalog_deferred_api_lots",
-    "auction_discovery_runs",
-    "auction_discovery_pages",
-    "auction_bootstrap_queue",
 )
 
 
@@ -175,37 +168,6 @@ def print_scheduler_summary(connection: sqlite3.Connection, tables: set[str]) ->
             "SELECT COUNT(*) FROM catalog_deferred_api_lots WHERE processed_at IS NULL"
         ).fetchone()[0]
         print(f"  deferred API lot updates still pending: {pending}")
-
-    if "auction_discovery_runs" in tables:
-        discovery_rows = connection.execute(
-            """
-            SELECT status, COUNT(*) AS runs,
-                   COALESCE(SUM(pages_completed), 0) AS pages_completed
-            FROM auction_discovery_runs
-            GROUP BY status
-            ORDER BY status
-            """
-        ).fetchall()
-        for row in discovery_rows:
-            print(
-                f"  global discovery / {row['status']}: "
-                f"runs={row['runs']}, pages_completed={row['pages_completed']}"
-            )
-
-    if "auction_bootstrap_queue" in tables:
-        queue_rows = connection.execute(
-            """
-            SELECT status, COUNT(*) AS item_count
-            FROM auction_bootstrap_queue
-            GROUP BY status
-            ORDER BY status
-            """
-        ).fetchall()
-        print("  Bootstrap queue:")
-        if not queue_rows:
-            print("    no auctions queued")
-        for row in queue_rows:
-            print(f"    {row['status']}: {row['item_count']}")
 
 
 def print_price_summary(connection: sqlite3.Connection, tables: set[str]) -> None:
@@ -404,7 +366,7 @@ def print_source_observation_samples(
             )
 
     print(
-        "  Auction-level scheduled start: not stored in schema v19; "
+        "  Auction-level scheduled start: not stored in schema v18; "
         "per-lot end/countdown fields are not a substitute."
     )
 
