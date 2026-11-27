@@ -66,6 +66,7 @@ def test_failures_use_bounded_exponential_backoff_without_success_stamp(tmp_path
         schedule.mark_failed("auction-1", at=NOW, error="network"),
         schedule.mark_failed("auction-1", at=NOW, error="network"),
         schedule.mark_failed("auction-1", at=NOW, error="network"),
+        schedule.mark_failed("auction-1", at=NOW, error="network"),
     ]
 
     assert delays[:4] == [
