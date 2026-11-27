@@ -19,7 +19,7 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlsplit, urlunsplit
 
 from bs4 import BeautifulSoup, Tag
 
@@ -56,6 +56,36 @@ DEFAULT_RAW_DIR = Path("data/raw/collector")
 KEYRING_SERVICE = "exleasingcar-archive"
 KEYRING_USERNAME_KEY = "login"
 KEYRING_PASSWORD_KEY = "password"
+
+
+class CataloguePageMismatchError(ValueError):
+    """A requested auction catalogue returned a different page."""
+
+    def __init__(
+        self,
+        expected_auction_id: str,
+        received_auction_id: str | None,
+        page_kind: str,
+    ) -> None:
+        self.expected_auction_id = expected_auction_id
+        self.received_auction_id = received_auction_id
+        self.page_kind = page_kind
+        super().__init__(
+            "Catalogue/auction mismatch: "
+            f"expected {expected_auction_id}, received {received_auction_id!r} "
+            f"(page_kind={page_kind})"
+        )
+
+
+def _safe_diagnostic_url(value: str | None) -> str | None:
+    """Keep URL paths for diagnostics without persisting query strings or fragments."""
+    if not value:
+        return None
+    try:
+        parts = urlsplit(value)
+    except ValueError:
+        return None
+    return urlunsplit((parts.scheme, parts.netloc, parts.path, "", ""))
 
 
 def _next_unvisited_catalog_page_url(
@@ -1767,7 +1797,11 @@ class ExleasingcarCollector:
             response_start = len(self.recorder.responses)
             error_start = len(self.recorder.errors)
             try:
-                page.goto(current_url, wait_until="domcontentloaded", timeout=45_000)
+                navigation_response = page.goto(
+                    current_url,
+                    wait_until="domcontentloaded",
+                    timeout=45_000,
+                )
                 _wait_for_dynamic_content(page)
                 if not self.recorder.wait_for_pending(page):
                     print(
@@ -1787,19 +1821,52 @@ class ExleasingcarCollector:
                 break
 
             html = page.content()
+            page_observed_at = datetime.now(timezone.utc)
+            final_url = getattr(page, "url", None) or current_url
+            catalog = parse_auction_catalog_metadata(html, final_url)
+            page_status = parse_auction_list(html, final_url)
+            if catalog.exleasingcar_auction_id != listing.exleasingcar_auction_id:
+                auction_cards = parse_auction_listings(html, final_url)
+                page_kind = "auction_list" if auction_cards else "unknown"
+                response_status = (
+                    getattr(navigation_response, "status", None)
+                    if navigation_response is not None
+                    else None
+                )
+                response_url = (
+                    getattr(navigation_response, "url", None)
+                    if navigation_response is not None
+                    else None
+                )
+                diagnostic = {
+                    "expected_auction_id": listing.exleasingcar_auction_id,
+                    "received_auction_id": catalog.exleasingcar_auction_id,
+                    "page_kind": page_kind,
+                    "auction_cards_found": len(auction_cards),
+                    "requested_url": _safe_diagnostic_url(current_url),
+                    "final_url": _safe_diagnostic_url(final_url),
+                    "response_url": _safe_diagnostic_url(response_url),
+                    "http_status": response_status,
+                    "observed_at": page_observed_at.isoformat(),
+                }
+                self._save_html(
+                    auction_dir / f"unexpected_catalogue_page_{page_number:03d}.html",
+                    html,
+                )
+                (auction_dir / f"catalogue_mismatch_page_{page_number:03d}.json").write_text(
+                    json.dumps(diagnostic, ensure_ascii=False, indent=2) + "\\n",
+                    encoding="utf-8",
+                )
+                raise CataloguePageMismatchError(
+                    listing.exleasingcar_auction_id,
+                    catalog.exleasingcar_auction_id,
+                    page_kind,
+                )
+
             self._save_html(
                 auction_dir / f"catalog_page_{page_number:03d}.html",
                 html,
             )
-            page_observed_at = datetime.now(timezone.utc)
-            catalog = parse_auction_catalog_metadata(html, page.url)
-            page_status = parse_auction_list(html, page.url)
-            if catalog.exleasingcar_auction_id != listing.exleasingcar_auction_id:
-                raise ValueError(
-                    "Catalogue/auction mismatch: "
-                    f"expected {listing.exleasingcar_auction_id}, "
-                    f"received {catalog.exleasingcar_auction_id!r}"
-                )
 
             # Persist parsed lot rows before committing the page cursor. If the
             # process stops here, the page is replayed and these upserts are safe.
@@ -2386,6 +2453,18 @@ class ExleasingcarCollector:
                                     max_detail_pages=max_detail_pages,
                                     run_budget=run_budget,
                                 )
+                            except CataloguePageMismatchError as exc:
+                                self.database.mark_bootstrap_auction_failed(
+                                    listing.exleasingcar_auction_id,
+                                    error_code="catalogue_mismatch",
+                                    retry_after_seconds=1_800,
+                                )
+                                print(
+                                    f"  Deferred auction {listing.exleasingcar_auction_id}: "
+                                    f"{exc}. Retry is scheduled in 30 minutes; "
+                                    "continuing with the next auction."
+                                )
+                                continue
                             except Exception:
                                 self.database.mark_bootstrap_auction_failed(
                                     listing.exleasingcar_auction_id,
@@ -2465,13 +2544,20 @@ class ExleasingcarCollector:
                         selected_auctions = selected_auctions[:max_auctions]
 
                     for listing in selected_auctions:
-                        page_count, lot_count, detail_count = self._collect_auction(
-                            listing,
-                            page,
-                            snapshot_dir,
-                            max_detail_pages=max_detail_pages,
-                            run_budget=run_budget,
-                        )
+                        try:
+                            page_count, lot_count, detail_count = self._collect_auction(
+                                listing,
+                                page,
+                                snapshot_dir,
+                                max_detail_pages=max_detail_pages,
+                                run_budget=run_budget,
+                            )
+                        except CataloguePageMismatchError as exc:
+                            print(
+                                f"  Skipped auction {listing.exleasingcar_auction_id}: "
+                                f"{exc}. Its catalogue scan remains resumable."
+                            )
+                            continue
                         auctions_processed += 1
                         pages_processed += page_count
                         lots_seen += lot_count
