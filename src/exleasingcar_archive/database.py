@@ -4770,6 +4770,7 @@ class ArchiveDatabase:
         if error_code not in {
             "page_navigation_failed",
             "authentication_required",
+            "catalogue_mismatch",
             "collection_error",
         }:
             raise ValueError("unsupported bootstrap error_code")
