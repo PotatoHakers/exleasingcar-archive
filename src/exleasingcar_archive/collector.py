@@ -30,6 +30,7 @@ from .ingestion import AuctionContext, LotMetadata, store_car_updates
 from .metadata_parser import (
     ParsedAuctionListing,
     ParsedAuctionLotMetadata,
+    ParsedCatalogPagination,
     parse_auction_catalog_metadata,
     parse_auction_listings,
     parse_catalog_pagination,
@@ -55,6 +56,29 @@ DEFAULT_RAW_DIR = Path("data/raw/collector")
 KEYRING_SERVICE = "exleasingcar-archive"
 KEYRING_USERNAME_KEY = "login"
 KEYRING_PASSWORD_KEY = "password"
+
+
+def _next_unvisited_catalog_page_url(
+    pagination: ParsedCatalogPagination,
+    *,
+    current_page_url: str,
+    visited_page_urls: set[str],
+) -> str | None:
+    """Choose a forward pagination URL without revisiting saved pages.
+
+    Some catalogue pages advertise a stale pagination-next link that
+    points to a page already checkpointed in SQLite. Prefer that link only
+    while it is new, then inspect the remaining numbered links in page order.
+    """
+    candidates = (pagination.next_page_url, *pagination.page_urls)
+    considered: set[str] = set()
+    for candidate in candidates:
+        if not candidate or candidate in considered:
+            continue
+        considered.add(candidate)
+        if candidate != current_page_url and candidate not in visited_page_urls:
+            return candidate
+    return None
 
 
 @dataclass(frozen=True, slots=True)
@@ -1782,15 +1806,11 @@ class ExleasingcarCollector:
             self._upsert_catalog_lots(auction, catalog.lots, page_observed_at)
             page_detail_urls = extract_vehicle_detail_urls(html, page.url)
             pagination = parse_catalog_pagination(html, page.url)
-            next_url = pagination.next_page_url
-            if next_url is None:
-                next_candidates = [
-                    candidate
-                    for candidate in pagination.page_urls
-                    if candidate not in visited_urls
-                    and candidate != current_url
-                ]
-                next_url = next_candidates[0] if next_candidates else None
+            next_url = _next_unvisited_catalog_page_url(
+                pagination,
+                current_page_url=current_url,
+                visited_page_urls=visited_urls,
+            )
 
             next_number = page_number + 1 if next_url is not None else None
             page_data = _serialize_catalog_page_data(
