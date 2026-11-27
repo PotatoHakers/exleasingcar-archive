@@ -12,7 +12,6 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-
 DEFAULT_REFRESH_INTERVAL = timedelta(hours=12)
 MAX_RETRY_DELAY = timedelta(hours=6)
 
@@ -79,9 +78,7 @@ class RoutineSchedule:
                 """
                 INSERT INTO routine_refresh_schedule (auction_id, next_due_at)
                 VALUES (?, ?)
-                ON CONFLICT(auction_id) DO UPDATE SET
-                    next_due_at = MIN(routine_refresh_schedule.next_due_at,
-                                      excluded.next_due_at)
+                ON CONFLICT(auction_id) DO NOTHING
                 """,
                 (auction_id.strip(), due),
             )
