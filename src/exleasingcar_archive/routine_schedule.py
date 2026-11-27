@@ -79,9 +79,7 @@ class RoutineSchedule:
                 """
                 INSERT INTO routine_refresh_schedule (auction_id, next_due_at)
                 VALUES (?, ?)
-                ON CONFLICT(auction_id) DO UPDATE SET
-                    next_due_at = MIN(routine_refresh_schedule.next_due_at,
-                                      excluded.next_due_at)
+                ON CONFLICT(auction_id) DO NOTHING
                 """,
                 (auction_id.strip(), due),
             )
